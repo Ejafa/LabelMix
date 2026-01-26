@@ -35,8 +35,11 @@ def update_summary(
         lr=None,
         write_header=False,
         log_wandb=False,
+        step=None,
 ):
     rowd = OrderedDict(epoch=epoch)
+    if step is not None:
+        rowd['step'] = step
     rowd.update([('train_' + k, v) for k, v in train_metrics.items()])
     if eval_metrics:
         rowd.update([('eval_' + k, v) for k, v in eval_metrics.items()])

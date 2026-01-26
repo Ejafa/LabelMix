@@ -1,0 +1,71 @@
+# ==========================================
+# Training Loop (Baseline)
+# ==========================================
+
+train_mode: step
+
+batch_size: 128
+
+# ==========================================
+# Dataset Parameters
+# ==========================================
+dataset: hfds/uoft-cs/cifar100
+data_dir: ./data/cifar100
+train_split: train
+val_split: test
+input_key: img
+target_key: fine_label
+dataset_download: true
+
+mean: [0, 0, 0]
+std: [1, 1, 1]
+
+# ==========================================
+# Model Parameters (MobileNetV4 Small)
+# ==========================================
+model: mobilenetv4_conv_small
+pretrained: false
+num_classes: 100
+img_size: 256
+
+# ==========================================
+# Device & Distributed Parameters
+# ==========================================
+device: cuda
+amp: true
+amp_dtype: bfloat16
+local_rank: 0
+
+# ==========================================
+# Optimization
+# ==========================================
+opt: nadamw
+weight_decay: 0.1
+clip_grad: 5.0
+
+# ==========================================
+# Learning Rate Schedule
+# ==========================================
+sched: cosine
+sched_on_updates: true
+lr: 0.0003
+warmup_lr: 0.0
+
+
+# EMA
+model_ema: true
+model_ema_decay: 0.999
+
+# ==========================================
+# Miscellaneous
+# ==========================================
+seed: 42
+workers: 8
+pin_mem: false
+no_prefetcher: true
+no_aug: true
+
+output: ./output_cifar100_baseline_mnv4
+experiment: mnv4_baseline_cifar100
+log_wandb: true
+wandb_project: rankmix
