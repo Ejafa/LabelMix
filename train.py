@@ -1108,6 +1108,7 @@ def main():
                 mixup_fn=mixup_fn,
                 validate_loss_fn=validate_loss_fn,
                 start_step=start_step,
+                naflex_mode=naflex_mode,
             )
             if saver is not None:
                 best_metric = saver.best_metric
@@ -1255,6 +1256,7 @@ def train_steps(
         mixup_fn=None,
         validate_loss_fn=None,
         start_step=0,
+        naflex_mode=False,
 ):
     model.train()
 
@@ -1271,7 +1273,7 @@ def train_steps(
         train_iter.iterator = iter(loader_train)
 
     step = start_step
-    micro_batch_idx = 0
+    micro_batch_idx = start_step * accum_steps
 
     losses_m = utils.AverageMeter()
     data_time_m = utils.AverageMeter()
@@ -1303,16 +1305,18 @@ def train_steps(
         micro_batch_idx += 1
         need_update = (micro_batch_idx % accum_steps == 0)
 
-        def forward_backward():
+        def _forward():
             with amp_autocast():
                 result = task(input, target)
                 loss = result['loss']
                 if accum_steps > 1:
                     loss /= accum_steps
+            return loss
 
+        def _backward(_loss):
             if loss_scaler is not None:
                 loss_scaler(
-                    loss,
+                    _loss,
                     optimizer,
                     clip_grad=args.clip_grad,
                     clip_mode=args.clip_mode,
@@ -1321,7 +1325,7 @@ def train_steps(
                     need_update=need_update,
                 )
             else:
-                loss.backward(create_graph=second_order)
+                _loss.backward(create_graph=second_order)
                 if need_update:
                     if args.clip_grad is not None:
                         utils.dispatch_clip_grad(
@@ -1330,20 +1334,56 @@ def train_steps(
                             mode=args.clip_mode,
                         )
                     optimizer.step()
-            return loss
 
-        if has_no_sync and not need_update:
-            with model.no_sync():
-                loss = forward_backward()
-        else:
-            loss = forward_backward()
+        if naflex_mode:
+            if isinstance(input, dict) and 'patches' in input:
+                batch_size = input['patches'].shape[0]
+            else:
+                batch_size = input.shape[0]
 
-        if isinstance(input, torch.Tensor):
-            batch_size = input.size(0)
-        elif isinstance(input, dict) and 'patches' in input:
-            batch_size = input['patches'].shape[0]
+            if not args.naflex_loss_scale or args.naflex_loss_scale == 'none':
+                local_scale = 1.0
+            else:
+                local_scale = (batch_size / args.batch_size)
+                if args.naflex_loss_scale == 'sqrt':
+                    local_scale = local_scale ** 0.5
+
+            if args.distributed:
+                global_batch_size = utils.reduce_tensor(
+                    torch.tensor(batch_size, device=device, dtype=torch.float32),
+                    1
+                )
+                dist_scale = args.world_size * batch_size / global_batch_size
+            else:
+                dist_scale = None
+
+            if has_no_sync and not need_update:
+                with model.no_sync():
+                    loss = _forward()
+                    scaled_loss = local_scale * loss
+                    if dist_scale is not None:
+                        scaled_loss *= dist_scale
+                    _backward(scaled_loss)
+            else:
+                loss = _forward()
+                scaled_loss = local_scale * loss
+                if dist_scale is not None:
+                    scaled_loss *= dist_scale
+                _backward(scaled_loss)
         else:
-            batch_size = target.size(0)
+            if isinstance(input, torch.Tensor):
+                batch_size = input.size(0)
+            else:
+                batch_size = target.size(0)
+
+            if has_no_sync and not need_update:
+                with model.no_sync():
+                    loss = _forward()
+                    _backward(loss)
+            else:
+                loss = _forward()
+                _backward(loss)
+
         losses_m.update(loss.item() * accum_steps, batch_size)
 
         if not need_update:
