@@ -15,21 +15,30 @@ from .tanh_lr import TanhLRScheduler
 
 def scheduler_kwargs(cfg, decreasing_metric: Optional[bool] = None):
     """ cfg/argparse to kwargs helper
-    Convert scheduler args in argparse args or cfg (.dot) like object to keyword args.
+    Refactored to prefer step-based arguments if available.
     """
     eval_metric = getattr(cfg, 'eval_metric', 'top1')
     if decreasing_metric is not None:
         plateau_mode = 'min' if decreasing_metric else 'max'
     else:
         plateau_mode = 'min' if 'loss' in eval_metric else 'max'
+
+    # Support both step-based and epoch-based arguments
+    num_steps = getattr(cfg, 'num_steps', getattr(cfg, 'epochs', 300))
+    warmup_steps = getattr(cfg, 'warmup_steps', getattr(cfg, 'warmup_epochs', 5))
+    decay_steps = getattr(cfg, 'decay_steps', getattr(cfg, 'decay_epochs', 90))
+    cooldown_steps = getattr(cfg, 'cooldown_steps', getattr(cfg, 'cooldown_epochs', 0))
+    patience_steps = getattr(cfg, 'patience_steps', getattr(cfg, 'patience_epochs', 10))
+    decay_milestones = getattr(cfg, 'decay_milestones', [90, 180, 270])
+
     kwargs = dict(
         sched=cfg.sched,
-        num_epochs=getattr(cfg, 'epochs', 100),
-        decay_epochs=getattr(cfg, 'decay_epochs', 30),
-        decay_milestones=getattr(cfg, 'decay_milestones', [30, 60]),
-        warmup_epochs=getattr(cfg, 'warmup_epochs', 5),
-        cooldown_epochs=getattr(cfg, 'cooldown_epochs', 0),
-        patience_epochs=getattr(cfg, 'patience_epochs', 10),
+        num_steps=num_steps,
+        decay_steps=decay_steps,
+        decay_milestones=decay_milestones,
+        warmup_steps=warmup_steps,
+        cooldown_steps=cooldown_steps,
+        patience_steps=patience_steps,
         decay_rate=getattr(cfg, 'decay_rate', 0.1),
         min_lr=getattr(cfg, 'min_lr', 0.),
         warmup_lr=getattr(cfg, 'warmup_lr', 1e-5),
@@ -63,15 +72,15 @@ def create_scheduler(
 def create_scheduler_v2(
         optimizer: Optimizer,
         sched: str = 'cosine',
-        num_epochs: int = 300,
-        decay_epochs: int = 90,
+        num_steps: int = 300,
+        decay_steps: int = 90,
         decay_milestones: List[int] = (90, 180, 270),
-        cooldown_epochs: int = 0,
-        patience_epochs: int = 10,
+        cooldown_steps: int = 0,
+        patience_steps: int = 10,
         decay_rate: float = 0.1,
         min_lr: float = 0.,
         warmup_lr: float = 1e-5,
-        warmup_epochs: int = 0,
+        warmup_steps: int = 0,
         warmup_prefix: bool = False,
         noise: Union[float, List[float]] = None,
         noise_pct: float = 0.67,
@@ -85,18 +94,21 @@ def create_scheduler_v2(
         step_on_epochs: bool = True,
         updates_per_epoch: int = 0,
 ):
-    t_initial = num_epochs
-    warmup_t = warmup_epochs
-    decay_t = decay_epochs
-    cooldown_t = cooldown_epochs
+    # Initialize "time" variables (can be epochs or steps)
+    t_initial = num_steps
+    warmup_t = warmup_steps
+    decay_t = decay_steps
+    cooldown_t = cooldown_steps
 
     if not step_on_epochs:
-        assert updates_per_epoch > 0, 'updates_per_epoch must be set to number of dataloader batches'
-        t_initial = t_initial * updates_per_epoch
-        warmup_t = warmup_t * updates_per_epoch
-        decay_t = decay_t * updates_per_epoch
-        decay_milestones = [d * updates_per_epoch for d in decay_milestones]
-        cooldown_t = cooldown_t * updates_per_epoch
+        # If explicitly step-based, we assume inputs are already steps.
+        # Only scale if legacy behavior (updates_per_epoch > 1) is detected.
+        if updates_per_epoch > 1:
+            t_initial = t_initial * updates_per_epoch
+            warmup_t = warmup_t * updates_per_epoch
+            decay_t = decay_t * updates_per_epoch
+            decay_milestones = [d * updates_per_epoch for d in decay_milestones]
+            cooldown_t = cooldown_t * updates_per_epoch
 
     # warmup args
     warmup_args = dict(
@@ -170,12 +182,11 @@ def create_scheduler_v2(
             **noise_args,
         )
     elif sched == 'plateau':
-        assert step_on_epochs, 'Plateau LR only supports step per epoch.'
         warmup_args.pop('warmup_prefix', False)
         lr_scheduler = PlateauLRScheduler(
             optimizer,
             decay_rate=decay_rate,
-            patience_t=patience_epochs,
+            patience_t=patience_steps,
             cooldown_t=0,
             **warmup_args,
             lr_min=min_lr,
@@ -196,15 +207,18 @@ def create_scheduler_v2(
         )
 
     if hasattr(lr_scheduler, 'get_cycle_length'):
-        # For cycle based schedulers (cosine, tanh, poly) recalculate total epochs w/ cycles & cooldown
+        # For cycle based schedulers (cosine, tanh, poly) recalculate total steps w/ cycles & cooldown
         # NOTE: Warmup prefix added in get_cycle_lengths() if enabled
         t_with_cycles_and_cooldown = lr_scheduler.get_cycle_length() + cooldown_t
         if step_on_epochs:
-            num_epochs = t_with_cycles_and_cooldown
+            num_steps = t_with_cycles_and_cooldown
         else:
-            num_epochs = t_with_cycles_and_cooldown // updates_per_epoch
+            if updates_per_epoch > 1:
+                num_steps = t_with_cycles_and_cooldown // updates_per_epoch
+            else:
+                num_steps = t_with_cycles_and_cooldown
     else:
         if warmup_prefix:
-            num_epochs += warmup_epochs
+            num_steps += warmup_steps
 
-    return lr_scheduler, num_epochs
+    return lr_scheduler, num_steps

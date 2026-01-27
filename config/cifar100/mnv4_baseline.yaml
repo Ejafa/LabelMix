@@ -1,10 +1,39 @@
 # ==========================================
-# Training Loop (Baseline)
+# Training Loop (Step-Based)
 # ==========================================
+num_steps: 9000       
+num_logs: 1000             
+num_evals: 100                     
+num_saves: 10              
+batch_size: 128         
+warmup_steps: 1000      
+patience_steps: 1000  
+warmup_prefix: true
 
-train_mode: step
+# ==========================================
+# Scheduler (Step-Based)
+# ==========================================
+sched: cosine
+lr: 3.0e-4                    
+warmup_lr: 0.0
 
-batch_size: 128
+# ==========================================
+# Optimization
+# ==========================================
+opt: nadamw
+weight_decay: 0.1
+clip_grad: 5.0
+
+
+# ==========================================
+# Model Parameters (MobileNetV4 Small)
+# ==========================================
+model: mobilenetv4_conv_small
+pretrained: false
+num_classes: 100
+img_size: 256
+model_ema: true
+model_ema_decay: 0.999
 
 # ==========================================
 # Dataset Parameters
@@ -20,51 +49,32 @@ dataset_download: true
 mean: [0, 0, 0]
 std: [1, 1, 1]
 
-# ==========================================
-# Model Parameters (MobileNetV4 Small)
-# ==========================================
-model: mobilenetv4_conv_small
-pretrained: false
-num_classes: 100
-img_size: 256
+# # ==========================================
+# # Augmentation
+# # ==========================================
+# aa: rand-m9-mstd0.5-inc1 
+# mixup: 0.8
+# cutmix: 1.0
+# mixup_prob: 1.0
+# mixup_switch_prob: 0.5
+# mixup_mode: batch
+# smoothing: 0.1
+# mixup_off_steps: 0      # Optional: Turn off mixup after N steps
 
 # ==========================================
-# Device & Distributed Parameters
+# Device & Distributed
 # ==========================================
 device: cuda
 amp: true
 amp_dtype: bfloat16
-local_rank: 0
-
-# ==========================================
-# Optimization
-# ==========================================
-opt: nadamw
-weight_decay: 0.1
-clip_grad: 5.0
-
-# ==========================================
-# Learning Rate Schedule
-# ==========================================
-sched: cosine
-sched_on_updates: true
-lr: 0.0003
-warmup_lr: 0.0
-
-
-# EMA
-model_ema: true
-model_ema_decay: 0.999
-
-# ==========================================
-# Miscellaneous
-# ==========================================
-seed: 42
 workers: 8
 pin_mem: false
 no_prefetcher: true
 no_aug: true
 
+# ==========================================
+# Logging
+# ==========================================
 output: ./output_cifar100_baseline_mnv4
 experiment: mnv4_baseline_cifar100
 log_wandb: true

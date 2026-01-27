@@ -175,9 +175,9 @@ def resume_checkpoint(
         log_info: Whether to log loading info.
 
     Returns:
-        Resume epoch number if available, else None.
+        Resume step number if available, else None.
     """
-    resume_epoch = None
+    resume_step = None
     if os.path.isfile(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
@@ -196,18 +196,20 @@ def resume_checkpoint(
                     _logger.info('Restoring AMP loss scaler state from checkpoint...')
                 loss_scaler.load_state_dict(checkpoint[loss_scaler.state_dict_key])
 
-            if 'epoch' in checkpoint:
-                resume_epoch = checkpoint['epoch']
-                if 'version' in checkpoint and checkpoint['version'] > 1:
-                    resume_epoch += 1  # start at the next epoch, old checkpoints incremented before save
-
+            if 'step' in checkpoint:
+                resume_step = checkpoint['step']
                 if log_info:
-                    _logger.info("Loaded checkpoint '{}' (epoch {})".format(checkpoint_path, checkpoint['epoch']))
+                    _logger.info("Loaded checkpoint '{}' (step {})".format(checkpoint_path, checkpoint['step']))
+            elif 'epoch' in checkpoint:
+                if log_info:
+                    _logger.warning(
+                        "Loading epoch-based checkpoint into step-based training. Starting at step 0.")
+                resume_step = 0
         else:
             model.load_state_dict(checkpoint)
             if log_info:
                 _logger.info("Loaded checkpoint '{}'".format(checkpoint_path))
-        return resume_epoch
+        return resume_step
     else:
         _logger.error("No checkpoint found at '{}'".format(checkpoint_path))
         raise FileNotFoundError()

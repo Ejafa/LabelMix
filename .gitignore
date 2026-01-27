@@ -119,3 +119,13 @@ Testing notebook.ipynb
 /*.png
 /*.zip
 /*.tar.*
+
+# wandb, logs, data and output dirs
+wandb/
+~
+.github
+.vscode/
+.DS_Store
+logs/
+output*/
+data/

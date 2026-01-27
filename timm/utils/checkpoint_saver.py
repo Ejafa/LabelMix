@@ -45,7 +45,7 @@ class CheckpointSaver:
 
         # state
         self.checkpoint_files = []  # (filename, metric) tuples in order of decreasing betterness
-        self.best_epoch = None
+        self.best_step = None
         self.best_metric = None
         self.curr_recovery_file = ''
         self.prev_recovery_file = ''
@@ -84,13 +84,13 @@ class CheckpointSaver:
                 self.can_hardlink = False
         shutil.copy2(src, dst)
 
-    def _save(self, save_path, epoch, metric=None):
+    def _save(self, save_path, step, metric=None):
         save_state = {
-            'epoch': epoch,
+            'step': step,
             'arch': type(self.model).__name__.lower(),
             'state_dict': get_state_dict(self.model, self.unwrap_fn),
             'optimizer': self.optimizer.state_dict(),
-            'version': 2,  # version < 2 increments epoch before save
+            'version': 3,  # version >= 3 uses step-based indexing
         }
         if self.args is not None:
             save_state['arch'] = self.args.model
@@ -117,11 +117,11 @@ class CheckpointSaver:
                 _logger.error("Exception '{}' while deleting checkpoint".format(e))
         self.checkpoint_files = self.checkpoint_files[:delete_index]
 
-    def save_checkpoint(self, epoch, metric=None):
-        assert epoch >= 0
+    def save_checkpoint(self, step, metric=None):
+        assert step >= 0
         tmp_save_path = os.path.join(self.checkpoint_dir, 'tmp' + self.extension)
         last_save_path = os.path.join(self.checkpoint_dir, 'last' + self.extension)
-        self._save(tmp_save_path, epoch, metric)
+        self._save(tmp_save_path, step, metric)
         self._replace(tmp_save_path, last_save_path)
 
         worst_file = self.checkpoint_files[-1] if self.checkpoint_files else None
@@ -132,7 +132,7 @@ class CheckpointSaver:
         ):
             if len(self.checkpoint_files) >= self.max_history:
                 self._cleanup_checkpoints(1)
-            filename = '-'.join([self.save_prefix, str(epoch)]) + self.extension
+            filename = '-'.join([self.save_prefix, str(step)]) + self.extension
             save_path = os.path.join(self.checkpoint_dir, filename)
             self._duplicate(last_save_path, save_path)
 
@@ -149,19 +149,19 @@ class CheckpointSaver:
             _logger.info(checkpoints_str)
 
             if metric is not None and (self.best_metric is None or self.cmp(metric, self.best_metric)):
-                self.best_epoch = epoch
+                self.best_step = step
                 self.best_metric = metric
                 best_save_path = os.path.join(self.checkpoint_dir, 'model_best' + self.extension)
                 self._duplicate(last_save_path, best_save_path)
 
-        return (None, None) if self.best_metric is None else (self.best_metric, self.best_epoch)
+        return (None, None) if self.best_metric is None else (self.best_metric, self.best_step)
 
-    def save_recovery(self, epoch, batch_idx=0):
-        assert epoch >= 0
+    def save_recovery(self, step, batch_idx=0):
+        assert step >= 0
         tmp_save_path = os.path.join(self.recovery_dir, 'recovery_tmp' + self.extension)
-        self._save(tmp_save_path, epoch)
+        self._save(tmp_save_path, step)
 
-        filename = '-'.join([self.recovery_prefix, str(epoch), str(batch_idx)]) + self.extension
+        filename = '-'.join([self.recovery_prefix, str(step), str(batch_idx)]) + self.extension
         save_path = os.path.join(self.recovery_dir, filename)
         self._replace(tmp_save_path, save_path)
 

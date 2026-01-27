@@ -46,7 +46,10 @@ def update_summary(
     if lr is not None:
         rowd['lr'] = lr
     if log_wandb:
-        wandb.log(rowd)
+        if step is not None:
+            wandb.log(rowd, step=step)
+        else:
+            wandb.log(rowd)
     with open(filename, mode='a') as cf:
         dw = csv.DictWriter(cf, fieldnames=rowd.keys())
         if write_header:  # first iteration (epoch == 1 can't be used)

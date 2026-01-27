@@ -65,29 +65,6 @@ has_compile = hasattr(torch, 'compile')
 
 _logger = logging.getLogger('train')
 
-
-class InfiniteLoader:
-    """Wraps a dataloader to iterate indefinitely, handling epoch reshuffling."""
-    def __init__(self, loader):
-        self.loader = loader
-        self.iterator = iter(loader)
-        self.epoch = 0
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        try:
-            return next(self.iterator)
-        except StopIteration:
-            self.epoch += 1
-            if hasattr(self.loader.dataset, 'set_epoch'):
-                self.loader.dataset.set_epoch(self.epoch)
-            elif hasattr(self.loader.sampler, 'set_epoch'):
-                self.loader.sampler.set_epoch(self.epoch)
-            self.iterator = iter(self.loader)
-            return next(self.iterator)
-
 # The first arg parser parses out only the --config argument, this argument is used to
 # load a yaml file containing key-values that override the defaults for the main parser below
 config_parser = parser = argparse.ArgumentParser(description='Training Config', add_help=False)
@@ -245,7 +222,7 @@ group.add_argument('--lr-base-size', type=int, default=256, metavar='DIV',
 group.add_argument('--lr-base-scale', type=str, default='', metavar='SCALE',
                    help='base learning rate vs batch_size scaling ("linear", "sqrt", based on opt if empty)')
 group.add_argument('--lr-noise', type=float, nargs='+', default=None, metavar='pct, pct',
-                   help='learning rate noise on/off epoch percentages')
+                   help='learning rate noise on/off step percentages')
 group.add_argument('--lr-noise-pct', type=float, default=0.67, metavar='PERCENT',
                    help='learning rate noise limit percent (default: 0.67)')
 group.add_argument('--lr-noise-std', type=float, default=1.0, metavar='STDDEV',
@@ -262,39 +239,24 @@ group.add_argument('--warmup-lr', type=float, default=1e-5, metavar='LR',
                    help='warmup learning rate (default: 1e-5)')
 group.add_argument('--min-lr', type=float, default=0, metavar='LR',
                    help='lower lr bound for cyclic schedulers that hit 0 (default: 0)')
-group.add_argument('--epochs', type=int, default=300, metavar='N',
-                   help='number of epochs to train (default: 300)')
-group.add_argument('--epoch-repeats', type=float, default=0., metavar='N',
-                   help='epoch repeat multiplier (number of times to repeat dataset epoch per train epoch).')
-group.add_argument('--start-epoch', default=None, type=int, metavar='N',
-                   help='manual epoch number (useful on restarts)')
+group.add_argument('--num-steps', type=int, default=None, metavar='N',
+                   help='number of optimization steps to train (default: auto)')
+group.add_argument('--start-step', default=None, type=int, metavar='N',
+                   help='manual step number (useful on restarts)')
 group.add_argument('--decay-milestones', default=[90, 180, 270], type=int, nargs='+', metavar="MILESTONES",
-                   help='list of decay epoch indices for multistep lr. must be increasing')
-group.add_argument('--decay-epochs', type=float, default=90, metavar='N',
-                   help='epoch interval to decay LR')
-group.add_argument('--warmup-epochs', type=int, default=5, metavar='N',
-                   help='epochs to warmup LR, if scheduler supports')
+                   help='list of decay step indices for multistep lr. must be increasing')
+group.add_argument('--decay-steps', type=float, default=90, metavar='N',
+                   help='step interval to decay LR')
+group.add_argument('--warmup-steps', type=int, default=5, metavar='N',
+                   help='steps to warmup LR, if scheduler supports')
 group.add_argument('--warmup-prefix', action='store_true', default=False,
                    help='Exclude warmup period from decay schedule.'),
-group.add_argument('--cooldown-epochs', type=int, default=0, metavar='N',
-                   help='epochs to cooldown LR at min_lr, after cyclic schedule ends')
-group.add_argument('--patience-epochs', type=int, default=10, metavar='N',
-                   help='patience epochs for Plateau LR scheduler (default: 10)')
+group.add_argument('--cooldown-steps', type=int, default=0, metavar='N',
+                   help='steps to cooldown LR at min_lr, after cyclic schedule ends')
+group.add_argument('--patience-steps', type=int, default=10, metavar='N',
+                   help='patience steps for Plateau LR scheduler (default: 10)')
 group.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE',
                    help='LR decay rate (default: 0.1)')
-
-# Step-based training parameters
-group = parser.add_argument_group('Step-based Training parameters')
-group.add_argument('--max-steps', type=int, default=None, metavar='N',
-                   help='Total number of training steps (overrides --epochs)')
-group.add_argument('--n-log', type=int, default=50, metavar='N',
-                   help='Log training metrics every N steps')
-group.add_argument('--n-eval', type=int, default=None, metavar='N',
-                   help='Run evaluation every N steps')
-group.add_argument('--n-checkpoint', type=int, default=None, metavar='N',
-                   help='Save checkpoint every N steps')
-group.add_argument('--n-save', type=int, default=None, metavar='N',
-                   help='Save recovery checkpoint every N steps')
 
 # Augmentation & regularization parameters
 group = parser.add_argument_group('Augmentation and regularization parameters')
@@ -354,8 +316,8 @@ group.add_argument('--mixup-switch-prob', type=float, default=0.5,
                    help='Probability of switching to cutmix when both mixup and cutmix enabled')
 group.add_argument('--mixup-mode', type=str, default='batch',
                    help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
-group.add_argument('--mixup-off-epoch', default=0, type=int, metavar='N',
-                   help='Turn off mixup after this epoch, disabled if 0 (default: 0)')
+group.add_argument('--mixup-off-step', default=0, type=int, metavar='N',
+                   help='Turn off mixup after this step, disabled if 0 (default: 0)')
 group.add_argument('--smoothing', type=float, default=0.1,
                    help='Label smoothing (default: 0.1)')
 group.add_argument('--train-interpolation', type=str, default='random',
@@ -378,7 +340,7 @@ group.add_argument('--bn-eps', type=float, default=None,
 group.add_argument('--sync-bn', action='store_true',
                    help='Enable synchronized BatchNorm.')
 group.add_argument('--dist-bn', type=str, default='reduce',
-                   help='Distribute BatchNorm stats between nodes after each epoch ("broadcast", "reduce", or "")')
+                   help='Distribute BatchNorm stats between nodes after each validation interval ("broadcast", "reduce", or "")')
 group.add_argument('--split-bn', action='store_true',
                    help='Enable separate BN layers per augmentation split.')
 
@@ -400,11 +362,17 @@ group.add_argument('--seed', type=int, default=42, metavar='S',
 group.add_argument('--worker-seeding', type=str, default='all',
                    help='worker seed mode (default: all)')
 group.add_argument('--log-interval', type=int, default=50, metavar='N',
-                   help='how many batches to wait before logging training status')
+                   help='how many steps to wait before logging training status')
+group.add_argument('--num-logs', type=int, default=None, metavar='N',
+                   help='Number of logging events over the total training duration (overrides log-interval)')
 group.add_argument('--val-interval', type=int, default=1, metavar='N',
-                   help='how many epochs between validation and checkpointing')
+                   help='how many steps between validation')
+group.add_argument('--num-evals', type=int, default=None, metavar='N',
+                   help='Number of evaluations over the total training duration (overrides val-interval)')
+group.add_argument('--num-saves', type=int, default=None, metavar='N',
+                   help='Number of checkpoint saves over the total training duration (decoupled from eval)')
 group.add_argument('--recovery-interval', type=int, default=0, metavar='N',
-                   help='how many batches to wait before writing recovery checkpoint')
+                   help='how many steps to wait before writing recovery checkpoint')
 group.add_argument('--checkpoint-hist', type=int, default=10, metavar='N',
                    help='number of checkpoints to keep (default: 10)')
 group.add_argument('-j', '--workers', type=int, default=4, metavar='N',
@@ -485,6 +453,39 @@ def _parse_args():
     # Cache the args as a text string to save them in the output dir later
     args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
     return args, args_text
+
+
+class RepeatingLoader:
+    def __init__(self, loader):
+        self.loader = loader
+        self.epoch = 0
+        self._set_epoch(self.epoch)
+        self.data_iter = iter(self.loader)
+
+    def _set_epoch(self, epoch):
+        if hasattr(self.loader, 'sampler') and hasattr(self.loader.sampler, 'set_epoch'):
+            self.loader.sampler.set_epoch(epoch)
+        if hasattr(self.loader, 'dataset') and hasattr(self.loader.dataset, 'set_epoch'):
+            self.loader.dataset.set_epoch(epoch)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            batch = next(self.data_iter)
+        except StopIteration:
+            self.epoch += 1
+            self._set_epoch(self.epoch)
+            self.data_iter = iter(self.loader)
+            batch = next(self.data_iter)
+        return batch
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __getattr__(self, name):
+        return getattr(self.loader, name)
 
 
 def main():
@@ -663,9 +664,9 @@ def main():
             _logger.info(f'AMP not enabled. Training in {model_dtype or torch.float32}.')
 
     # optionally resume from a checkpoint
-    resume_epoch = None
+    resume_step = None
     if args.resume:
-        resume_epoch = resume_checkpoint(
+        resume_step = resume_checkpoint(
             model,
             args.resume,
             optimizer=None if args.no_resume_opt else optimizer,
@@ -709,7 +710,6 @@ def main():
         download=args.dataset_download,
         batch_size=args.batch_size,
         seed=args.seed,
-        repeats=args.epoch_repeats,
         input_img_mode=input_img_mode,
         input_key=args.input_key,
         target_key=args.target_key,
@@ -862,6 +862,8 @@ def main():
             **train_loader_kwargs,
         )
 
+    loader_train = RepeatingLoader(loader_train)
+
     loader_eval = None
     if args.val_split:
         assert dataset_eval is not None
@@ -996,9 +998,11 @@ def main():
     eval_metric = args.eval_metric if loader_eval is not None else 'loss'
     decreasing_metric = eval_metric == 'loss'
     best_metric = None
-    best_epoch = None
+    best_step = None
     saver = None
     output_dir = None
+    summary_path = None
+    summary_header_written = False
     if utils.is_primary(args):
         if args.experiment:
             exp_name = args.experiment
@@ -1009,6 +1013,8 @@ def main():
                 str(data_config['input_size'][-1])
             ])
         output_dir = utils.get_outdir(args.output if args.output else './output/train', exp_name)
+        summary_path = os.path.join(output_dir, 'summary.csv')
+        summary_header_written = os.path.exists(summary_path)
         saver = utils.CheckpointSaver(
             model=model,
             optimizer=optimizer,
@@ -1039,123 +1045,126 @@ def main():
                     "You've requested to log metrics to wandb but package not found. "
                     "Metrics not being logged to wandb, try `pip install wandb`")
 
-    # setup learning rate schedule and starting epoch/step
-    updates_per_epoch = (len(loader_train) + args.grad_accum_steps - 1) // args.grad_accum_steps
-    if args.max_steps is not None:
-        import math
-        args.epochs = math.ceil(args.max_steps / updates_per_epoch)
+    # setup learning rate schedule and starting step
+    steps_per_epoch = None
+    try:
+        steps_per_epoch = (len(loader_train) + args.grad_accum_steps - 1) // args.grad_accum_steps
+    except TypeError:
+        steps_per_epoch = None
+
+    if args.num_steps is None or args.num_steps <= 0:
+        if steps_per_epoch is None:
+            raise ValueError('num_steps must be specified when dataloader length is unknown.')
+        base_epochs = getattr(args, 'epochs', 300)
+        args.num_steps = steps_per_epoch * base_epochs
         if utils.is_primary(args):
             _logger.info(
-                f'Step-based training: {args.max_steps} steps. (Approx {args.epochs} virtual epochs)')
+                f'num_steps not set, using {args.num_steps} '
+                f'(steps_per_epoch={steps_per_epoch}, epochs={base_epochs}).')
 
-    lr_scheduler, num_epochs = create_scheduler_v2(
+    lr_scheduler, num_steps = create_scheduler_v2(
         optimizer,
         **scheduler_kwargs(args, decreasing_metric=decreasing_metric),
-        updates_per_epoch=updates_per_epoch,
+        updates_per_epoch=1,
     )
+    if num_steps != args.num_steps:
+        args.num_steps = num_steps
 
-    if args.max_steps is not None:
-        start_step = 0
-        if args.start_epoch is not None:
-            start_step = args.start_epoch * updates_per_epoch
-        elif resume_epoch is not None:
-            start_step = resume_epoch
-        if lr_scheduler is not None and start_step > 0:
-            if lr_scheduler.t_in_epochs:
-                lr_scheduler.step(start_step // updates_per_epoch)
-            else:
-                lr_scheduler.step_update(start_step)
-    else:
-        start_epoch = 0
-        if args.start_epoch is not None:
-            # a specified start_epoch will always override the resume epoch
-            start_epoch = args.start_epoch
-        elif resume_epoch is not None:
-            start_epoch = resume_epoch
-        if lr_scheduler is not None and start_epoch > 0:
-            if args.sched_on_updates:
-                lr_scheduler.step_update(start_epoch * updates_per_epoch)
-            else:
-                lr_scheduler.step(start_epoch)
+    log_interval = args.log_interval
+    if args.num_logs is not None:
+        if args.num_logs <= 0:
+            raise ValueError('--num-logs must be > 0')
+        log_interval = max(1, num_steps // args.num_logs)
+        args.log_interval = log_interval
+
+    val_interval = args.val_interval
+    if args.num_evals is not None:
+        if args.num_evals <= 0:
+            raise ValueError('--num-evals must be > 0')
+        val_interval = max(1, num_steps // args.num_evals)
+        args.val_interval = val_interval
+
+    save_interval = val_interval
+    if args.num_saves is not None:
+        if args.num_saves <= 0:
+            raise ValueError('--num-saves must be > 0')
+        save_interval = max(1, num_steps // args.num_saves)
+
+    start_step = 0
+    if args.start_step is not None:
+        # a specified start_step will always override the resume step
+        start_step = args.start_step
+    elif resume_step is not None:
+        start_step = resume_step
+    if lr_scheduler is not None and start_step > 0:
+        if lr_scheduler.t_in_epochs:
+            lr_scheduler.step(start_step, metric=None)
+        else:
+            lr_scheduler.step_update(start_step)
 
     if utils.is_primary(args):
         if args.warmup_prefix:
-            sched_explain = '(warmup_epochs + epochs + cooldown_epochs). Warmup added to total when warmup_prefix=True'
+            sched_explain = '(warmup_steps + num_steps + cooldown_steps). Warmup added to total when warmup_prefix=True'
         else:
-            sched_explain = '(epochs + cooldown_epochs). Warmup within epochs when warmup_prefix=False'
+            sched_explain = '(num_steps + cooldown_steps). Warmup within num_steps when warmup_prefix=False'
         _logger.info(
-            f'Scheduled epochs: {num_epochs} {sched_explain}. '
-            f'LR stepped per {"epoch" if lr_scheduler.t_in_epochs else "update"}.')
+            f'Scheduled steps: {num_steps} {sched_explain}. '
+            f'LR stepped per {"step" if lr_scheduler.t_in_epochs else "update"}.')
 
     results = []
+    train_state = TrainState()
+    optimizer.zero_grad()
+    global_step = start_step
+    latest_metric = None
     try:
-        if args.max_steps is not None:
-            train_steps(
-                model=model,
-                loader_train=loader_train,
-                loader_eval=loader_eval,
-                optimizer=optimizer,
-                args=args,
+        while global_step < num_steps:
+            step = global_step + 1
+
+            train_metrics = train_step(
+                step,
+                model,
+                loader_train,
+                optimizer,
+                args,
                 task=task,
                 device=device,
-                lr_scheduler=lr_scheduler,
-                saver=saver,
-                output_dir=output_dir,
                 amp_autocast=amp_autocast,
                 loss_scaler=loss_scaler,
                 model_dtype=model_dtype,
                 model_ema=model_ema,
                 mixup_fn=mixup_fn,
-                validate_loss_fn=validate_loss_fn,
-                start_step=start_step,
                 naflex_mode=naflex_mode,
+                train_state=train_state,
+                num_steps=num_steps,
+                output_dir=output_dir,
+                saver=saver,
+                log_console=False,
             )
-            if saver is not None:
-                best_metric = saver.best_metric
-                best_epoch = saver.best_epoch
-        else:
-            for epoch in range(start_epoch, num_epochs):
-                if hasattr(dataset_train, 'set_epoch'):
-                    dataset_train.set_epoch(epoch)
-                elif args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
-                    loader_train.sampler.set_epoch(epoch)
 
-                train_metrics = train_one_epoch(
-                    epoch,
-                    model,
-                    loader_train,
-                    optimizer,
-                    args,
-                    task=task,
-                    device=device,
-                    lr_scheduler=lr_scheduler,
-                    saver=saver,
-                    output_dir=output_dir,
-                    amp_autocast=amp_autocast,
-                    loss_scaler=loss_scaler,
-                    model_dtype=model_dtype,
-                    model_ema=model_ema,
-                    mixup_fn=mixup_fn,
-                    num_updates_total=num_epochs * updates_per_epoch,
-                    naflex_mode=naflex_mode,
-                )
+            global_step = step
+
+            if lr_scheduler is not None:
+                if lr_scheduler.t_in_epochs:
+                    lr_scheduler.step(global_step, metric=latest_metric)
+                else:
+                    lr_scheduler.step_update(num_updates=global_step, metric=train_state.losses_m.avg)
+
+            summary_epoch = global_step
+            if steps_per_epoch:
+                summary_epoch = global_step // steps_per_epoch
+
+            do_log = (global_step % log_interval == 0) or (global_step == num_steps) or (global_step == 1)
+            do_eval = (global_step % val_interval == 0) or (global_step == num_steps) or (global_step == 1)
+            do_log = do_log or do_eval
+            eval_metrics = None
+            if do_eval:
+                if hasattr(optimizer, 'sync_lookahead'):
+                    optimizer.sync_lookahead()
 
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                     if utils.is_primary(args):
                         _logger.info("Distributing BatchNorm running means and vars")
                     utils.distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
-
-                epoch_p_1 = epoch + 1
-                if epoch_p_1 % args.val_interval != 0 and epoch_p_1 != num_epochs:
-                    if utils.is_primary(args):
-                        _logger.info("Skipping eval and checkpointing ")
-                    if lr_scheduler is not None:
-                        # step LR for next epoch, take care when using metric dependent lr_scheduler
-                        lr_scheduler.step(epoch_p_1, metric=None)
-                    # Skip validation and metric logic
-                    # FIXME we could make the logic below able to handle no eval metrics more gracefully,
-                    #  but for simplicity opting to just skip for now.
-                    continue
 
                 if loader_eval is not None:
                     eval_metrics = validate(
@@ -1182,41 +1191,62 @@ def main():
                             log_suffix=' (EMA)',
                         )
                         eval_metrics = ema_eval_metrics
-                else:
-                    eval_metrics = None
-
-                if output_dir is not None:
-                    lrs = [param_group['lr'] for param_group in optimizer.param_groups]
-                    utils.update_summary(
-                        epoch,
-                        train_metrics,
-                        eval_metrics,
-                        filename=os.path.join(output_dir, 'summary.csv'),
-                        lr=sum(lrs) / len(lrs),
-                        write_header=best_metric is None,
-                        log_wandb=args.log_wandb and has_wandb,
-                    )
 
                 if eval_metrics is not None:
                     latest_metric = eval_metrics[eval_metric]
-                else:
+                elif loader_eval is None:
                     latest_metric = train_metrics[eval_metric]
 
-                if saver is not None:
-                    # save proper checkpoint with eval metric
-                    best_metric, best_epoch = saver.save_checkpoint(epoch, metric=latest_metric)
+            if saver is not None:
+                # save proper checkpoint with eval metric
+                if (global_step % save_interval == 0) or (global_step == num_steps):
+                    best_metric, best_step = saver.save_checkpoint(global_step, metric=latest_metric)
 
-                if lr_scheduler is not None:
-                    # step LR for next epoch
-                    lr_scheduler.step(epoch_p_1, latest_metric)
+            if do_log:
+                if output_dir is not None:
+                    lrs = [param_group['lr'] for param_group in optimizer.param_groups]
+                    utils.update_summary(
+                        summary_epoch,
+                        train_metrics,
+                        eval_metrics if do_eval else None,
+                        filename=summary_path,
+                        lr=sum(lrs) / len(lrs),
+                        write_header=not summary_header_written,
+                        log_wandb=args.log_wandb and has_wandb,
+                        step=global_step,
+                    )
+                    summary_header_written = True
+                lrl = [param_group['lr'] for param_group in optimizer.param_groups]
+                lr = sum(lrl) / len(lrl)
 
-                latest_results = {
-                    'epoch': epoch,
-                    'train': train_metrics,
-                }
-                if eval_metrics is not None:
-                    latest_results['validation'] = eval_metrics
-                results.append(latest_results)
+                loss_avg, loss_now = train_state.losses_m.avg, train_state.losses_m.val
+                if args.distributed:
+                    loss_avg_t = torch.tensor([loss_avg], device=device, dtype=torch.float32)
+                    loss_now_t = torch.tensor([loss_now], device=device, dtype=torch.float32)
+                    loss_avg = utils.reduce_tensor(loss_avg_t, args.world_size).item()
+                    loss_now = utils.reduce_tensor(loss_now_t, args.world_size).item()
+
+                if utils.is_primary(args):
+                    pct = 0.0 if not num_steps else 100. * global_step / num_steps
+                    _logger.info(
+                        f'Train: {global_step} [{global_step:>6d}/{num_steps} ({pct:>3.0f}%)]  '
+                        f'Loss: {loss_now:#.3g} ({loss_avg:#.3g})  '
+                        f'Time: {train_state.update_time_m.val:.3f}s, '
+                        f'{train_state.update_sample_count / train_state.update_time_m.val:>7.2f}/s  '
+                        f'({train_state.update_time_m.avg:.3f}s, '
+                        f'{train_state.update_sample_count / train_state.update_time_m.avg:>7.2f}/s)  '
+                        f'LR: {lr:.3e}  '
+                        f'Data: {train_state.data_time_m.val:.3f} ({train_state.data_time_m.avg:.3f})'
+                    )
+                train_state.reset_interval()
+
+            latest_results = {
+                'step': global_step,
+                'train': train_metrics,
+            }
+            if eval_metrics is not None:
+                latest_results['validation'] = eval_metrics
+            results.append(latest_results)
 
     except KeyboardInterrupt:
         pass
@@ -1226,7 +1256,7 @@ def main():
 
     if best_metric is not None:
         # log best metric as tracked by checkpoint saver
-        _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
+        _logger.info('*** Best metric: {0} (step {1})'.format(best_metric, best_step))
 
     if utils.is_primary(args):
         # for parsable results display, dump top-10 summaries to avoid excess console spam
@@ -1238,274 +1268,50 @@ def main():
         print(f'--result\n{json.dumps(display_results[-10:], indent=4)}')
 
 
-def train_steps(
-        model,
-        loader_train,
-        loader_eval,
-        optimizer,
-        args,
-        task=None,
-        device=torch.device('cuda'),
-        lr_scheduler=None,
-        saver=None,
-        output_dir=None,
-        amp_autocast=suppress,
-        loss_scaler=None,
-        model_dtype=None,
-        model_ema=None,
-        mixup_fn=None,
-        validate_loss_fn=None,
-        start_step=0,
-        naflex_mode=False,
-):
-    model.train()
+class TrainState:
+    def __init__(self):
+        self.update_time_m = utils.AverageMeter()
+        self.data_time_m = utils.AverageMeter()
+        self.losses_m = utils.AverageMeter()
+        self.update_sample_count = 0
+        now = time.time()
+        self.data_start_time = now
+        self.update_start_time = now
 
-    train_iter = InfiniteLoader(loader_train)
-
-    accum_steps = args.grad_accum_steps
-    updates_per_epoch = (len(loader_train) + accum_steps - 1) // accum_steps
-    if updates_per_epoch > 0:
-        train_iter.epoch = start_step // updates_per_epoch
-        if hasattr(loader_train.dataset, 'set_epoch'):
-            loader_train.dataset.set_epoch(train_iter.epoch)
-        elif hasattr(loader_train.sampler, 'set_epoch'):
-            loader_train.sampler.set_epoch(train_iter.epoch)
-        train_iter.iterator = iter(loader_train)
-
-    step = start_step
-    micro_batch_idx = start_step * accum_steps
-
-    losses_m = utils.AverageMeter()
-    data_time_m = utils.AverageMeter()
-    update_time_m = utils.AverageMeter()
-    second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-    has_no_sync = hasattr(model, "no_sync")
-
-    optimizer.zero_grad()
-    end = time.time()
-    latest_metric = None
-
-    summary_path = os.path.join(output_dir, 'summary.csv') if output_dir is not None else None
-    write_header = summary_path is not None and not os.path.exists(summary_path)
-
-    if utils.is_primary(args):
-        _logger.info(f"Starting Step-Based Training: Steps {start_step} to {args.max_steps}")
-
-    while step < args.max_steps:
-        input, target = next(train_iter)
-        data_time_m.update(time.time() - end)
-
-        if not args.prefetcher:
-            input, target = input.to(device=device, dtype=model_dtype), target.to(device=device)
-            if mixup_fn is not None:
-                input, target = mixup_fn(input, target)
-        if args.channels_last:
-            input = input.contiguous(memory_format=torch.channels_last)
-
-        micro_batch_idx += 1
-        need_update = (micro_batch_idx % accum_steps == 0)
-
-        def _forward():
-            with amp_autocast():
-                result = task(input, target)
-                loss = result['loss']
-                if accum_steps > 1:
-                    loss /= accum_steps
-            return loss
-
-        def _backward(_loss):
-            if loss_scaler is not None:
-                loss_scaler(
-                    _loss,
-                    optimizer,
-                    clip_grad=args.clip_grad,
-                    clip_mode=args.clip_mode,
-                    parameters=model_parameters(model, exclude_head='agc' in args.clip_mode),
-                    create_graph=second_order,
-                    need_update=need_update,
-                )
-            else:
-                _loss.backward(create_graph=second_order)
-                if need_update:
-                    if args.clip_grad is not None:
-                        utils.dispatch_clip_grad(
-                            model_parameters(model, exclude_head='agc' in args.clip_mode),
-                            value=args.clip_grad,
-                            mode=args.clip_mode,
-                        )
-                    optimizer.step()
-
-        if naflex_mode:
-            if isinstance(input, dict) and 'patches' in input:
-                batch_size = input['patches'].shape[0]
-            else:
-                batch_size = input.shape[0]
-
-            if not args.naflex_loss_scale or args.naflex_loss_scale == 'none':
-                local_scale = 1.0
-            else:
-                local_scale = (batch_size / args.batch_size)
-                if args.naflex_loss_scale == 'sqrt':
-                    local_scale = local_scale ** 0.5
-
-            if args.distributed:
-                global_batch_size = utils.reduce_tensor(
-                    torch.tensor(batch_size, device=device, dtype=torch.float32),
-                    1
-                )
-                dist_scale = args.world_size * batch_size / global_batch_size
-            else:
-                dist_scale = None
-
-            if has_no_sync and not need_update:
-                with model.no_sync():
-                    loss = _forward()
-                    scaled_loss = local_scale * loss
-                    if dist_scale is not None:
-                        scaled_loss *= dist_scale
-                    _backward(scaled_loss)
-            else:
-                loss = _forward()
-                scaled_loss = local_scale * loss
-                if dist_scale is not None:
-                    scaled_loss *= dist_scale
-                _backward(scaled_loss)
-        else:
-            if isinstance(input, torch.Tensor):
-                batch_size = input.size(0)
-            else:
-                batch_size = target.size(0)
-
-            if has_no_sync and not need_update:
-                with model.no_sync():
-                    loss = _forward()
-                    _backward(loss)
-            else:
-                loss = _forward()
-                _backward(loss)
-
-        losses_m.update(loss.item() * accum_steps, batch_size)
-
-        if not need_update:
-            continue
-
-        step += 1
-        optimizer.zero_grad()
-        if model_ema is not None:
-            model_ema.update(model, step=step)
-
-        if args.synchronize_step:
-            if device.type == 'cuda':
-                torch.cuda.synchronize()
-            elif device.type == 'npu':
-                torch.npu.synchronize()
-
-        update_time_m.update(time.time() - end)
-        end = time.time()
-
-        latest_metric = losses_m.avg
-
-        if lr_scheduler is not None and not lr_scheduler.t_in_epochs:
-            lr_scheduler.step_update(num_updates=step, metric=latest_metric)
-
-        if args.n_log and step % args.n_log == 0:
-            if utils.is_primary(args):
-                lrl = [param_group['lr'] for param_group in optimizer.param_groups]
-                lr = sum(lrl) / len(lrl)
-                _logger.info(
-                    f'Step: {step}/{args.max_steps} [Epoch {train_iter.epoch}] '
-                    f'Loss: {losses_m.val:#.4g} ({losses_m.avg:#.3g}) '
-                    f'LR: {lr:.3e} '
-                    f'Time: {update_time_m.val:.3f}s'
-                )
-
-        if args.n_checkpoint and step % args.n_checkpoint == 0:
-            if saver is not None:
-                saver.save_checkpoint(epoch=step, metric=None)
-
-        if args.n_save and step % args.n_save == 0:
-            if saver is not None:
-                saver.save_recovery(epoch=step)
-
-        if args.n_eval and step % args.n_eval == 0 and loader_eval is not None:
-            if utils.is_primary(args):
-                _logger.info(f"Validating at step {step}...")
-
-            if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                utils.distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
-
-            eval_metrics = validate(
-                model,
-                loader_eval,
-                validate_loss_fn,
-                args,
-                device=device,
-                amp_autocast=amp_autocast,
-                model_dtype=model_dtype,
-            )
-
-            if model_ema is not None and not args.model_ema_force_cpu:
-                if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                    utils.distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
-                ema_eval_metrics = validate(
-                    model_ema,
-                    loader_eval,
-                    validate_loss_fn,
-                    args,
-                    device=device,
-                    amp_autocast=amp_autocast,
-                    log_suffix=' (EMA)',
-                )
-                eval_metrics = ema_eval_metrics
-
-            latest_metric = eval_metrics[args.eval_metric]
-
-            if output_dir is not None:
-                lrl = [param_group['lr'] for param_group in optimizer.param_groups]
-                utils.update_summary(
-                    epoch=train_iter.epoch,
-                    train_metrics={'loss': losses_m.avg},
-                    eval_metrics=eval_metrics,
-                    filename=summary_path,
-                    lr=sum(lrl) / len(lrl),
-                    write_header=write_header,
-                    log_wandb=args.log_wandb and has_wandb,
-                    step=step,
-                )
-                write_header = False
-
-            if saver is not None:
-                saver.save_checkpoint(epoch=step, metric=latest_metric)
-
-            model.train()
-
-        if lr_scheduler is not None and lr_scheduler.t_in_epochs:
-            if step % updates_per_epoch == 0:
-                lr_scheduler.step(step // updates_per_epoch, metric=latest_metric)
-
-    return
+    def reset_interval(self):
+        self.update_time_m.reset()
+        self.data_time_m.reset()
+        self.losses_m.reset()
+        self.update_sample_count = 0
+        now = time.time()
+        self.data_start_time = now
+        self.update_start_time = now
 
 
-def train_one_epoch(
-        epoch,
+def train_step(
+        step,
         model,
         loader,
         optimizer,
         args,
         task=None,
         device=torch.device('cuda'),
-        lr_scheduler=None,
-        saver=None,
-        output_dir=None,
         amp_autocast=suppress,
         loss_scaler=None,
         model_dtype=None,
         model_ema=None,
         mixup_fn=None,
-        num_updates_total=None,
         naflex_mode=False,
+        train_state=None,
+        num_steps=None,
+        output_dir=None,
+        saver=None,
+        log_console=False,
 ):
-    if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
+    if train_state is None:
+        train_state = TrainState()
+
+    if args.mixup_off_step and step >= args.mixup_off_step:
         if args.prefetcher and loader.mixup_enabled:
             loader.mixup_enabled = False
         elif mixup_fn is not None:
@@ -1513,28 +1319,14 @@ def train_one_epoch(
 
     second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
     has_no_sync = hasattr(model, "no_sync")
-    update_time_m = utils.AverageMeter()
-    data_time_m = utils.AverageMeter()
-    losses_m = utils.AverageMeter()
 
     model.train()
 
     accum_steps = args.grad_accum_steps
-    last_accum_steps = len(loader) % accum_steps
-    updates_per_epoch = (len(loader) + accum_steps - 1) // accum_steps
-    num_updates = epoch * updates_per_epoch
-    last_batch_idx = len(loader) - 1
-    last_batch_idx_to_accum = len(loader) - last_accum_steps
+    for accum_idx in range(accum_steps):
+        need_update = accum_idx == (accum_steps - 1)
 
-    data_start_time = update_start_time = time.time()
-    optimizer.zero_grad()
-    update_sample_count = 0
-    for batch_idx, (input, target) in enumerate(loader):
-        last_batch = batch_idx == last_batch_idx
-        need_update = last_batch or (batch_idx + 1) % accum_steps == 0
-        update_idx = batch_idx // accum_steps
-        if batch_idx >= last_batch_idx_to_accum:
-            accum_steps = last_accum_steps
+        input, target = next(loader)
 
         if not args.prefetcher:
             input, target = input.to(device=device, dtype=model_dtype), target.to(device=device)
@@ -1544,7 +1336,7 @@ def train_one_epoch(
             input = input.contiguous(memory_format=torch.channels_last)
 
         # multiply by accum steps to get equivalent for full update
-        data_time_m.update(accum_steps * (time.time() - data_start_time))
+        train_state.data_time_m.update(accum_steps * (time.time() - train_state.data_start_time))
 
         def _forward():
             with amp_autocast():
@@ -1627,17 +1419,15 @@ def train_one_epoch(
                 loss, result = _forward()
                 _backward(loss)
 
-        losses_m.update(loss.item() * accum_steps, batch_size)
-        update_sample_count += global_batch_size
+        train_state.losses_m.update(loss.item() * accum_steps, batch_size)
+        train_state.update_sample_count += global_batch_size
 
         if not need_update:
-            data_start_time = time.time()
+            train_state.data_start_time = time.time()
             continue
 
-        num_updates += 1
-        optimizer.zero_grad()
         if model_ema is not None:
-            model_ema.update(model, step=num_updates)
+            model_ema.update(model, step=step)
 
         if args.synchronize_step:
             if device.type == 'cuda':
@@ -1646,53 +1436,50 @@ def train_one_epoch(
                 torch.npu.synchronize()
         time_now = time.time()
 
-        update_time_m.update(time.time() - update_start_time)
-        update_start_time = time_now
+        train_state.update_time_m.update(time.time() - train_state.update_start_time)
+        train_state.update_start_time = time_now
 
-        if update_idx % args.log_interval == 0 or last_batch:
+        if (step % args.log_interval == 0 or (num_steps is not None and step == num_steps)):
+            if args.save_images and output_dir:
+                torchvision.utils.save_image(
+                    input,
+                    os.path.join(output_dir, f'train-step-{step}.jpg'),
+                    padding=0,
+                    normalize=True
+                )
+
+        if log_console and (step % args.log_interval == 0 or (num_steps is not None and step == num_steps)):
             lrl = [param_group['lr'] for param_group in optimizer.param_groups]
             lr = sum(lrl) / len(lrl)
 
-            loss_avg, loss_now = losses_m.avg, losses_m.val
+            loss_avg, loss_now = train_state.losses_m.avg, train_state.losses_m.val
             if args.distributed:
                 # synchronize current step and avg loss, each process keeps its own running avg
                 loss_avg = utils.reduce_tensor(loss.new([loss_avg]), args.world_size).item()
                 loss_now = utils.reduce_tensor(loss.new([loss_now]), args.world_size).item()
 
             if utils.is_primary(args):
+                pct = 0.0 if not num_steps else 100. * step / num_steps
                 _logger.info(
-                    f'Train: {epoch} [{update_idx:>4d}/{updates_per_epoch} '
-                    f'({100. * (update_idx + 1) / updates_per_epoch:>3.0f}%)]  '
+                    f'Train: {step} [{step:>6d}/{num_steps} ({pct:>3.0f}%)]  '
                     f'Loss: {loss_now:#.3g} ({loss_avg:#.3g})  '
-                    f'Time: {update_time_m.val:.3f}s, {update_sample_count / update_time_m.val:>7.2f}/s  '
-                    f'({update_time_m.avg:.3f}s, {update_sample_count / update_time_m.avg:>7.2f}/s)  '
+                    f'Time: {train_state.update_time_m.val:.3f}s, '
+                    f'{train_state.update_sample_count / train_state.update_time_m.val:>7.2f}/s  '
+                    f'({train_state.update_time_m.avg:.3f}s, '
+                    f'{train_state.update_sample_count / train_state.update_time_m.avg:>7.2f}/s)  '
                     f'LR: {lr:.3e}  '
-                    f'Data: {data_time_m.val:.3f} ({data_time_m.avg:.3f})'
+                    f'Data: {train_state.data_time_m.val:.3f} ({train_state.data_time_m.avg:.3f})'
                 )
 
-                if args.save_images and output_dir:
-                    torchvision.utils.save_image(
-                        input,
-                        os.path.join(output_dir, 'train-batch-%d.jpg' % batch_idx),
-                        padding=0,
-                        normalize=True
-                    )
 
-        if saver is not None and args.recovery_interval and (
-                (update_idx + 1) % args.recovery_interval == 0):
-            saver.save_recovery(epoch, batch_idx=update_idx)
+        if saver is not None and args.recovery_interval and (step % args.recovery_interval == 0):
+            saver.save_recovery(step, batch_idx=0)
 
-        if lr_scheduler is not None:
-            lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
+        train_state.update_sample_count = 0
+        train_state.data_start_time = time.time()
+        optimizer.zero_grad()
 
-        update_sample_count = 0
-        data_start_time = time.time()
-        # end for
-
-    if hasattr(optimizer, 'sync_lookahead'):
-        optimizer.sync_lookahead()
-
-    loss_avg = losses_m.avg
+    loss_avg = train_state.losses_m.avg
     if args.distributed:
         # synchronize avg loss, each process keeps its own running avg
         loss_avg = torch.tensor([loss_avg], device=device, dtype=torch.float32)
