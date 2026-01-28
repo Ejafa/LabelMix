@@ -1,13 +1,13 @@
 # ==========================================
 # Training Loop (Step-Based)
 # ==========================================
-num_steps: 9000       
+num_steps: 150000       
 num_logs: 1000             
 num_evals: 100                     
 num_saves: 10              
 batch_size: 128         
-warmup_steps: 1000      
-patience_steps: 1000  
+warmup_steps: 5000      
+patience_steps: 5000  
 warmup_prefix: true
 
 # ==========================================
@@ -45,7 +45,7 @@ val_split: test
 input_key: img
 target_key: fine_label
 dataset_download: true
-
+balanced_mode: min
 mean: [0, 0, 0]
 std: [1, 1, 1]
 
@@ -68,9 +68,9 @@ device: cuda
 amp: true
 amp_dtype: bfloat16
 workers: 8
-pin_mem: false
-no_prefetcher: true
-no_aug: true
+# pin_mem: false
+# no_prefetcher: true
+# no_aug: true
 
 # ==========================================
 # Logging
@@ -78,4 +78,4 @@ no_aug: true
 output: ./output_cifar100_baseline_mnv4
 experiment: mnv4_baseline_cifar100
 log_wandb: true
-wandb_project: rankmix
+wandb_project: labelmix

@@ -106,6 +106,7 @@ output/
 *.tar
 *.pth
 *.pt
+*.pkl
 *.torch
 *.gz
 Untitled.ipynb
@@ -126,6 +127,7 @@ wandb/
 .github
 .vscode/
 .DS_Store
-logs/
-output*/
-data/
+logs
+output*
+data/*
+

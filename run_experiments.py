@@ -63,20 +63,23 @@ def main() -> None:
     base_train_common: List[str] = [
         "--model", "mobilenetv4_conv_small",
         "--amp-dtype", "bfloat16",
+        "--num-steps", "19000",
+        "--warmup-steps", "1000",
+        "--patience-steps", "1000",
+        "--num-logs", "1000",
+        "--num-evals", "100",
+        "--num-saves", "10",
     ]
-
 
     experiments = [
         # 1. Baseline Step-Based Training (100k steps)
         {
-            "name": "baseline_step_100k",
+            "name": "baseline_step_20k_noaug",
             "naflex": False,
             "config": args.config, 
             "extra": [
-                # "--max-steps", "100000",
-                # "--warmup-steps", "5000",
-                # "--n-log", "2000", 
-                # "--n-eval", "20",
+                "--no-aug",
+                "--pin-mem",
             ],
         },
 

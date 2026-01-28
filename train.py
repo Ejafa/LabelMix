@@ -31,9 +31,11 @@ import torch.nn as nn
 import torchvision.utils
 import yaml
 
+from timm.data import BalancedBucketDataset
 from timm import utils
 from timm.data import create_dataset, create_loader, create_naflex_loader, resolve_data_config, \
-    Mixup, FastCollateMixup, AugMixDataset
+    create_transform, Mixup, FastCollateMixup, AugMixDataset
+from timm.data.loader import PrefetchLoader, _worker_init, fast_collate
 from timm.layers import convert_splitbn_model, convert_sync_batchnorm, set_fast_norm
 from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, LabelSmoothingCrossEntropy
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, model_parameters
@@ -103,6 +105,18 @@ group.add_argument('--target-key', default=None, type=str,
                    help='Dataset key for target labels.')
 group.add_argument('--dataset-trust-remote-code', action='store_true', default=False,
                    help='Allow huggingface dataset import to execute code downloaded from the dataset\'s repo.')
+group.add_argument('--balanced-mode', default='', type=str,
+                   help='Enable balanced loading: "min", "max", or int (samples per class). Default: disabled.')
+group.add_argument('--balanced-buffer', default=4096, type=int,
+                   help='Buffer size for balanced loading (default: 4096)')
+group.add_argument('--balanced-cache-path', default='', type=str,
+                   help='Cache path for balanced class buckets (default: <data-dir>/class_buckets.pkl)')
+group.add_argument('--balanced-cache-threshold', default=256, type=int,
+                   help='Cache classes with <= N samples in RAM for balanced loading (default: 256)')
+group.add_argument('--balanced-input-key', default=None, type=str,
+                   help='Input key override for balanced loading (default: --input-key or "image")')
+group.add_argument('--balanced-target-key', default=None, type=str,
+                   help='Target key override for balanced loading (default: --target-key or "label")')
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
@@ -502,6 +516,27 @@ def main():
 
     args.prefetcher = not args.no_prefetcher
     args.grad_accum_steps = max(1, args.grad_accum_steps)
+
+    if args.balanced_mode:
+        if isinstance(args.balanced_mode, str):
+            mode = args.balanced_mode.strip().lower()
+            if mode.isdigit():
+                mode = int(mode)
+            elif mode not in ('min', 'max'):
+                parser.error('--balanced-mode must be "min", "max", or a positive int')
+        elif isinstance(args.balanced_mode, int):
+            mode = args.balanced_mode
+        else:
+            parser.error('--balanced-mode must be "min", "max", or a positive int')
+        if isinstance(mode, int) and mode < 1:
+            parser.error('--balanced-mode int value must be >= 1')
+        args.balanced_mode = mode
+
+    if args.balanced_cache_threshold < 0:
+        parser.error('--balanced-cache-threshold must be >= 0')
+
+    if args.balanced_mode and args.naflex_loader:
+        parser.error('--balanced-mode is not compatible with --naflex-loader')
     device = utils.init_distributed_device(args)
     if args.distributed:
         _logger.info(
@@ -848,19 +883,105 @@ def main():
             else:
                 mixup_fn = Mixup(**mixup_args)
 
-        # wrap dataset in AugMix helper
-        if num_aug_splits > 1:
-            dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
+        if args.balanced_mode:
+            if num_aug_splits > 1:
+                parser.error('--balanced-mode is not compatible with --aug-splits > 1')
+            if args.aug_repeats:
+                parser.error('--balanced-mode is not compatible with --aug-repeats')
 
-        # Use standard loader
-        loader_train = create_loader(
-            dataset_train,
-            input_size=data_config['input_size'],
-            collate_fn=collate_fn,
-            use_multi_epochs_loader=args.use_multi_epochs_loader,
-            **common_loader_kwargs,
-            **train_loader_kwargs,
-        )
+            re_num_splits = 0
+            if args.resplit:
+                re_num_splits = num_aug_splits or 2
+
+            train_transform = create_transform(
+                input_size=data_config['input_size'],
+                is_training=True,
+                no_aug=args.no_aug,
+                train_crop_mode=args.train_crop_mode,
+                scale=args.scale,
+                ratio=args.ratio,
+                hflip=args.hflip,
+                vflip=args.vflip,
+                color_jitter=args.color_jitter,
+                color_jitter_prob=args.color_jitter_prob,
+                grayscale_prob=args.grayscale_prob,
+                gaussian_blur_prob=args.gaussian_blur_prob,
+                auto_augment=args.aa,
+                interpolation=train_interpolation,
+                mean=data_config['mean'],
+                std=data_config['std'],
+                re_prob=args.reprob,
+                re_mode=args.remode,
+                re_count=args.recount,
+                re_num_splits=re_num_splits,
+                use_prefetcher=args.prefetcher,
+                separate=num_aug_splits > 0,
+            )
+
+            balanced_input_key = args.balanced_input_key
+            if balanced_input_key is None:
+                balanced_input_key = args.input_key if args.input_key is not None else 'image'
+            balanced_target_key = args.balanced_target_key
+            if balanced_target_key is None:
+                balanced_target_key = args.target_key if args.target_key is not None else 'label'
+            balanced_cache_path = args.balanced_cache_path
+            if not balanced_cache_path:
+                base_dir = args.data_dir or args.data or '.'
+                balanced_cache_path = os.path.join(base_dir, 'class_buckets.pkl')
+
+            dataset_train = BalancedBucketDataset(
+                base_dataset=dataset_train,
+                transform=train_transform,
+                mode=args.balanced_mode,
+                buffer_size=args.balanced_buffer,
+                cache_path=balanced_cache_path,
+                cache_small_classes_threshold=args.balanced_cache_threshold,
+                input_key=balanced_input_key,
+                target_key=balanced_target_key,
+            )
+
+            if collate_fn is None:
+                collate_fn = fast_collate if args.prefetcher else torch.utils.data.dataloader.default_collate
+
+            loader_train = torch.utils.data.DataLoader(
+                dataset_train,
+                batch_size=args.batch_size,
+                num_workers=args.workers,
+                collate_fn=collate_fn,
+                pin_memory=args.pin_mem,
+                drop_last=True,
+                worker_init_fn=partial(_worker_init, worker_seeding=args.worker_seeding),
+                persistent_workers=args.workers > 0,
+            )
+
+            if args.prefetcher:
+                prefetch_re_prob = args.reprob if not args.no_aug else 0.
+                loader_train = PrefetchLoader(
+                    loader_train,
+                    mean=data_config['mean'],
+                    std=data_config['std'],
+                    channels=data_config['input_size'][0],
+                    device=device,
+                    img_dtype=model_dtype or torch.float32,
+                    re_prob=prefetch_re_prob,
+                    re_mode=args.remode,
+                    re_count=args.recount,
+                    re_num_splits=re_num_splits,
+                )
+        else:
+            # wrap dataset in AugMix helper
+            if num_aug_splits > 1:
+                dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
+
+            # Use standard loader
+            loader_train = create_loader(
+                dataset_train,
+                input_size=data_config['input_size'],
+                collate_fn=collate_fn,
+                use_multi_epochs_loader=args.use_multi_epochs_loader,
+                **common_loader_kwargs,
+                **train_loader_kwargs,
+            )
 
     loader_train = RepeatingLoader(loader_train)
 
