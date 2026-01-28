@@ -45,13 +45,20 @@ def update_summary(
         rowd.update([('eval_' + k, v) for k, v in eval_metrics.items()])
     if lr is not None:
         rowd['lr'] = lr
-    if log_wandb:
-        if step is not None:
-            wandb.log(rowd, step=step)
-        else:
-            wandb.log(rowd)
+
+    # 1. Write to CSV FIRST (while 'step' is still in rowd)
     with open(filename, mode='a') as cf:
         dw = csv.DictWriter(cf, fieldnames=rowd.keys())
         if write_header:  # first iteration (epoch == 1 can't be used)
             dw.writeheader()
         dw.writerow(rowd)
+
+    # 2. Log to WandB SECOND
+    if log_wandb:
+        # In-place delete 'step' to prevent "step vs step" plots
+        # This is safe because we have already written to the CSV
+        if step is not None and 'step' in rowd:
+            del rowd['step']
+            wandb.log(rowd, step=step)
+        else:
+            wandb.log(rowd)

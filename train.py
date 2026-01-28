@@ -1394,6 +1394,8 @@ class TrainState:
         self.update_time_m = utils.AverageMeter()
         self.data_time_m = utils.AverageMeter()
         self.losses_m = utils.AverageMeter()
+        self.ce_loss_m = utils.AverageMeter()
+        self.grad_norm_m = utils.AverageMeter()
         self.update_sample_count = 0
         now = time.time()
         self.data_start_time = now
@@ -1403,6 +1405,8 @@ class TrainState:
         self.update_time_m.reset()
         self.data_time_m.reset()
         self.losses_m.reset()
+        self.ce_loss_m.reset()
+        self.grad_norm_m.reset()
         self.update_sample_count = 0
         now = time.time()
         self.data_start_time = now
@@ -1543,6 +1547,28 @@ def train_step(
         train_state.losses_m.update(loss.item() * accum_steps, batch_size)
         train_state.update_sample_count += global_batch_size
 
+        with torch.no_grad():
+            if target.ndim > 1:
+                clean_target = target.argmax(dim=1)
+            else:
+                clean_target = target
+            output = result['output']
+            ce_loss = nn.functional.cross_entropy(output, clean_target)
+            train_state.ce_loss_m.update(ce_loss.item(), batch_size)
+
+        if need_update:
+            with torch.no_grad():
+                parameters = list(model_parameters(model, exclude_head='agc' in args.clip_mode))
+                grads = [p.grad for p in parameters if p.grad is not None]
+                if grads:
+                    grad_norm = torch.norm(
+                        torch.stack([torch.norm(g.detach(), 2) for g in grads]),
+                        2
+                    )
+                    train_state.grad_norm_m.update(float(grad_norm))
+                else:
+                    train_state.grad_norm_m.update(0.0)
+
         if not need_update:
             train_state.data_start_time = time.time()
             continue
@@ -1601,11 +1627,21 @@ def train_step(
         optimizer.zero_grad()
 
     loss_avg = train_state.losses_m.avg
+    ce_loss_avg = train_state.ce_loss_m.avg
+    grad_norm_avg = train_state.grad_norm_m.avg
     if args.distributed:
         # synchronize avg loss, each process keeps its own running avg
         loss_avg = torch.tensor([loss_avg], device=device, dtype=torch.float32)
         loss_avg = utils.reduce_tensor(loss_avg, args.world_size).item()
-    return OrderedDict([('loss', loss_avg)])
+        ce_loss_avg = torch.tensor([ce_loss_avg], device=device, dtype=torch.float32)
+        ce_loss_avg = utils.reduce_tensor(ce_loss_avg, args.world_size).item()
+        grad_norm_avg = torch.tensor([grad_norm_avg], device=device, dtype=torch.float32)
+        grad_norm_avg = utils.reduce_tensor(grad_norm_avg, args.world_size).item()
+    return OrderedDict([
+        ('loss', loss_avg),
+        ('cross_entropy', ce_loss_avg),
+        ('grad_norm', grad_norm_avg),
+    ])
 
 
 def validate(
@@ -1622,6 +1658,7 @@ def validate(
     losses_m = utils.AverageMeter()
     top1_m = utils.AverageMeter()
     top5_m = utils.AverageMeter()
+    ece_m = utils.ECEMeter()
 
     model.eval()
 
@@ -1649,6 +1686,7 @@ def validate(
 
                 loss = loss_fn(output, target)
             acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+            ece_m.update(output, target)
 
             if args.distributed:
                 reduced_loss = utils.reduce_tensor(loss.data, args.world_size)
@@ -1679,7 +1717,12 @@ def validate(
                     f'Acc@5: {top5_m.val:>7.3f} ({top5_m.avg:>7.3f})'
                 )
 
-    metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])
+    metrics = OrderedDict([
+        ('loss', losses_m.avg),
+        ('top1', top1_m.avg),
+        ('top5', top5_m.avg),
+        ('ece', ece_m.compute()),
+    ])
 
     return metrics
 
