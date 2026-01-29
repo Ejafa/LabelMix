@@ -4,6 +4,7 @@ Hacked together by / Copyright 2020 Ross Wightman
 """
 
 import torch
+import torch.distributed as dist
 
 
 class AverageMeter:
@@ -60,7 +61,7 @@ class ECEMeter:
         conf, pred = torch.max(probs, 1)
 
         # Store on CPU to avoid GPU OOM, keep as torch tensors
-        self.confidences.append(conf.detach().cpu())
+        self.confidences.append(conf.detach().float().cpu())
         self.predictions.append(pred.detach().cpu())
         self.targets.append(target.detach().cpu())
 
@@ -69,26 +70,41 @@ class ECEMeter:
         if not self.confidences:
             return 0.0
 
-        confidences = torch.cat(self.confidences)
+        confidences = torch.cat(self.confidences).float()
         predictions = torch.cat(self.predictions)
         targets = torch.cat(self.targets)
 
-        accuracies = predictions.eq(targets)
+        accuracies = predictions.eq(targets).float()
 
-        bin_boundaries = torch.linspace(0, 1, self.n_bins + 1)
-        ece = torch.tensor(0.0)
+        bin_indices = (confidences * self.n_bins).long().clamp(max=self.n_bins - 1)
 
-        for i, (bin_lower, bin_upper) in enumerate(zip(bin_boundaries[:-1], bin_boundaries[1:])):
-            if i == 0:
-                in_bin = (confidences >= bin_lower) & (confidences <= bin_upper)
-            else:
-                in_bin = (confidences > bin_lower) & (confidences <= bin_upper)
+        bin_counts = torch.bincount(bin_indices, minlength=self.n_bins).float()
+        bin_conf_sum = torch.zeros(self.n_bins, dtype=torch.float32).scatter_add(0, bin_indices, confidences)
+        bin_acc_sum = torch.zeros(self.n_bins, dtype=torch.float32).scatter_add(0, bin_indices, accuracies)
 
-            prop_in_bin = in_bin.float().mean()
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            backend = dist.get_backend()
+            device = torch.device('cuda', torch.cuda.current_device()) if backend == 'nccl' else torch.device('cpu')
+            bin_counts = bin_counts.to(device)
+            bin_conf_sum = bin_conf_sum.to(device)
+            bin_acc_sum = bin_acc_sum.to(device)
 
-            if prop_in_bin > 0:
-                accuracy_in_bin = accuracies[in_bin].float().mean()
-                avg_confidence_in_bin = confidences[in_bin].mean()
-                ece += (avg_confidence_in_bin - accuracy_in_bin).abs() * prop_in_bin
+            dist.all_reduce(bin_counts, op=dist.ReduceOp.SUM)
+            dist.all_reduce(bin_conf_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(bin_acc_sum, op=dist.ReduceOp.SUM)
+
+        total_count = bin_counts.sum()
+        if total_count == 0:
+            return 0.0
+
+        mask = bin_counts > 0
+        if not mask.any():
+            return 0.0
+
+        avg_acc = bin_acc_sum[mask] / bin_counts[mask]
+        avg_conf = bin_conf_sum[mask] / bin_counts[mask]
+        prop_in_bin = bin_counts[mask] / total_count
+
+        ece = torch.sum(torch.abs(avg_conf - avg_acc) * prop_in_bin)
 
         return (ece * 100.0).item()

@@ -49,17 +49,71 @@ balanced_mode: min
 mean: [0, 0, 0]
 std: [1, 1, 1]
 
+
 # # ==========================================
-# # Augmentation
+# # Augmentation & Regularization (NEUTRALIZED)
 # # ==========================================
-# aa: rand-m9-mstd0.5-inc1 
-# mixup: 0.8
-# cutmix: 1.0
-# mixup_prob: 1.0
-# mixup_switch_prob: 0.5
-# mixup_mode: batch
-# smoothing: 0.1
-# mixup_off_steps: 0      # Optional: Turn off mixup after N steps
+# # Auto-Augmentation Policy
+# aa: null                        # Set to null/None to disable RandAugment
+# aug_repeats: 0.0                # No repetition
+# aug_splits: 0                   
+
+# # Geometric Transformations (Forced Deterministic)
+# train_interpolation: bicubic    # Use a fixed interpolation (bicubic is better for upscaling)
+# scale: [1.0, 1.0]               # Force crop to cover 100% of the image
+# ratio: [1.0, 1.0]               # Force aspect ratio to be original (square)
+# hflip: 0.0                      # Disable horizontal flip
+# vflip: 0.0                      # Disable vertical flip
+
+# # Photometric (Color & Blur)
+# color_jitter: 0.0               # Disable color changes
+# grayscale_prob: 0.0             # Disable grayscale conversion
+# gaussian_blur_prob: 0.0         # Disable blur
+
+# # Regional Deletion (Random Erasing)
+# reprob: 0.0                     # Disable random erasing
+
+# # Mixed-Sample Augmentation
+# mixup: 0.0                      
+# cutmix: 0.0                     
+
+# # Label Regularization
+# smoothing: 0.1                  # Set to 0.0 to use hard labels (optional)
+
+
+# ==========================================
+# Augmentation & Regularization
+# ==========================================
+# Auto-Augmentation Policy
+aa: rand-m8-inc1-mstd1.0        # RandAugment magnitude 8, std 1.0
+aug_repeats: 0.0                # Repeated augmentation factor
+aug_splits: 0                   # Number of augmentation splits (0 = disabled)
+
+# Geometric Transformations
+train_interpolation: random     # Interpolation (random, bilinear, bicubic)
+scale: [0.08, 1.0]              # Random resize scale range
+ratio: [0.75, 1.3333333333333333] # Random resize aspect ratio range
+hflip: 0.5                      # Horizontal flip probability
+vflip: 0.0                      # Vertical flip probability (disabled)
+
+# Photometric (Color & Blur)
+color_jitter: 0.4               # Brightness/Contrast/Saturation factor
+grayscale_prob: 0.1             # Probability of grayscale conversion
+gaussian_blur_prob: 0.05        # Probability of Gaussian blur
+
+# Regional Deletion (Random Erasing)
+reprob: 0.25                    # Random erase probability
+remode: pixel                   # Erase mode (fill with random pixels)
+recount: 1                      # Number of areas to erase
+
+# Mixed-Sample Augmentation (Disabled)
+mixup: 0.0                      # Mixup alpha (0.0 = disabled)
+cutmix: 0.0                     # Cutmix alpha (0.0 = disabled)
+mixup_prob: 1.0                 # Probability of applying Mixup/Cutmix
+mixup_switch_prob: 0.5          # Probability of switching between them
+
+# Label Regularization
+smoothing: 0.1                  # Label smoothing factor    # Optional: Turn off mixup after N steps
 
 # ==========================================
 # Device & Distributed

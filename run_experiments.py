@@ -74,11 +74,11 @@ def main() -> None:
     experiments = [
         # 1. Baseline Step-Based Training (100k steps)
         {
-            "name": "baseline_step_20k_noaug",
+            "name": "baseline_step_20k",
             "naflex": False,
             "config": args.config, 
             "extra": [
-                "--no-aug",
+                #"--no-aug",
                 "--pin-mem",
             ],
         },
