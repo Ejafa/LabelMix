@@ -12,11 +12,11 @@ from typing import Any, Deque, Dict, List, Optional, Set
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
-    parser.add_argument("--config", default="./config/cifar100/mnv4_baseline.yaml",
+    parser.add_argument("--config", default="./config/cifar100/base.yaml",
                         help="Base config file")
     parser.add_argument("--nproc", type=int, default=4,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=1,
+    parser.add_argument("--max-parallel", type=int, default=3,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
-    parser.add_argument("--cuda-visible-devices", default="3,2,1,0",
+    parser.add_argument("--cuda-visible-devices", default="3,2,1,0,3,2,1,0,3,2,1,0",
                         help="Comma-separated GPU ids")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
     return parser
@@ -61,29 +61,50 @@ def main() -> None:
     ]
 
     base_train_common: List[str] = [
-        "--model", "mobilenetv4_conv_small",
         "--amp-dtype", "bfloat16",
+        "--batch-size", "128",
         "--num-steps", "19000",
         "--warmup-steps", "1000",
         "--patience-steps", "1000",
         "--num-logs", "1000",
         "--num-evals", "100",
         "--num-saves", "10",
+        "--wandb-project", "labelmix",
+        "--log-wandb",
     ]
+        
 
-    experiments = [
-        # 1. Baseline Step-Based Training (100k steps)
-        {
-            "name": "baseline_step_20k",
-            "naflex": False,
-            "config": args.config, 
-            "extra": [
-                #"--no-aug",
-                "--pin-mem",
-            ],
-        },
-
+    models = [
+        "mobilenetv4_conv_small",
+        "mobilenetv4_conv_medium",
+        "mobilenetv4_hybrid_medium",
+        "vit_wee_patch16_reg1_gap_256",
+        "vit_little_patch16_reg1_gap_256",
+        "vit_base_patch16_reg4_gap_256",
     ]
+    
+
+    experiments: List[Dict[str, Any]] = []
+    for model in models:
+        experiments.extend([
+            {
+                "name": f"baseline_{model}_noaug",
+                "config": args.config,
+                "extra": [
+                    "--model", model,
+                    "--no-aug",
+                    "--pin-mem",
+                ],
+            },
+            {
+                "name": f"baseline_{model}_aug",
+                "config": args.config,
+                "extra": [
+                    "--model", model,
+                    "--pin-mem",
+                ],
+            },
+        ])
 
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
     if args.nproc <= 0:
@@ -140,7 +161,6 @@ def main() -> None:
         gpu_group = available_groups.popleft()
         master_port = _pick_port()
         exp_config = exp.get("config", args.config)
-        use_naflex = exp.get("naflex", False)
         
         # Construct Command
         cmd = list(base_torchrun)
@@ -150,8 +170,7 @@ def main() -> None:
         cmd.extend(["-c", exp_config])
         cmd.extend(base_train_common)
         
-        if use_naflex:
-            cmd.extend(naflex_base_args)
+        
             
         cmd.extend(["--experiment", exp_name])
         cmd.extend(["--output", output_dir])

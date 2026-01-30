@@ -1,14 +1,14 @@
-# ==========================================
-# Training Loop (Step-Based)
-# ==========================================
-num_steps: 150000       
-num_logs: 1000             
-num_evals: 100                     
-num_saves: 10              
-batch_size: 128         
-warmup_steps: 5000      
-patience_steps: 5000  
-warmup_prefix: true
+# # ==========================================
+# # Training Loop (Step-Based)
+# # ==========================================
+# num_steps: 190000       
+# num_logs: 1000             
+# num_evals: 100                     
+# num_saves: 10              
+# batch_size: 128         
+# warmup_steps: 1000      
+# patience_steps: 1000  
+# warmup_prefix: true
 
 # ==========================================
 # Scheduler (Step-Based)
@@ -26,14 +26,13 @@ clip_grad: 5.0
 
 
 # ==========================================
-# Model Parameters (MobileNetV4 Small)
+# Model Parameters
 # ==========================================
-model: mobilenetv4_conv_small
 pretrained: false
 num_classes: 100
 img_size: 256
 model_ema: true
-model_ema_decay: 0.999
+model_ema_decay: 0.9995
 
 # ==========================================
 # Dataset Parameters
@@ -86,7 +85,7 @@ std: [1, 1, 1]
 # ==========================================
 # Auto-Augmentation Policy
 aa: rand-m8-inc1-mstd1.0        # RandAugment magnitude 8, std 1.0
-aug_repeats: 0.0                # Repeated augmentation factor
+aug_repeats: 0               # Repeated augmentation factor
 aug_splits: 0                   # Number of augmentation splits (0 = disabled)
 
 # Geometric Transformations
