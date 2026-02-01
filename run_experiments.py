@@ -14,9 +14,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
     parser.add_argument("--config", default="./config/cifar100/base.yaml",
                         help="Base config file")
-    parser.add_argument("--nproc", type=int, default=4,
+    parser.add_argument("--nproc", type=int, default=2,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=3,
+    parser.add_argument("--max-parallel", type=int, default=4,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
-    parser.add_argument("--cuda-visible-devices", default="3,2,1,0,3,2,1,0,3,2,1,0",
+    parser.add_argument("--cuda-visible-devices", default="3,2,3,2",
                         help="Comma-separated GPU ids")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
     return parser
@@ -63,7 +63,7 @@ def main() -> None:
     base_train_common: List[str] = [
         "--amp-dtype", "bfloat16",
         "--batch-size", "128",
-        "--num-steps", "19000",
+        "--num-steps", "20000",
         "--warmup-steps", "1000",
         "--patience-steps", "1000",
         "--num-logs", "1000",
@@ -72,15 +72,31 @@ def main() -> None:
         "--wandb-project", "labelmix",
         "--log-wandb",
     ]
+
+    labelmix_args: List[str] = [
+        "--labelmix",
+        "--labelmix-mix-k", "5",
+        "--labelmix-alpha-min", "0.1",
+        "--labelmix-alpha-max", "1.0",
+        "--labelmix-schedule", "linear",
+        "--labelmix-step-mode", "total",
+        "--labelmix-sampling",
+        "--labelmix-sampling-min-side-px", "8",
+        "--labelmix-sampling-max-aspect", "10.0",
+        "--labelmix-sampling-bins", "16",
+        "--labelmix-sampling-pool-size", "256",
+        "--labelmix-sampling-low-watermark", "64",
+        "--labelmix-sampling-max-attempts", "200",
+    ]
         
 
     models = [
         "mobilenetv4_conv_small",
-        "mobilenetv4_conv_medium",
-        "mobilenetv4_hybrid_medium",
+        # "mobilenetv4_conv_medium",
+        # "mobilenetv4_hybrid_medium",
         "vit_wee_patch16_reg1_gap_256",
-        "vit_little_patch16_reg1_gap_256",
-        "vit_base_patch16_reg4_gap_256",
+        # "vit_little_patch16_reg1_gap_256",
+        # "vit_base_patch16_reg4_gap_256",
     ]
     
 
@@ -102,6 +118,25 @@ def main() -> None:
                 "extra": [
                     "--model", model,
                     "--pin-mem",
+                ],
+            },
+            {
+                "name": f"labelmix_{model}_noaug",
+                "config": args.config,
+                "extra": [
+                    "--model", model,
+                    "--pin-mem",
+                    "--no-aug",
+                    *labelmix_args,
+                ],
+            },
+            {
+                "name": f"labelmix_{model}_aug",
+                "config": args.config,
+                "extra": [
+                    "--model", model,
+                    "--pin-mem",
+                    *labelmix_args,
                 ],
             },
         ])

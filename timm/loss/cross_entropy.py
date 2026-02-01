@@ -34,3 +34,26 @@ class SoftTargetCrossEntropy(nn.Module):
     def forward(self, x: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         loss = torch.sum(-target * F.log_softmax(x, dim=-1), dim=-1)
         return loss.mean()
+
+
+class LabelMixSoftTargetCrossEntropy(nn.Module):
+    """Soft CE for LabelMix targets: target = (labels[B,K], weights[B,K])."""
+
+    def __init__(self) -> None:
+        super(LabelMixSoftTargetCrossEntropy, self).__init__()
+
+    def forward(self, x: torch.Tensor, target) -> torch.Tensor:
+        if not isinstance(target, (tuple, list)) or len(target) != 2:
+            raise TypeError("LabelMix target must be a (labels, weights) tuple.")
+        labels, weights = target
+        if labels.ndim == 1:
+            labels = labels.unsqueeze(0)
+        if weights.ndim == 1:
+            weights = weights.unsqueeze(0)
+
+        labels = labels.to(dtype=torch.long)
+        logprobs = F.log_softmax(x, dim=-1)
+        nll = -logprobs.gather(dim=-1, index=labels)
+        weights = weights.to(dtype=nll.dtype)
+        loss = (nll * weights).sum(dim=-1)
+        return loss.mean()

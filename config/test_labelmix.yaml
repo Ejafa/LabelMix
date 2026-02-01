@@ -14,7 +14,7 @@
 # Scheduler (Step-Based)
 # ==========================================
 sched: cosine
-lr: 0.001 #3.0e-4                    
+lr: 3.0e-4                    
 warmup_lr: 0.0
 
 # ==========================================
@@ -32,7 +32,7 @@ pretrained: false
 num_classes: 100
 img_size: 256
 model_ema: true
-model_ema_decay: 0.999
+model_ema_decay: 0.9995
 
 # ==========================================
 # Dataset Parameters
@@ -132,3 +132,30 @@ output: ./output_cifar100_baseline_mnv4
 experiment: mnv4_baseline_cifar100
 log_wandb: true
 wandb_project: labelmix
+
+# ==========================================
+# Balanced Dataset + LabelMix (test overrides)
+# ==========================================
+balanced_mode: max
+balanced_buffer: 256
+balanced_cache_threshold: 256
+
+labelmix: true
+labelmix_mix_k: 5
+labelmix_alpha_min: 0.1
+labelmix_alpha_max: 1.0
+labelmix_schedule: linear
+labelmix_reverse: false
+labelmix_step_mode: total
+# labelmix_total_steps: 2000  # optional; defaults to num_steps if omitted
+
+# Short run overrides
+num_steps: 200
+warmup_steps: 10
+patience_steps: 20
+batch_size: 64
+log_interval: 10
+num_logs: 10
+num_evals: 1
+num_saves: 1
+log_wandb: false

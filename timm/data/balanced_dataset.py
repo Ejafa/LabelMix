@@ -1,324 +1,982 @@
 import io
 import os
+import math
 import pickle
 import random
-from collections import defaultdict
+from bisect import bisect_left
+from collections import defaultdict, deque
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from torch.utils.data import IterableDataset, get_worker_info
+
+from .labelmix_layout import generate_layout_cache
+
+
+# ---------------------------------------------------------------------
+# Optional torchvision import (cached once)
+# ---------------------------------------------------------------------
+try:
+    import torchvision.transforms.functional as TVF  # type: ignore
+except Exception:
+    TVF = None
+
+
+# =====================================================================
+# Alpha Scheduler (curriculum on Dirichlet alpha)
+# =====================================================================
+
+
+class AlphaScheduler:
+    """
+    Alpha schedule evaluated once per cycle row.
+
+    Modes:
+      schedule: fixed | linear | cosine
+      step_mode: epoch | total
+      reverse: if True, run max->min instead of min->max
+    """
+
+    def __init__(
+        self,
+        alpha_min: float = 0.2,
+        alpha_max: float = 2.0,
+        schedule: str = "fixed",
+        reverse: bool = False,
+        step_mode: str = "epoch",
+        warmup_steps: int = 0,
+        num_classes: int = 1000,
+        cycles_per_epoch: int = 1,
+        total_epochs: Optional[int] = None,
+        total_steps: Optional[int] = None,
+        batch_size: Optional[int] = None,
+    ) -> None:
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        self.schedule = schedule.lower()
+        self.reverse = bool(reverse)
+        self.step_mode = step_mode.lower()
+        self.cycles_per_epoch = max(1, int(cycles_per_epoch))
+
+        # Warmup: convert warmup_steps to warmup_cycles (approx)
+        self.warmup_cycles = 0
+        if warmup_steps > 0 and batch_size and num_classes > 0:
+            self.warmup_cycles = int(math.ceil((warmup_steps * batch_size) / num_classes))
+
+        # Total cycles for "total" mode
+        self.total_global_cycles = 1
+        if self.schedule != "fixed":
+            if total_epochs is not None:
+                self.total_global_cycles = int(total_epochs) * self.cycles_per_epoch
+            elif total_steps is not None and batch_size and num_classes > 0:
+                self.total_global_cycles = int(math.ceil((total_steps * batch_size) / num_classes))
+
+        self.scope_cycles = self.cycles_per_epoch if self.step_mode == "epoch" else self.total_global_cycles
+
+    def get_alpha(self, epoch: int, cycle_idx_in_epoch: int) -> float:
+        if self.schedule == "fixed":
+            return self.alpha_min
+
+        global_idx = epoch * self.cycles_per_epoch + cycle_idx_in_epoch
+
+        # Warmup: hold at one end
+        if global_idx < self.warmup_cycles:
+            return self.alpha_max if self.reverse else self.alpha_min
+
+        # Progress p in [0,1]
+        if self.step_mode == "epoch":
+            p = cycle_idx_in_epoch / max(1, self.scope_cycles - 1)
+        else:
+            eff_curr = global_idx - self.warmup_cycles
+            eff_tot = max(1, self.total_global_cycles - self.warmup_cycles - 1)
+            p = eff_curr / eff_tot
+
+        p = float(max(0.0, min(1.0, p)))
+        if self.schedule == "cosine":
+            p = 0.5 * (1.0 - math.cos(math.pi * p))
+
+        span = self.alpha_max - self.alpha_min
+        return (self.alpha_max - p * span) if self.reverse else (self.alpha_min + p * span)
+
+
+# =====================================================================
+# Layout -> Integer Boxes (robust tiling helpers)
+# =====================================================================
+
+
+def _cluster_sorted(values: List[float], eps: float) -> List[float]:
+    """Cluster sorted floats so near-equal boundaries become identical."""
+    if not values:
+        return []
+    values = sorted(values)
+    groups: List[List[float]] = [[values[0]]]
+    for v in values[1:]:
+        if abs(v - groups[-1][-1]) <= eps:
+            groups[-1].append(v)
+        else:
+            groups.append([v])
+    return [float(sum(g) / len(g)) for g in groups]
+
+
+def _enforce_strictly_increasing(coords: List[int], size_px: int) -> List[int]:
+    """
+    Enforce:
+      coords[0] == 0, coords[-1] == size_px
+      and strictly increasing interior coordinates.
+
+    NOTE: This implies you should not use K larger than the canvas resolution in pixels
+    in a way that forces too many unique boundaries.
+    """
+    if not coords:
+        return coords
+    coords[0] = 0
+    coords[-1] = size_px
+
+    # Forward pass: ensure >= prev+1
+    for i in range(1, len(coords) - 1):
+        coords[i] = max(coords[i], coords[i - 1] + 1)
+
+    # Backward pass: ensure <= next-1
+    for i in range(len(coords) - 2, 0, -1):
+        coords[i] = min(coords[i], coords[i + 1] - 1)
+
+    coords[0] = 0
+    coords[-1] = size_px
+    for i in range(1, len(coords) - 1):
+        coords[i] = max(0, min(size_px, coords[i]))
+    return coords
+
+
+def _nearest_index(sorted_vals: Sequence[float], v: float) -> int:
+    """Nearest index in a sorted list."""
+    i = bisect_left(sorted_vals, v)
+    if i <= 0:
+        return 0
+    if i >= len(sorted_vals):
+        return len(sorted_vals) - 1
+    return i if abs(sorted_vals[i] - v) < abs(v - sorted_vals[i - 1]) else (i - 1)
+
+
+def _layout_to_pixel_boxes(
+    layout_xywh: torch.Tensor,
+    H: int,
+    W: int,
+    canvas_size: float = 1.0,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """
+    Convert (K,4) float layout (x,y,w,h) into integer pixel boxes (K,4) [x0,y0,x1,y1],
+    using globally-consistent boundary snapping to reduce gaps/overlaps.
+    """
+    K = int(layout_xywh.shape[0])
+    S = float(canvas_size)
+
+    xywh = layout_xywh.detach().cpu().tolist()
+
+    x_edges = [0.0, S]
+    y_edges = [0.0, S]
+    for i in range(K):
+        xi, yi, wi, hi = xywh[i]
+        x_edges.extend([float(xi), float(xi + wi)])
+        y_edges.extend([float(yi), float(yi + hi)])
+
+    x_edges = [min(S, max(0.0, v)) for v in x_edges]
+    y_edges = [min(S, max(0.0, v)) for v in y_edges]
+
+    x_reps = _cluster_sorted(x_edges, eps=eps)
+    y_reps = _cluster_sorted(y_edges, eps=eps)
+
+    x_reps[0] = 0.0
+    x_reps[-1] = S
+    y_reps[0] = 0.0
+    y_reps[-1] = S
+
+    x_coords = [int(round((v / S) * W)) for v in x_reps]
+    y_coords = [int(round((v / S) * H)) for v in y_reps]
+    x_coords = _enforce_strictly_increasing(x_coords, size_px=W)
+    y_coords = _enforce_strictly_increasing(y_coords, size_px=H)
+
+    boxes = torch.zeros((K, 4), dtype=torch.int64)
+    for i in range(K):
+        xi, yi, wi, hi = xywh[i]
+        x0f = min(S, max(0.0, float(xi)))
+        x1f = min(S, max(0.0, float(xi + wi)))
+        y0f = min(S, max(0.0, float(yi)))
+        y1f = min(S, max(0.0, float(yi + hi)))
+
+        ix0 = _nearest_index(x_reps, x0f)
+        ix1 = _nearest_index(x_reps, x1f)
+        iy0 = _nearest_index(y_reps, y0f)
+        iy1 = _nearest_index(y_reps, y1f)
+
+        boxes[i, 0] = x_coords[min(ix0, ix1)]
+        boxes[i, 1] = y_coords[min(iy0, iy1)]
+        boxes[i, 2] = x_coords[max(ix0, ix1)]
+        boxes[i, 3] = y_coords[max(iy0, iy1)]
+
+    return boxes
+
+
+def _fallback_stripes_boxes(weights: torch.Tensor, H: int, W: int) -> torch.Tensor:
+    """
+    Fallback layout: vertical stripes across full height using weights (K,).
+    Produces guaranteed tiling boxes (K,4) [x0,y0,x1,y1].
+    """
+    K = int(weights.numel())
+    w = weights.detach().float().cpu()
+    s = float(w.sum())
+    if s <= 0:
+        w = torch.full((K,), 1.0 / K)
+    else:
+        w = w / s
+
+    cum = torch.cumsum(w, dim=0)
+    xs = [0] + [int(round(float(c) * W)) for c in cum[:-1]] + [W]
+    xs = _enforce_strictly_increasing(xs, size_px=W)
+
+    boxes = torch.zeros((K, 4), dtype=torch.int64)
+    for i in range(K):
+        boxes[i, 0] = xs[i]
+        boxes[i, 1] = 0
+        boxes[i, 2] = xs[i + 1]
+        boxes[i, 3] = H
+    return boxes
+
+
+def _boxes_are_valid_and_tile(boxes: torch.Tensor, H: int, W: int) -> bool:
+    if boxes.numel() == 0:
+        return False
+    x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    if torch.any(x1 <= x0) or torch.any(y1 <= y0):
+        return False
+    areas = (x1 - x0) * (y1 - y0)
+    return int(areas.sum().item()) == int(H * W)
+
+
+def _apply_box_symmetry(boxes: torch.Tensor, sym: int, S: int) -> torch.Tensor:
+    """
+    Apply D4 symmetry to integer pixel boxes on a square canvas size S (S == H == W).
+    boxes: (K,4) int64 [x0,y0,x1,y1]
+    Returns: (K,4) int64 transformed boxes.
+    """
+    x0 = boxes[:, 0]
+    y0 = boxes[:, 1]
+    x1 = boxes[:, 2]
+    y1 = boxes[:, 3]
+
+    if sym == 0:   # Identity
+        nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+    elif sym == 1:  # Rot90 CCW: (x,y)->(y, S-x)
+        nx0, ny0 = y0, S - x1
+        nx1, ny1 = y1, S - x0
+    elif sym == 2:  # Rot180
+        nx0, ny0 = S - x1, S - y1
+        nx1, ny1 = S - x0, S - y0
+    elif sym == 3:  # Rot270 CCW
+        nx0, ny0 = S - y1, x0
+        nx1, ny1 = S - y0, x1
+    elif sym == 4:  # FlipH
+        nx0, ny0 = S - x1, y0
+        nx1, ny1 = S - x0, y1
+    elif sym == 5:  # FlipV
+        nx0, ny0 = x0, S - y1
+        nx1, ny1 = x1, S - y0
+    elif sym == 6:  # Transpose
+        nx0, ny0 = y0, x0
+        nx1, ny1 = y1, x1
+    else:  # 7 AntiTranspose
+        nx0, ny0 = S - y1, S - x1
+        nx1, ny1 = S - y0, S - x0
+
+    return torch.stack([nx0, ny0, nx1, ny1], dim=1).to(dtype=torch.int64)
+
+
+def _apply_box_symmetry_rect(boxes: torch.Tensor, sym: int, H: int, W: int) -> torch.Tensor:
+    """
+    Rect-safe symmetries for non-square inputs. Supports only:
+      0 identity, 2 rot180, 4 flipH, 5 flipV
+    """
+    x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+
+    if sym == 0:
+        nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+    elif sym == 2:
+        nx0, ny0 = W - x1, H - y1
+        nx1, ny1 = W - x0, H - y0
+    elif sym == 4:
+        nx0, ny0 = W - x1, y0
+        nx1, ny1 = W - x0, y1
+    elif sym == 5:
+        nx0, ny0 = x0, H - y1
+        nx1, ny1 = x1, H - y0
+    else:
+        nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+
+    return torch.stack([nx0, ny0, nx1, ny1], dim=1).to(dtype=torch.int64)
+
+
+# =====================================================================
+# Dataset
+# =====================================================================
 
 
 class BalancedBucketDataset(IterableDataset):
     """
-    A high-performance, DDP-safe IterableDataset for class-balanced training.
+    Iterable dataset that yields class-balanced samples.
 
-    Features:
-    - Pure PyTorch vectorization for index generation.
-    - Supports Standard ImageFolder AND Hugging Face Datasets.
-    - Encoded buffering (bytes/PIL) for low RAM usage.
-    - Automatic RAM caching for small minority classes.
+    If labelmix=True, yields:
+      (mixed_image, (labels[K], weights[K]))
+    where labels/weights are ASCENDING by weight and aligned with slot order.
+
+    HuggingFace optimization:
+      - groups are loaded via base_dataset[indices] when possible (batch fetch).
+
+    LabelMix semantics:
+      - One Dirichlet draw per CYCLE ROW -> weights_desc -> layout_cache_desc cached per cycle row
+      - For each GROUP of K images within the row:
+          * Use base layout (sym=0) to compute slot sizes once (ASC)
+          * Precompute resize caches once (two orientations per slot)
+          * Pick K random symmetries from the cached 8 -> produce K outputs (one per shift)
+          * Clone each output image
+      - Rolling buffer + random pop; flush with shuffle
     """
+
     def __init__(
-            self,
-            base_dataset,
-            transform=None,
-            mode='max',
-            buffer_size=4096,
-            cache_path='class_buckets.pkl',
-            cache_small_classes_threshold=100,
-            input_key='image',
-            target_key='label',
-    ):
-        """
-        Args:
-            base_dataset: Standard ImageFolder or timm ImageDataset.
-            transform: The augmentation transform to apply AFTER buffering.
-            mode: 'min' (undersample), 'max' (oversample), or int (fixed cycles).
-            buffer_size: Size of the shuffle buffer (in images).
-            cache_path: Path to cache the class buckets.
-            cache_small_classes_threshold: If a class has fewer images than this, cache them in RAM (encoded).
-        """
+        self,
+        base_dataset,
+        transform=None,
+        mode: str = "max",
+        buffer_size: int = 4096,
+        cache_path: str = "class_buckets.pkl",
+        cache_small_classes_threshold: int = 100,
+        input_key: str = "image",
+        target_key: str = "label",
+        labelmix: bool = False,
+        labelmix_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> None:
         super().__init__()
         self.base_dataset = base_dataset
         self.transform = transform
-        self.mode = mode
+        self.mode = str(mode)
         self.buffer_size = int(buffer_size)
         self.cache_threshold = int(cache_small_classes_threshold)
         self.input_key = input_key
         self.target_key = target_key
         self._epoch = 0
 
-        if self.buffer_size < 1:
-            raise ValueError('buffer_size must be >= 1')
+        self.labelmix = bool(labelmix)
+        self.lm_config = labelmix_kwargs or {}
+        self.mix_k = int(self.lm_config.get("mix_k", 4))
+        if self.mix_k < 2:
+            raise ValueError("mix_k must be >= 2")
 
-        # --- 1. Efficient Indexing ---
-        self.reader = getattr(base_dataset, 'reader', None)
-        self.is_hf = hasattr(base_dataset, 'features') or hasattr(base_dataset, 'column_names')
+        self.debug_sym = bool(self.lm_config.get("debug_sym", False))
+
+        self.sampling_enabled = bool(self.lm_config.get("sampling", False))
+        self.sampling_min_side_px = int(self.lm_config.get("sampling_min_side_px", 6))
+        self.sampling_max_aspect = float(self.lm_config.get("sampling_max_aspect", 10.0))
+        self.sampling_bins = int(self.lm_config.get("sampling_bins", 16))
+        self.sampling_pool_size = int(self.lm_config.get("sampling_pool_size", 128))
+        self.sampling_low_watermark = int(self.lm_config.get("sampling_low_watermark", 32))
+        self.sampling_max_attempts = int(self.lm_config.get("sampling_max_attempts", 200))
+        self._sampling_pools: Optional[List[deque]] = None
+        self._sampling_hw: Optional[Tuple[int, int]] = None
+
+        # Precompute indices for cyclic permutation:
+        # circulant_idx[shift, slot] = (slot + shift) % K
+        K = self.mix_k
+        self._shift_idx = torch.arange(K, dtype=torch.int64)
+        self._circulant_idx = (self._shift_idx[:, None] + self._shift_idx[None, :]) % K
+
+        # Identify HF-style dataset
+        self.is_hf = hasattr(base_dataset, "column_names") or hasattr(base_dataset, "features")
+
+        # Detect sample list for file-based datasets
         self._raw_samples = self._get_samples_list(base_dataset)
+
+        # Build / load buckets
         self.buckets = self._load_or_build_buckets(cache_path)
 
-        # Vectorization Prep: Convert to Torch Tensors
         self.classes = torch.tensor(sorted(list(self.buckets.keys())), dtype=torch.int64)
-        self.num_classes = len(self.classes)
+        self.num_classes = int(self.classes.numel())
         if self.num_classes == 0:
-            raise ValueError('No classes found in dataset')
+            raise ValueError("No classes found in buckets.")
+
         self.bucket_arrays = [torch.tensor(self.buckets[int(c)], dtype=torch.int64) for c in self.classes]
         self.bucket_lengths = torch.tensor([len(b) for b in self.bucket_arrays], dtype=torch.int64)
-        if torch.any(self.bucket_lengths == 0):
-            raise ValueError('One or more classes have zero samples')
+        self.bucket_len_map = {
+            int(c): int(l) for c, l in zip(self.classes.tolist(), self.bucket_lengths.tolist())
+        }
 
-        self.bucket_len_map = {int(c): int(l) for c, l in zip(self.classes, self.bucket_lengths)}
-
-        # --- 2. Calculate M (Target Cycles) ---
-        if isinstance(mode, int):
-            self.M = int(mode)
-        elif mode == 'min':
+        # cycles per epoch
+        if self.mode == "min":
             self.M = int(torch.min(self.bucket_lengths).item())
-        else:  # max
+        elif self.mode == "max":
             self.M = int(torch.max(self.bucket_lengths).item())
-
-        if self.M < 1:
-            raise ValueError('mode must result in at least 1 cycle per class')
+        else:
+            self.M = int(self.mode)
+        self.M = max(1, self.M)
 
         self.total_images_global = int(self.num_classes * self.M)
 
-        # --- 3. Minority Class Caching Init ---
-        # We allow workers to populate this locally
-        self.local_byte_cache = {}
+        if self.labelmix:
+            self.alpha_scheduler = AlphaScheduler(
+                alpha_min=float(self.lm_config.get("alpha_min", 0.2)),
+                alpha_max=float(self.lm_config.get("alpha_max", 2.0)),
+                schedule=str(self.lm_config.get("schedule", "fixed")),
+                reverse=bool(self.lm_config.get("reverse", False)),
+                step_mode=str(self.lm_config.get("step_mode", "epoch")),
+                warmup_steps=int(self.lm_config.get("warmup_steps", 0)),
+                num_classes=self.num_classes,
+                cycles_per_epoch=self.M,
+                total_epochs=self.lm_config.get("total_epochs"),
+                total_steps=self.lm_config.get("total_steps"),
+                batch_size=self.lm_config.get("batch_size"),
+            )
+            if self.sampling_enabled:
+                bins = max(1, self.sampling_bins)
+                self._sampling_pools = [deque() for _ in range(bins)]
 
-    def _get_samples_list(self, base_dataset):
-        if hasattr(base_dataset, 'parser'):
-            return base_dataset.parser.samples
-        if hasattr(base_dataset, 'samples'):
-            return base_dataset.samples
-        if self.reader is not None and hasattr(self.reader, 'samples'):
-            return self.reader.samples
-        return None
+        self.local_byte_cache: Dict[int, Tuple[Any, int]] = {}
 
-    def _get_targets(self):
-        # 1. Try fast raw samples access (ImageFolder/timm)
-        if self._raw_samples is not None:
-            return [s[1] for s in self._raw_samples]
+    def _sampling_bin_idx(self, alpha: float) -> int:
+        bins = max(1, self.sampling_bins)
+        if bins == 1 or self.alpha_scheduler.alpha_max <= self.alpha_scheduler.alpha_min:
+            return 0
+        t = (alpha - self.alpha_scheduler.alpha_min) / (self.alpha_scheduler.alpha_max - self.alpha_scheduler.alpha_min)
+        t = max(0.0, min(1.0, float(t)))
+        return int(t * (bins - 1))
 
-        # 2. Try Hugging Face Column Access
-        if self.is_hf:
-            try:
-                # This loads the label column. Efficient for arrow datasets.
-                return self.base_dataset[self.target_key]
-            except KeyError:
-                raise AttributeError(
-                    f'HF dataset missing target_key="{self.target_key}". '
-                    f'Available: {self.base_dataset.column_names}'
-                )
-            except Exception as e:
-                raise AttributeError(f'Failed to load targets from HF dataset: {e}')
+    def _layout_is_valid(self, weights_desc: torch.Tensor, H: int, W: int) -> bool:
+        base_layout_desc = generate_layout_cache(weights_desc, canvas_size=1.0)[0]
+        base_layout_asc = torch.flip(base_layout_desc, dims=[0])
+        boxes = _layout_to_pixel_boxes(base_layout_asc, H=H, W=W, canvas_size=1.0, eps=1e-7)
+        if not _boxes_are_valid_and_tile(boxes, H=H, W=W):
+            return False
 
-        # 3. Try timm Reader
-        if self.reader is not None and hasattr(self.reader, 'dataset'):
-            label_key = getattr(self.reader, 'label_key', self.target_key)
-            try:
-                targets = self.reader.dataset[label_key]
-            except Exception as e:
-                raise AttributeError(f'Dataset missing label_key="{label_key}"') from e
-            if getattr(self.reader, 'remap_class', False):
-                class_to_idx = getattr(self.reader, 'class_to_idx', None)
-                if class_to_idx is not None:
-                    targets = [class_to_idx[t] for t in targets]
-            return targets
+        x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        widths = (x1 - x0).to(dtype=torch.float32)
+        heights = (y1 - y0).to(dtype=torch.float32)
+        min_side = torch.minimum(widths, heights)
+        max_side = torch.maximum(widths, heights)
 
-        # 4. Fallback attributes
-        if hasattr(self.base_dataset, 'targets'):
-            return self.base_dataset.targets
+        if self.sampling_min_side_px > 0 and torch.any(min_side < float(self.sampling_min_side_px)):
+            return False
+        if self.sampling_max_aspect > 0.0:
+            aspect = max_side / torch.clamp(min_side, min=1.0)
+            if torch.any(aspect > float(self.sampling_max_aspect)):
+                return False
+        return True
 
-        raise AttributeError(
-            'base_dataset must provide targets, samples, or be a Hugging Face dataset for balanced loading'
-        )
+    def _sample_dirichlet_layout(self, alpha: float, H: int, W: int) -> torch.Tensor:
+        K = self.mix_k
+        if alpha <= 0.0:
+            return torch.full((K,), 1.0 / K, dtype=torch.float32)
+        dirichlet = torch.distributions.Dirichlet(torch.full((K,), alpha))
+        for _ in range(max(1, self.sampling_max_attempts)):
+            w = dirichlet.sample().to(dtype=torch.float32)
+            weights_desc, _ = torch.sort(w, descending=True)
+            if self._layout_is_valid(weights_desc, H=H, W=W):
+                return w
 
-    def _is_primary(self):
-        return (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
+        # Fallback to uniform to avoid stalling
+        return torch.full((K,), 1.0 / K, dtype=torch.float32)
 
-    def _load_or_build_buckets(self, cache_path):
-        # Attempt Load
-        if cache_path and os.path.exists(cache_path):
-            if self._is_primary():
-                print(f'[BalancedDataset] Loading buckets from {cache_path}')
-            try:
-                with open(cache_path, 'rb') as f:
-                    return pickle.load(f)
-            except Exception:
-                print('[BalancedDataset] Cache corrupt or unreadable, rebuilding...')
+    def _get_sampling_weights(self, alpha: float, H: int, W: int) -> torch.Tensor:
+        if self._sampling_pools is None:
+            return self._sample_dirichlet_layout(alpha, H=H, W=W)
+        if self._sampling_hw != (H, W):
+            for pool in self._sampling_pools:
+                pool.clear()
+            self._sampling_hw = (H, W)
 
-        if self._is_primary():
-            print('[BalancedDataset] Indexing dataset (one-time setup)...')
+        bin_idx = self._sampling_bin_idx(alpha)
+        pool = self._sampling_pools[bin_idx]
 
-        buckets = defaultdict(list)
-        targets = self._get_targets()
+        if len(pool) <= self.sampling_low_watermark:
+            for _ in range(max(1, self.sampling_pool_size - len(pool))):
+                pool.append(self._sample_dirichlet_layout(alpha, H=H, W=W))
 
-        # Validation: Ensure targets align with dataset length
-        try:
-            total_len = len(self.base_dataset)
-            if len(targets) != total_len:
-                print(
-                    f'[BalancedDataset] Warning: Target length ({len(targets)}) '
-                    f'!= Dataset length ({total_len}).'
-                )
-        except Exception:
-            pass
+        while pool:
+            w = pool.popleft()
+            return w
 
-        for idx, target in enumerate(targets):
-            buckets[int(target)].append(idx)
+        return self._sample_dirichlet_layout(alpha, H=H, W=W)
 
-        # Atomic Save
-        if cache_path and self._is_primary():
-            try:
-                tmp_path = f'{cache_path}.tmp'
-                with open(tmp_path, 'wb') as f:
-                    pickle.dump(dict(buckets), f)
-                os.replace(tmp_path, cache_path)
-            except Exception as e:
-                print(f'[BalancedDataset] Failed to save cache: {e}')
-
-        return buckets
-
-    def set_epoch(self, epoch):
+    def set_epoch(self, epoch: int) -> None:
         self._epoch = int(epoch)
 
-    def __len__(self):
+    def __len__(self) -> int:
         if dist.is_available() and dist.is_initialized():
             return self.total_images_global // dist.get_world_size()
         return self.total_images_global
 
-    def __iter__(self):
-        # --- Worker & DDP Split ---
-        if dist.is_available() and dist.is_initialized():
-            num_replicas = dist.get_world_size()
-            rank = dist.get_rank()
-        else:
-            num_replicas = 1
-            rank = 0
+    # -------------------------
+    # Dataset plumbing
+    # -------------------------
 
-        worker_info = get_worker_info()
-        num_workers = worker_info.num_workers if worker_info else 1
-        worker_id = worker_info.id if worker_info else 0
-        base_seed = worker_info.seed if worker_info else torch.initial_seed()
+    def _get_samples_list(self, base_dataset):
+        if hasattr(base_dataset, "samples"):
+            return base_dataset.samples
+        if hasattr(base_dataset, "parser") and hasattr(base_dataset.parser, "samples"):
+            return base_dataset.parser.samples
+        return None
 
-        # Global Stride
-        total_workers = num_replicas * num_workers
-        global_worker_id = (rank * num_workers) + worker_id
+    def _load_or_build_buckets(self, path: str) -> Dict[int, List[int]]:
+        if path and os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    obj = pickle.load(f)
+                    if isinstance(obj, dict) and len(obj) > 0:
+                        return obj
+            except Exception:
+                pass
 
-        # Seed torch RNG for this worker + epoch
-        seed = (base_seed + self._epoch * 10007 + rank * 1000003) % (2 ** 32 - 1)
-        rng = torch.Generator()
-        rng.manual_seed(int(seed))
+        buckets: Dict[int, List[int]] = defaultdict(list)
 
-        # Assign Cycles to Worker
-        worker_cycles = torch.arange(global_worker_id, self.M, total_workers, dtype=torch.int64)
-        num_worker_cycles = int(worker_cycles.numel())
-
-        if num_worker_cycles == 0:
-            return
-
-        # --- 4. VECTORIZED Scheduler ---
-        # Create a matrix of indices: (Cycles, Classes)
-        schedule = torch.empty((num_worker_cycles, self.num_classes), dtype=torch.int64)
-
-        for i in range(self.num_classes):
-            indices = self.bucket_arrays[i]
-            n_imgs = int(indices.numel())
-
-            if self.mode == 'min':
-                # Deterministic striding
-                selected_pos = worker_cycles % n_imgs
-                schedule[:, i] = indices[selected_pos]
-            else:
-                # Random sampling with replacement
-                rand_pos = torch.randint(n_imgs, (num_worker_cycles,), generator=rng)
-                schedule[:, i] = indices[rand_pos]
-
-        # Shuffle columns (Classes) within each row (Cycle)
-        noise = torch.rand(schedule.shape, generator=rng)
-        permutations = torch.argsort(noise, dim=1)
-
-        row_indices = torch.arange(num_worker_cycles, dtype=torch.int64).unsqueeze(1)
-        shuffled_schedule = schedule[row_indices, permutations]
-
-        # Flatten to 1D stream
-        flat_indices = shuffled_schedule.flatten()
-
-        # --- 5. High-Performance Yield Loop ---
-        buffer = []
-        raw_samples = self._raw_samples
-
-        for idx in flat_indices:
-            idx_int = int(idx)
-            cached = self.local_byte_cache.get(idx_int)
-            # Hit Cache
-            if cached is not None:
-                img_obj, target = cached
-                buffer.append((img_obj, target))
-            else:
-                # Miss Cache - Fetch
+        # 1) File-based datasets
+        if self._raw_samples:
+            targets = [int(s[1]) for s in self._raw_samples]
+            for idx, t in enumerate(targets):
+                buckets[int(t)].append(int(idx))
+            if path:
                 try:
-                    # A. Standard ImageFolder (Fastest)
-                    if raw_samples is not None:
-                        path, target = raw_samples[idx_int][0], raw_samples[idx_int][1]
-                        with open(path, 'rb') as f:
-                            img_obj = f.read()
+                    with open(path, "wb") as f:
+                        pickle.dump(dict(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
+                except Exception:
+                    pass
+            return buckets
 
-                    # B. Hugging Face / Map-Style
-                    else:
-                        item = self.base_dataset[idx_int]
-                        if self.is_hf:
-                            img_obj = item[self.input_key]
-                            target = item[self.target_key]
-                        elif isinstance(item, (tuple, list)) and len(item) >= 2:
-                            img_obj, target = item[0], item[1]
-                        elif isinstance(item, dict):
-                            img_obj = item[self.input_key]
-                            target = item[self.target_key]
-                        else:
-                            # If we hit this, the dataset format is unknown.
-                            # We raise error here because catching it loop-wide is dangerous.
-                            raise ValueError(f'Unknown sample format at index {idx_int}: {type(item)}')
+        # 2) Torchvision-style datasets with .targets
+        if hasattr(self.base_dataset, "targets"):
+            targets = [int(t) for t in self.base_dataset.targets]
+            for idx, t in enumerate(targets):
+                buckets[int(t)].append(int(idx))
+            if path:
+                try:
+                    with open(path, "wb") as f:
+                        pickle.dump(dict(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
+                except Exception:
+                    pass
+            return buckets
 
-                    # Populate Cache (Small classes only)
-                    if self.bucket_len_map.get(int(target), 0) <= self.cache_threshold:
-                        self.local_byte_cache[idx_int] = (img_obj, target)
+        # 3) Hugging Face datasets (random access)
+        if self.is_hf:
+            if not hasattr(self.base_dataset, "__len__") or not hasattr(self.base_dataset, "__getitem__"):
+                raise ValueError("Hugging Face streaming datasets are not supported (need random access).")
+            try:
+                targets = self.base_dataset[self.target_key]
+            except Exception as e:
+                raise ValueError(f"Could not read target column '{self.target_key}' from HF dataset.") from e
+            for idx, t in enumerate(targets):
+                buckets[int(t)].append(int(idx))
+            if path:
+                try:
+                    with open(path, "wb") as f:
+                        pickle.dump(dict(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
+                except Exception:
+                    pass
+            return buckets
 
-                    buffer.append((img_obj, target))
+        raise ValueError(
+            "Could not infer targets. Provide a dataset with .samples, .parser.samples, .targets, "
+            "or a Hugging Face dataset with a target column."
+        )
 
-                except (IOError, OSError, UnidentifiedImageError, IndexError, ValueError):
-                    # Only catch predictable data errors.
-                    # Let KeyErrors (config errors) crash the script so you see them.
+    def _load_item(self, idx: int) -> Tuple[Any, int]:
+        if idx in self.local_byte_cache:
+            return self.local_byte_cache[idx]
+
+        if self._raw_samples:
+            path, target = self._raw_samples[idx]
+            with open(path, "rb") as f:
+                img = f.read()
+            target = int(target)
+        else:
+            item = self.base_dataset[idx]
+            if isinstance(item, dict):
+                img = item[self.input_key]
+                target = int(item[self.target_key])
+            elif isinstance(item, (tuple, list)) and len(item) >= 2:
+                img, target = item[0], int(item[1])
+            else:
+                raise ValueError(f"Unknown sample format at index {idx}: {type(item)}")
+
+        # Cache only bytes; avoid holding PIL objects for HF
+        if self.bucket_len_map.get(int(target), 0) <= self.cache_threshold and isinstance(img, (bytes, bytearray)):
+            self.local_byte_cache[idx] = (img, target)
+
+        return img, target
+
+    def _load_items_batch(self, indices: List[int]) -> List[Tuple[Any, int]]:
+        """
+        Batch load items.
+        - HF datasets: base_dataset[indices] returns dict-of-lists (fast path).
+        - Others: fallback to per-item loads.
+        """
+        if not indices:
+            return []
+
+        if self._raw_samples:
+            return [self._load_item(int(i)) for i in indices]
+
+        if self.is_hf:
+            try:
+                batch = self.base_dataset[indices]
+                if isinstance(batch, dict) and self.input_key in batch and self.target_key in batch:
+                    imgs = batch[self.input_key]
+                    tgts = batch[self.target_key]
+                    return [(imgs[i], int(tgts[i])) for i in range(len(tgts))]
+                if isinstance(batch, list) and batch and isinstance(batch[0], dict):
+                    return [(b[self.input_key], int(b[self.target_key])) for b in batch]
+            except Exception:
+                pass
+
+        return [self._load_item(int(i)) for i in indices]
+
+    # -------------------------
+    # Image conversion (no numpy)
+    # -------------------------
+
+    @staticmethod
+    def _pil_to_chw_uint8(img: Image.Image) -> torch.Tensor:
+        """
+        Convert PIL RGB image -> CHW uint8 tensor without numpy.
+        Prefers torchvision if available; otherwise uses tobytes().
+        """
+        if TVF is not None:
+            return TVF.pil_to_tensor(img)
+
+        img = img.convert("RGB")
+        w, h = img.size
+        data = img.tobytes()
+        mv = memoryview(data)
+        try:
+            t = torch.frombuffer(mv, dtype=torch.uint8)
+        except Exception:
+            t = torch.tensor(bytearray(mv), dtype=torch.uint8)
+        t = t.view(h, w, 3).permute(2, 0, 1).contiguous()
+        return t
+
+    def _process_image(self, img_obj: Any) -> torch.Tensor:
+        """
+        Returns CHW float32 in [0,1].
+        """
+        try:
+            if isinstance(img_obj, (bytes, bytearray)):
+                img = Image.open(io.BytesIO(img_obj)).convert("RGB")
+            elif isinstance(img_obj, Image.Image):
+                img = img_obj.convert("RGB")
+            else:
+                img = Image.fromarray(img_obj).convert("RGB")
+        except Exception:
+            img = Image.new("RGB", (224, 224))
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if isinstance(img, torch.Tensor):
+            t = img
+        else:
+            t = self._pil_to_chw_uint8(img)
+
+        # Ensure float for interpolate + model input
+        if t.dtype not in (torch.float16, torch.float32, torch.float64):
+            t = t.float().div(255.0)
+        else:
+            t = t.float()
+
+        return t
+
+    # -------------------------
+    # Schedule generation
+    # -------------------------
+
+    def _build_schedule(self, rng: torch.Generator, worker_cycles: torch.Tensor) -> torch.Tensor:
+        """
+        Build schedule rows for this worker: (num_rows, num_classes).
+        Each row has one index per class, then shuffled within-row.
+        """
+        num_rows = int(worker_cycles.numel())
+        schedule = torch.empty((num_rows, self.num_classes), dtype=torch.int64)
+
+        for ci in range(self.num_classes):
+            indices = self.bucket_arrays[ci]
+            n = int(indices.numel())
+            if n <= 0:
+                raise ValueError("Empty class bucket encountered.")
+
+            if self.mode == "min":
+                schedule[:, ci] = indices[worker_cycles % n]
+            else:
+                r = torch.randint(n, (num_rows,), generator=rng, dtype=torch.int64)
+                schedule[:, ci] = indices[r]
+
+        noise = torch.rand(schedule.shape, generator=rng)
+        order = torch.argsort(noise, dim=1)
+        return schedule.gather(1, order)
+
+    # -------------------------
+    # LabelMix core (your mixing semantics)
+    # -------------------------
+
+    def _mix_group_labelmix(
+        self,
+        imgs: List[torch.Tensor],
+        targets: List[int],
+        layout_cache_desc: torch.Tensor,
+        weights_desc: torch.Tensor,
+    ) -> List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
+        """
+        Group mixing:
+          1) Base layout = sym 0 -> compute base boxes once (ASC slot order)
+          2) Precompute resize caches once from base slot sizes:
+               resized0[slot] = resize(batch) to (hi,wi)
+               resized1[slot] = resize(batch) to (wi,hi)  (for 90/270/transpose/antitranspose)
+          3) Pick K random symmetries (one per output shift) from 8 cached layouts
+          4) Render K outputs
+          5) Output labels/weights in ASC slot order, and CLONE each output image
+        """
+        K = self.mix_k
+
+        with torch.inference_mode():
+            batch = torch.stack(imgs, dim=0).contiguous()
+            _, C, H, W = batch.shape
+
+            # Choose symmetries for each shift
+            if H == W:
+                sym_choices = torch.randint(0, 8, (K,), dtype=torch.int64)
+            else:
+                allowed = torch.tensor([0, 2, 4, 5], dtype=torch.int64)
+                sym_choices = allowed[torch.randint(0, allowed.numel(), (K,))]
+
+            # Base layout = sym 0 (DESC->ASC)
+            base_layout_desc = layout_cache_desc[0]
+            base_layout_asc = torch.flip(base_layout_desc, dims=[0])
+
+            # Output weights are ASC; move to same device
+            weights_asc = torch.flip(weights_desc, dims=[0]).float().contiguous()
+            weights_asc = weights_asc.to(device=batch.device)
+
+            base_boxes = _layout_to_pixel_boxes(base_layout_asc, H=H, W=W, canvas_size=1.0, eps=1e-7)
+            if not _boxes_are_valid_and_tile(base_boxes, H=H, W=W):
+                base_boxes = _fallback_stripes_boxes(weights_asc, H=H, W=W).to(base_boxes.device)
+
+            # Precompute resize caches once from base slot sizes
+            resized0: List[torch.Tensor] = []
+            resized1: List[torch.Tensor] = []
+            for slot_i in range(K):
+                x0 = int(base_boxes[slot_i, 0].item())
+                y0 = int(base_boxes[slot_i, 1].item())
+                x1 = int(base_boxes[slot_i, 2].item())
+                y1 = int(base_boxes[slot_i, 3].item())
+                hi = max(1, y1 - y0)
+                wi = max(1, x1 - x0)
+
+                resized0.append(F.interpolate(batch, size=(hi, wi), mode="bilinear", align_corners=False))
+                resized1.append(F.interpolate(batch, size=(wi, hi), mode="bilinear", align_corners=False))
+
+            shifts = self._shift_idx.to(batch.device, non_blocking=True) if batch.device.type != "cpu" else self._shift_idx
+            circulant = (
+                self._circulant_idx.to(batch.device, non_blocking=True)
+                if batch.device.type != "cpu"
+                else self._circulant_idx
+            )
+
+            tgt = torch.as_tensor(targets, dtype=torch.int64, device=batch.device)
+            labels_mat = tgt[circulant]
+
+            out_batch = batch.new_zeros((K, C, H, W))
+
+            for sym in torch.unique(sym_choices).tolist():
+                sym = int(sym)
+                mask = (sym_choices == sym)
+                shift_subset = shifts[mask]
+                if shift_subset.numel() == 0:
                     continue
 
-            if len(buffer) >= self.buffer_size:
-                random.shuffle(buffer)
-                for b in buffer:
-                    yield self._process_item(b[0], b[1])
-                buffer = []
+                # Layout-only augmentation: symmetry to integer boxes
+                if H == W:
+                    boxes_sym = _apply_box_symmetry(base_boxes, sym=sym, S=W)
+                else:
+                    boxes_sym = _apply_box_symmetry_rect(base_boxes, sym=sym, H=H, W=W)
 
-        # Flush remaining
-        if buffer:
+                # Symmetries that swap width/height for slots (square only)
+                swap = (H == W) and (sym in (1, 3, 6, 7))
+
+                for slot_i in range(K):
+                    x0 = int(boxes_sym[slot_i, 0].item())
+                    y0 = int(boxes_sym[slot_i, 1].item())
+                    x1 = int(boxes_sym[slot_i, 2].item())
+                    y1 = int(boxes_sym[slot_i, 3].item())
+
+                    cache = resized1[slot_i] if swap else resized0[slot_i]
+                    src_idx = (slot_i + shift_subset) % K
+                    patches = cache.index_select(0, src_idx)
+
+                    th = max(1, y1 - y0)
+                    tw = max(1, x1 - x0)
+                    ph, pw = patches.shape[-2], patches.shape[-1]
+                    if ph != th or pw != tw:
+                        patches = F.interpolate(patches, size=(th, tw), mode="bilinear", align_corners=False)
+
+                    out_batch[shift_subset, :, y0:y1, x0:x1] = patches
+
+            out: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = []
+            for s in range(K):
+                if self.debug_sym:
+                    out.append((out_batch[s].clone(), (labels_mat[s].clone(), weights_asc.clone(), int(sym_choices[s].item()))))
+                else:
+                    out.append((out_batch[s].clone(), (labels_mat[s].clone(), weights_asc.clone())))
+            return out
+
+    def _iter_labelmix(self, schedule: torch.Tensor, worker_cycles: torch.Tensor):
+        """
+        LabelMix iteration:
+          - one Dirichlet draw per cycle row
+          - layout cache built once per cycle row
+          - for each group of K indices inside the row:
+              produce K outputs with K random symmetries from the cached 8
+          - push to rolling buffer and yield randomly
+        """
+        buffer: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = []
+        K = self.mix_k
+        emitted = 0
+        last_exc: Optional[Exception] = None
+
+        for row_i in range(schedule.shape[0]):
+            cycle_idx_in_epoch = int(worker_cycles[row_i].item())
+            alpha = float(self.alpha_scheduler.get_alpha(self._epoch, cycle_idx_in_epoch))
+
+            weights: Optional[torch.Tensor] = None
+            weights_desc: Optional[torch.Tensor] = None
+            layout_cache_desc: Optional[torch.Tensor] = None
+
+            # Within the row, group into chunks of K (no cross-row carry)
+            row_indices = schedule[row_i].tolist()
+            usable = (len(row_indices) // K) * K
+
+            for g0 in range(0, usable, K):
+                group_indices = [int(x) for x in row_indices[g0 : g0 + K]]
+                try:
+                    items = self._load_items_batch(group_indices)
+
+                    imgs: List[torch.Tensor] = []
+                    tgts: List[int] = []
+                    for img_obj, tgt in items:
+                        imgs.append(self._process_image(img_obj))
+                        tgts.append(int(tgt))
+
+                    if weights_desc is None or layout_cache_desc is None:
+                        shape = imgs[0].shape
+                        if len(shape) == 3:
+                            H, W = int(shape[-2]), int(shape[-1])
+                        else:
+                            H, W = int(shape[-2]), int(shape[-1])
+                        if self.sampling_enabled:
+                            weights = self._get_sampling_weights(alpha, H=H, W=W)
+                        else:
+                            if alpha > 0.0:
+                                dirichlet = torch.distributions.Dirichlet(torch.full((K,), alpha))
+                                weights = dirichlet.sample().to(dtype=torch.float32)
+                            else:
+                                weights = torch.full((K,), 1.0 / K, dtype=torch.float32)
+                        weights_desc, _ = torch.sort(weights, descending=True)
+                        layout_cache_desc = generate_layout_cache(weights_desc, canvas_size=1.0)
+
+                    mixed_items = self._mix_group_labelmix(
+                        imgs=imgs,
+                        targets=tgts,
+                        layout_cache_desc=layout_cache_desc,
+                        weights_desc=weights_desc,
+                    )
+                    buffer.extend(mixed_items)
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+
+                while len(buffer) >= self.buffer_size:
+                    i = random.randint(0, len(buffer) - 1)
+                    buffer[i], buffer[-1] = buffer[-1], buffer[i]
+                    emitted += 1
+                    yield buffer.pop()
+
+        random.shuffle(buffer)
+        for item in buffer:
+            emitted += 1
+            yield item
+
+        if emitted == 0:
+            if last_exc is not None:
+                raise RuntimeError("LabelMix produced no samples; last group error attached.") from last_exc
+            raise RuntimeError("LabelMix produced no samples; check mix_k and dataset class count.")
+
+    # -------------------------
+    # Iterator
+    # -------------------------
+
+    def __iter__(self):
+        # Distributed
+        if dist.is_available() and dist.is_initialized():
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+        else:
+            world_size, rank = 1, 0
+
+        # DataLoader workers
+        info = get_worker_info()
+        num_workers = info.num_workers if info else 1
+        worker_id = info.id if info else 0
+
+        total_workers = world_size * num_workers
+        global_worker_id = rank * num_workers + worker_id
+
+        if self.labelmix and self.num_classes < self.mix_k:
+            raise ValueError(f"LabelMix requires num_classes >= mix_k (got {self.num_classes} < {self.mix_k})")
+
+        worker_cycles = torch.arange(global_worker_id, self.M, total_workers, dtype=torch.int64)
+        if worker_cycles.numel() == 0:
+            return iter(())
+
+        # Independence across workers/ranks (not strict determinism)
+        seed = (torch.initial_seed() + 1009 * self._epoch + 9176 * global_worker_id) % (2**32 - 1)
+        random.seed(seed)
+        torch.manual_seed(seed)
+        rng = torch.Generator()
+        rng.manual_seed(seed)
+
+        schedule = self._build_schedule(rng=rng, worker_cycles=worker_cycles)
+
+        if self.labelmix:
+            yield from self._iter_labelmix(schedule=schedule, worker_cycles=worker_cycles)
+        else:
+            # Non-labelmix path: batch-fetch in chunks if possible (HF speedup)
+            buffer: List[Tuple[torch.Tensor, int]] = []
+            flat = [int(x) for x in schedule.flatten().tolist()]
+
+            chunk_size = max(64, min(1024, self.buffer_size))
+            for i0 in range(0, len(flat), chunk_size):
+                chunk = flat[i0 : i0 + chunk_size]
+                try:
+                    items = self._load_items_batch(chunk)
+                except Exception:
+                    items = [self._load_item(int(i)) for i in chunk]
+
+                for img_obj, tgt in items:
+                    try:
+                        buffer.append((self._process_image(img_obj), int(tgt)))
+                    except Exception:
+                        continue
+
+                    if len(buffer) >= self.buffer_size:
+                        random.shuffle(buffer)
+                        for item in buffer:
+                            yield item
+                        buffer = []
+
             random.shuffle(buffer)
-            for b in buffer:
-                yield self._process_item(b[0], b[1])
-
-    def _process_item(self, img_obj, target):
-        try:
-            if isinstance(img_obj, bytes):
-                img = Image.open(io.BytesIO(img_obj)).convert('RGB')
-            elif isinstance(img_obj, Image.Image):
-                img = img_obj.convert('RGB')
-            else:
-                # Fallback for numpy arrays (often used in TFDS/custom datasets)
-                img = Image.fromarray(img_obj).convert('RGB')
-        except Exception:
-            # If decoding fails here, we return a black image to keep batch size consistent
-            img = Image.new('RGB', (224, 224))
-
-        if self.transform:
-            img = self.transform(img)
-        return img, target
+            for item in buffer:
+                yield item

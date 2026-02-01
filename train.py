@@ -37,7 +37,13 @@ from timm.data import create_dataset, create_loader, create_naflex_loader, resol
     create_transform, Mixup, FastCollateMixup, AugMixDataset
 from timm.data.loader import PrefetchLoader, _worker_init, fast_collate
 from timm.layers import convert_splitbn_model, convert_sync_batchnorm, set_fast_norm
-from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, LabelSmoothingCrossEntropy
+from timm.loss import (
+    JsdCrossEntropy,
+    SoftTargetCrossEntropy,
+    LabelMixSoftTargetCrossEntropy,
+    BinaryCrossEntropy,
+    LabelSmoothingCrossEntropy,
+)
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, model_parameters
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler_v2, scheduler_kwargs
@@ -117,6 +123,42 @@ group.add_argument('--balanced-input-key', default=None, type=str,
                    help='Input key override for balanced loading (default: --input-key or "image")')
 group.add_argument('--balanced-target-key', default=None, type=str,
                    help='Target key override for balanced loading (default: --target-key or "label")')
+group.add_argument('--labelmix', action='store_true', default=False,
+                   help='Enable LabelMix augmentation for balanced loading.')
+group.add_argument('--labelmix-mix-k', default=5, type=int,
+                   help='LabelMix K (number of mixed images per output).')
+group.add_argument('--labelmix-alpha-min', default=0.1, type=float,
+                   help='LabelMix Dirichlet alpha min.')
+group.add_argument('--labelmix-alpha-max', default=1.0, type=float,
+                   help='LabelMix Dirichlet alpha max.')
+group.add_argument('--labelmix-schedule', default='linear', type=str,
+                   choices=['fixed', 'linear', 'cosine'],
+                   help='LabelMix alpha schedule.')
+group.add_argument('--labelmix-reverse', action='store_true', default=False,
+                   help='Reverse LabelMix alpha schedule (max->min).')
+group.add_argument('--labelmix-step-mode', default='total', type=str,
+                   choices=['epoch', 'total'],
+                   help='LabelMix alpha step mode.')
+group.add_argument('--labelmix-warmup-steps', default=0, type=int,
+                   help='LabelMix warmup steps for alpha schedule.')
+group.add_argument('--labelmix-total-epochs', default=None, type=int,
+                   help='LabelMix total epochs for schedule (required for step-mode=total).')
+group.add_argument('--labelmix-total-steps', default=None, type=int,
+                   help='LabelMix total steps for schedule (alternative to total-epochs).')
+group.add_argument('--labelmix-sampling', action='store_true', default=False,
+                   help='Enable minimum-weight sampling for LabelMix weights.')
+group.add_argument('--labelmix-sampling-min-side-px', default=6, type=int,
+                   help='Minimum side length (px) allowed for any slot in base layout.')
+group.add_argument('--labelmix-sampling-max-aspect', default=10.0, type=float,
+                   help='Maximum aspect ratio allowed for any slot in base layout.')
+group.add_argument('--labelmix-sampling-bins', default=16, type=int,
+                   help='Number of alpha bins for sampling cache.')
+group.add_argument('--labelmix-sampling-pool-size', default=128, type=int,
+                   help='Per-bin sampling pool size.')
+group.add_argument('--labelmix-sampling-low-watermark', default=32, type=int,
+                   help='Refill threshold for sampling pool.')
+group.add_argument('--labelmix-sampling-max-attempts', default=200, type=int,
+                   help='Max attempts per sampled weight.')
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
@@ -517,6 +559,13 @@ def main():
     args.prefetcher = not args.no_prefetcher
     args.grad_accum_steps = max(1, args.grad_accum_steps)
 
+    if args.labelmix and args.prefetcher:
+        _logger.info('Disabling prefetcher for LabelMix (target format not supported).')
+        args.prefetcher = False
+
+    if args.labelmix_total_steps is None and args.num_steps:
+        args.labelmix_total_steps = args.num_steps
+
     if args.balanced_mode:
         if isinstance(args.balanced_mode, str):
             mode = args.balanced_mode.strip().lower()
@@ -534,6 +583,14 @@ def main():
 
     if args.balanced_cache_threshold < 0:
         parser.error('--balanced-cache-threshold must be >= 0')
+
+    if args.labelmix:
+        if not args.balanced_mode:
+            parser.error('--labelmix requires --balanced-mode to be set')
+        if args.labelmix_mix_k < 2:
+            parser.error('--labelmix-mix-k must be >= 2')
+        if args.labelmix_step_mode == 'total' and not (args.labelmix_total_epochs or args.labelmix_total_steps):
+            parser.error('--labelmix-step-mode=total requires --labelmix-total-epochs or --labelmix-total-steps')
 
     if args.balanced_mode and args.naflex_loader:
         parser.error('--balanced-mode is not compatible with --naflex-loader')
@@ -929,6 +986,26 @@ def main():
                 base_dir = args.data_dir or args.data or '.'
                 balanced_cache_path = os.path.join(base_dir, 'class_buckets.pkl')
 
+            labelmix_kwargs = {
+                'mix_k': args.labelmix_mix_k,
+                'alpha_min': args.labelmix_alpha_min,
+                'alpha_max': args.labelmix_alpha_max,
+                'schedule': args.labelmix_schedule,
+                'reverse': args.labelmix_reverse,
+                'step_mode': args.labelmix_step_mode,
+                'warmup_steps': args.labelmix_warmup_steps,
+                'total_epochs': args.labelmix_total_epochs,
+                'total_steps': args.labelmix_total_steps,
+                'batch_size': args.batch_size,
+                'sampling': args.labelmix_sampling,
+                'sampling_min_side_px': args.labelmix_sampling_min_side_px,
+                'sampling_max_aspect': args.labelmix_sampling_max_aspect,
+                'sampling_bins': args.labelmix_sampling_bins,
+                'sampling_pool_size': args.labelmix_sampling_pool_size,
+                'sampling_low_watermark': args.labelmix_sampling_low_watermark,
+                'sampling_max_attempts': args.labelmix_sampling_max_attempts,
+            }
+
             dataset_train = BalancedBucketDataset(
                 base_dataset=dataset_train,
                 transform=train_transform,
@@ -938,6 +1015,8 @@ def main():
                 cache_small_classes_threshold=args.balanced_cache_threshold,
                 input_key=balanced_input_key,
                 target_key=balanced_target_key,
+                labelmix=args.labelmix,
+                labelmix_kwargs=labelmix_kwargs,
             )
 
             if collate_fn is None:
@@ -1020,7 +1099,9 @@ def main():
             )
 
     # setup loss function
-    if args.jsd_loss:
+    if args.labelmix:
+        train_loss_fn = LabelMixSoftTargetCrossEntropy()
+    elif args.jsd_loss:
         assert num_aug_splits > 1  # JSD only valid with aug splits set
         train_loss_fn = JsdCrossEntropy(num_splits=num_aug_splits, smoothing=args.smoothing)
     elif mixup_active:
@@ -1454,7 +1535,14 @@ def train_step(
         input, target = next(loader)
 
         if not args.prefetcher:
-            input, target = input.to(device=device, dtype=model_dtype), target.to(device=device)
+            input = input.to(device=device, dtype=model_dtype)
+            if args.labelmix and isinstance(target, (tuple, list)) and len(target) == 2:
+                target = (
+                    target[0].to(device=device),
+                    target[1].to(device=device),
+                )
+            else:
+                target = target.to(device=device)
             if mixup_fn is not None:
                 input, target = mixup_fn(input, target)
         if args.channels_last:
@@ -1548,7 +1636,16 @@ def train_step(
         train_state.update_sample_count += global_batch_size
 
         with torch.no_grad():
-            if target.ndim > 1:
+            if args.labelmix and isinstance(target, (tuple, list)) and len(target) == 2:
+                labels, weights = target
+                if labels.ndim == 1:
+                    labels = labels.unsqueeze(0)
+                if weights.ndim == 1:
+                    weights = weights.unsqueeze(0)
+                # Use highest-weight label for metrics
+                max_idx = weights.argmax(dim=1)
+                clean_target = labels.gather(1, max_idx.unsqueeze(1)).squeeze(1)
+            elif target.ndim > 1:
                 clean_target = target.argmax(dim=1)
             else:
                 clean_target = target
