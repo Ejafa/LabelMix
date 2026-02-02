@@ -523,6 +523,12 @@ class BalancedBucketDataset(IterableDataset):
             return base_dataset.samples
         if hasattr(base_dataset, "parser") and hasattr(base_dataset.parser, "samples"):
             return base_dataset.parser.samples
+        reader = getattr(base_dataset, "reader", None)
+        if reader is not None:
+            if hasattr(reader, "samples"):
+                return reader.samples
+            if hasattr(reader, "parser") and hasattr(reader.parser, "samples"):
+                return reader.parser.samples
         return None
 
     def _load_or_build_buckets(self, path: str) -> Dict[int, List[int]]:
@@ -563,7 +569,35 @@ class BalancedBucketDataset(IterableDataset):
                     pass
             return buckets
 
-        # 3) Hugging Face datasets (random access)
+        # 3) Hugging Face datasets wrapped by timm ImageDataset / ReaderHfds
+        reader = getattr(self.base_dataset, "reader", None)
+        hf_dataset = getattr(reader, "dataset", None) if reader is not None else None
+        if hf_dataset is not None and (hasattr(hf_dataset, "column_names") or hasattr(hf_dataset, "features")):
+            target_key = self.target_key
+            if hasattr(hf_dataset, "column_names") and target_key not in hf_dataset.column_names:
+                reader_label_key = getattr(reader, "label_key", None)
+                if reader_label_key and reader_label_key in hf_dataset.column_names:
+                    target_key = reader_label_key
+            if hasattr(hf_dataset, "column_names") and target_key not in hf_dataset.column_names:
+                raise ValueError(
+                    f"Could not read target column '{target_key}' from HF dataset. "
+                    f"Available columns: {hf_dataset.column_names}"
+                )
+            try:
+                targets = hf_dataset[target_key]
+            except Exception as e:
+                raise ValueError(f"Could not read target column '{target_key}' from HF dataset.") from e
+            for idx, t in enumerate(targets):
+                buckets[int(t)].append(int(idx))
+            if path:
+                try:
+                    with open(path, "wb") as f:
+                        pickle.dump(dict(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
+                except Exception:
+                    pass
+            return buckets
+
+        # 4) Hugging Face datasets (random access)
         if self.is_hf:
             if not hasattr(self.base_dataset, "__len__") or not hasattr(self.base_dataset, "__getitem__"):
                 raise ValueError("Hugging Face streaming datasets are not supported (need random access).")

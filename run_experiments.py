@@ -94,7 +94,7 @@ def main() -> None:
         "mobilenetv4_conv_small",
         # "mobilenetv4_conv_medium",
         # "mobilenetv4_hybrid_medium",
-        "vit_wee_patch16_reg1_gap_256",
+        # "vit_wee_patch16_reg1_gap_256",
         # "vit_little_patch16_reg1_gap_256",
         # "vit_base_patch16_reg4_gap_256",
     ]
@@ -112,33 +112,33 @@ def main() -> None:
                     "--pin-mem",
                 ],
             },
-            {
-                "name": f"baseline_{model}_aug",
-                "config": args.config,
-                "extra": [
-                    "--model", model,
-                    "--pin-mem",
-                ],
-            },
-            {
-                "name": f"labelmix_{model}_noaug",
-                "config": args.config,
-                "extra": [
-                    "--model", model,
-                    "--pin-mem",
-                    "--no-aug",
-                    *labelmix_args,
-                ],
-            },
-            {
-                "name": f"labelmix_{model}_aug",
-                "config": args.config,
-                "extra": [
-                    "--model", model,
-                    "--pin-mem",
-                    *labelmix_args,
-                ],
-            },
+            # {
+            #     "name": f"baseline_{model}_aug",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--pin-mem",
+            #     ],
+            # },
+            # {
+            #     "name": f"labelmix_{model}_noaug",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--pin-mem",
+            #         "--no-aug",
+            #         *labelmix_args,
+            #     ],
+            # },
+            # {
+            #     "name": f"labelmix_{model}_aug",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--pin-mem",
+            #         *labelmix_args,
+            #     ],
+            # },
         ])
 
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
