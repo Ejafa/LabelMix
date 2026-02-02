@@ -581,6 +581,10 @@ def main():
             parser.error('--balanced-mode int value must be >= 1')
         args.balanced_mode = mode
 
+    if args.balanced_mode and args.prefetcher:
+        _logger.info('Disabling prefetcher for balanced dataset (CPU-side normalization expected).')
+        args.prefetcher = False
+
     if args.balanced_cache_threshold < 0:
         parser.error('--balanced-cache-threshold must be >= 0')
 

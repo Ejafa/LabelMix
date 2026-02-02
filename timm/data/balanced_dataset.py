@@ -412,15 +412,26 @@ class BalancedBucketDataset(IterableDataset):
         }
 
         # cycles per epoch
+        min_len = int(torch.min(self.bucket_lengths).item())
+        max_len = int(torch.max(self.bucket_lengths).item())
         if self.mode == "min":
-            self.M = int(torch.min(self.bucket_lengths).item())
+            self.M = min_len
         elif self.mode == "max":
-            self.M = int(torch.max(self.bucket_lengths).item())
+            self.M = max_len
         else:
             self.M = int(self.mode)
         self.M = max(1, self.M)
 
         self.total_images_global = int(self.num_classes * self.M)
+
+        is_primary = True
+        if dist.is_available() and dist.is_initialized():
+            is_primary = dist.get_rank() == 0
+        if is_primary:
+            print(
+                f"[BalancedBucketDataset] mode={self.mode} min_len={min_len} max_len={max_len} "
+                f"M={self.M} total_images={self.total_images_global}"
+            )
 
         if self.labelmix:
             self.alpha_scheduler = AlphaScheduler(

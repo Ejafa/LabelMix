@@ -66,11 +66,36 @@ def main() -> None:
         "--num-steps", "20000",
         "--warmup-steps", "1000",
         "--patience-steps", "1000",
+        "--warmup-prefix",
+        "--sched-on-updates",
         "--num-logs", "1000",
         "--num-evals", "100",
         "--num-saves", "10",
         "--wandb-project", "labelmix",
         "--log-wandb",
+    ]
+
+    augmentation_args: List[str] = [
+        "--aa", "rand-m8-inc1-mstd1.0",
+        "--aug-repeats", "0",
+        "--aug-splits", "0",
+        "--train-interpolation", "random",
+        "--scale", "0.08", "1.0",
+        "--ratio", "0.75", "1.3333333333333333",
+        "--hflip", "0.5",
+        "--vflip", "0.0",
+        "--color-jitter", "0.4",
+        "--grayscale-prob", "0.1",
+        "--gaussian-blur-prob", "0.05",
+        "--reprob", "0.25",
+        "--remode", "pixel",
+        "--recount", "1",
+        "--mixup", "0.0",
+        "--cutmix", "0.0",
+        "--mixup-prob", "1.0",
+        "--mixup-switch-prob", "0.5",
+        "--mixup-mode", "batch",
+        "--smoothing", "0.1",
     ]
 
     labelmix_args: List[str] = [
@@ -204,6 +229,7 @@ def main() -> None:
         cmd.append("train.py")
         cmd.extend(["-c", exp_config])
         cmd.extend(base_train_common)
+        cmd.extend(augmentation_args)
         
         
             
