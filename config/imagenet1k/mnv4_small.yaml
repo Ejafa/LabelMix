@@ -3,20 +3,24 @@ model: mobilenetv4_conv_small
 dataset: hfds/ILSVRC/imagenet-1k
 data_dir: ./data/imagenet-1k
 
+
 opt: adamw
-opt_betas: [0.6, 0.995]
-weight_decay: 0.06
-lr_base: 0.002
-lr_base_size: 4096
+#opt_betas: [0.6, 0.995]
+weight_decay: 0.05
+# lr_base: 0.002
+# lr_base_size: 4096
+lr: 0.001 #3.0e-4                    
 warmup_lr: 0.0
+sched: cosine
+
 
 drop: 0.25
 
 model_ema: true
-model_ema_decay: 0.99995
+model_ema_decay: 0.9995
 model_ema_warmup: true
 
 amp: true
 amp_dtype: bfloat16
 channels_last: true
-workers: 8
+

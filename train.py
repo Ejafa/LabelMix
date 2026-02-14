@@ -19,14 +19,18 @@ import copy
 import importlib
 import json
 import logging
+import math
 import os
 import time
 from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
 from functools import partial
+from typing import Optional
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
 import torchvision.utils
 import yaml
@@ -55,6 +59,10 @@ from timm.task import (
     TokenDistillationTask,
 )
 
+try:
+    mp.set_sharing_strategy("file_system")
+except Exception as exc:
+    logging.warning("Unable to set multiprocessing sharing strategy: %s", exc)
 
 try:
     import wandb
@@ -115,6 +123,12 @@ group.add_argument('--balanced-mode', default='', type=str,
                    help='Enable balanced loading: "min", "max", or int (samples per class). Default: disabled.')
 group.add_argument('--balanced-buffer', default=4096, type=int,
                    help='Buffer size for balanced loading (default: 4096)')
+group.add_argument('--balanced-buffer-steps', default='0', type=str,
+                   help='If > 0, set balanced buffer size to steps * batch_size '
+                        '(or global batch size when centralized LabelMix is enabled).')
+group.add_argument('--balanced-cache-threshold-steps', default='0', type=str,
+                   help='If > 0, set balanced cache threshold to steps * batch_size '
+                        '(or global batch size when centralized LabelMix is enabled).')
 group.add_argument('--balanced-cache-path', default='', type=str,
                    help='Cache path for balanced class buckets (default: <data-dir>/class_buckets.pkl)')
 group.add_argument('--balanced-cache-threshold', default=256, type=int,
@@ -159,6 +173,12 @@ group.add_argument('--labelmix-sampling-low-watermark', default=32, type=int,
                    help='Refill threshold for sampling pool.')
 group.add_argument('--labelmix-sampling-max-attempts', default=200, type=int,
                    help='Max attempts per sampled weight.')
+group.add_argument('--labelmix-producer-rank', default=-1, type=int,
+                   help='Centralize LabelMix on a single rank and scatter batches. '
+                        'Set to rank id (e.g. 0) to enable, -1 disables.')
+group.add_argument('--labelmix-producer-workers', default=0, type=int,
+                   help='Num DataLoader workers for centralized LabelMix producer. '
+                        'If <=0, falls back to --workers.')
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
@@ -433,6 +453,8 @@ group.add_argument('--checkpoint-hist', type=int, default=10, metavar='N',
                    help='number of checkpoints to keep (default: 10)')
 group.add_argument('-j', '--workers', type=int, default=4, metavar='N',
                    help='how many training processes to use (default: 4)')
+group.add_argument('--loader-prefetch-factor', type=int, default=None, metavar='N',
+                   help='DataLoader prefetch factor per worker when --workers > 0 (default: PyTorch default)')
 group.add_argument('--save-images', action='store_true', default=False,
                    help='save images of input batches every log interval for debugging')
 group.add_argument('--pin-mem', action='store_true', default=False,
@@ -544,9 +566,182 @@ class RepeatingLoader:
         return getattr(self.loader, name)
 
 
+class _NoOp:
+    def set_epoch(self, epoch: int) -> None:
+        return None
+
+
+class LabelMixBroadcastLoader:
+    def __init__(
+        self,
+        loader,
+        batch_size: int,
+        mix_k: int,
+        producer_rank: int,
+        pin_memory: bool,
+        group=None,
+        log_fn=None,
+    ) -> None:
+        if not (dist.is_available() and dist.is_initialized()):
+            raise RuntimeError("LabelMixBroadcastLoader requires distributed training.")
+        self.loader = loader
+        self.batch_size = int(batch_size)
+        self.mix_k = int(mix_k)
+        self.producer_rank = int(producer_rank)
+        self.pin_memory = bool(pin_memory)
+        self.group = group
+        self.log_fn = log_fn
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        self._meta_ready = False
+        self._input_buf: Optional[torch.Tensor] = None
+        self._labels_buf: Optional[torch.Tensor] = None
+        self._weights_buf: Optional[torch.Tensor] = None
+        self._iter = None
+        self._steps_per_epoch = self._broadcast_len()
+        self.dataset = self.loader.dataset if self.rank == self.producer_rank and self.loader is not None else _NoOp()
+        self.sampler = self.loader.sampler if self.rank == self.producer_rank and self.loader is not None else _NoOp()
+
+    def _broadcast_len(self) -> int:
+        length = 0
+        if self.rank == self.producer_rank and self.loader is not None:
+            try:
+                length = len(self.loader)
+            except TypeError:
+                length = 0
+        length_t = torch.tensor([length], dtype=torch.int64)
+        dist.broadcast(length_t, src=self.producer_rank, group=self.group)
+        return int(length_t.item())
+
+    def __len__(self) -> int:
+        return self._steps_per_epoch
+
+    def __iter__(self):
+        if self.rank == self.producer_rank:
+            self._iter = None
+        return self
+
+    def __getattr__(self, name):
+        if self.rank == self.producer_rank and self.loader is not None:
+            return getattr(self.loader, name)
+        raise AttributeError(name)
+
+
+    @staticmethod
+    def _dtype_from_string(value: str) -> torch.dtype:
+        value = value.replace("torch.", "")
+        return getattr(torch, value)
+
+    def _broadcast_meta(self, input_tensor, labels, weights) -> None:
+        if self.rank == self.producer_rank:
+            if input_tensor is None or labels is None or weights is None:
+                raise RuntimeError("Producer must supply tensors for meta broadcast.")
+            if input_tensor.shape[0] % self.world_size != 0:
+                raise ValueError("Global batch size must be divisible by world size.")
+            per_rank_bs = input_tensor.shape[0] // self.world_size
+            meta = {
+                "input_shape": (per_rank_bs,) + tuple(input_tensor.shape[1:]),
+                "input_dtype": str(input_tensor.dtype),
+                "labels_shape": (per_rank_bs,) + tuple(labels.shape[1:]),
+                "labels_dtype": str(labels.dtype),
+                "weights_shape": (per_rank_bs,) + tuple(weights.shape[1:]),
+                "weights_dtype": str(weights.dtype),
+            }
+        else:
+            meta = None
+        obj_list = [meta]
+        dist.broadcast_object_list(obj_list, src=self.producer_rank, group=self.group)
+        meta = obj_list[0]
+        input_dtype = self._dtype_from_string(meta["input_dtype"])
+        labels_dtype = self._dtype_from_string(meta["labels_dtype"])
+        weights_dtype = self._dtype_from_string(meta["weights_dtype"])
+        self._input_buf = torch.empty(
+            meta["input_shape"],
+            dtype=input_dtype,
+            pin_memory=self.pin_memory,
+        )
+        self._labels_buf = torch.empty(
+            meta["labels_shape"],
+            dtype=labels_dtype,
+            pin_memory=self.pin_memory,
+        )
+        self._weights_buf = torch.empty(
+            meta["weights_shape"],
+            dtype=weights_dtype,
+            pin_memory=self.pin_memory,
+        )
+        self._meta_ready = True
+        if self.log_fn is not None and self.rank == self.producer_rank:
+            self.log_fn(
+                f"[LabelMixProducer] broadcast meta: per_rank_bs={meta['input_shape'][0]} "
+                f"mix_k={meta['labels_shape'][1]}"
+            )
+
+    @staticmethod
+    def _split_target(target):
+        if not isinstance(target, (tuple, list)) or len(target) != 2:
+            raise ValueError("LabelMix producer expected target as (labels, weights).")
+        return target[0], target[1]
+
+    def _scatter(self, input_tensor, labels, weights) -> None:
+        if self.rank == self.producer_rank:
+            input_chunks = list(input_tensor.chunk(self.world_size, dim=0))
+            labels_chunks = list(labels.chunk(self.world_size, dim=0))
+            weights_chunks = list(weights.chunk(self.world_size, dim=0))
+            dist.scatter(self._input_buf, scatter_list=input_chunks, src=self.producer_rank, group=self.group)
+            dist.scatter(self._labels_buf, scatter_list=labels_chunks, src=self.producer_rank, group=self.group)
+            dist.scatter(self._weights_buf, scatter_list=weights_chunks, src=self.producer_rank, group=self.group)
+        else:
+            dist.scatter(self._input_buf, scatter_list=None, src=self.producer_rank, group=self.group)
+            dist.scatter(self._labels_buf, scatter_list=None, src=self.producer_rank, group=self.group)
+            dist.scatter(self._weights_buf, scatter_list=None, src=self.producer_rank, group=self.group)
+
+    def __next__(self):
+        eof_t = torch.zeros(1, dtype=torch.uint8)
+        if self.rank == self.producer_rank:
+            if self.loader is None:
+                raise RuntimeError("LabelMix producer rank has no loader.")
+            try:
+                if self._iter is None:
+                    self._iter = iter(self.loader)
+                batch = next(self._iter)
+                eof_t[0] = 0
+            except StopIteration:
+                self._iter = None
+                eof_t[0] = 1
+                batch = None
+            dist.broadcast(eof_t, src=self.producer_rank, group=self.group)
+            if eof_t.item():
+                raise StopIteration
+            input_tensor, target = batch
+            labels, weights = self._split_target(target)
+            if not self._meta_ready:
+                self._broadcast_meta(input_tensor, labels, weights)
+            self._scatter(input_tensor, labels, weights)
+        else:
+            dist.broadcast(eof_t, src=self.producer_rank, group=self.group)
+            if eof_t.item():
+                raise StopIteration
+            if not self._meta_ready:
+                self._broadcast_meta(None, None, None)
+            self._scatter(None, None, None)
+        return self._input_buf, (self._labels_buf, self._weights_buf)
+
+
 def main():
     utils.setup_default_logging()
     args, args_text = _parse_args()
+
+    def _parse_step_setting(value: str, name: str) -> tuple[int, bool]:
+        raw = str(value).strip().lower()
+        if raw in ('', '0'):
+            return 0, False
+        if raw in ('auto', '-1'):
+            return 0, True
+        if raw.isdigit():
+            return int(raw), False
+        parser.error(f'{name} must be a non-negative int or "auto"')
+        return 0, False
 
     if args.device_modules:
         for module in args.device_modules:
@@ -587,6 +782,12 @@ def main():
 
     if args.balanced_cache_threshold < 0:
         parser.error('--balanced-cache-threshold must be >= 0')
+    balanced_buffer_steps, balanced_buffer_steps_auto = _parse_step_setting(
+        args.balanced_buffer_steps, '--balanced-buffer-steps')
+    balanced_cache_steps, balanced_cache_steps_auto = _parse_step_setting(
+        args.balanced_cache_threshold_steps, '--balanced-cache-threshold-steps')
+    if args.labelmix_producer_workers < 0:
+        parser.error('--labelmix-producer-workers must be >= 0')
 
     if args.labelmix:
         if not args.balanced_mode:
@@ -595,6 +796,8 @@ def main():
             parser.error('--labelmix-mix-k must be >= 2')
         if args.labelmix_step_mode == 'total' and not (args.labelmix_total_epochs or args.labelmix_total_steps):
             parser.error('--labelmix-step-mode=total requires --labelmix-total-epochs or --labelmix-total-steps')
+    elif args.labelmix_producer_rank >= 0:
+        parser.error('--labelmix-producer-rank requires --labelmix')
 
     if args.balanced_mode and args.naflex_loader:
         parser.error('--balanced-mode is not compatible with --naflex-loader')
@@ -606,6 +809,62 @@ def main():
     else:
         _logger.info(f'Training with a single process on 1 device ({args.device}).')
     assert args.rank >= 0
+
+    central_labelmix = args.labelmix and args.labelmix_producer_rank >= 0
+    labelmix_cpu_group = None
+    if central_labelmix:
+        if not args.distributed:
+            parser.error('--labelmix-producer-rank requires distributed training')
+        if args.labelmix_producer_rank >= args.world_size or args.labelmix_producer_rank < 0:
+            parser.error('--labelmix-producer-rank must be within [0, world_size)')
+        try:
+            labelmix_cpu_group = dist.new_group(backend='gloo')
+        except Exception as exc:
+            raise RuntimeError('Failed to create gloo process group for LabelMix producer.') from exc
+        if utils.is_primary(args):
+            _logger.info(
+                f'LabelMix centralized producer enabled on rank {args.labelmix_producer_rank} '
+                f'(world_size={args.world_size}).'
+            )
+
+    buffer_batch = args.batch_size * args.world_size if central_labelmix else args.batch_size
+    balanced_buffer = args.balanced_buffer
+    if balanced_buffer_steps_auto:
+        balanced_buffer_steps = int(math.ceil(float(balanced_buffer) / float(buffer_batch)))
+        if utils.is_primary(args):
+            _logger.info(
+                f'Balanced buffer steps (auto) resolved to {balanced_buffer_steps} '
+                f'from buffer_size={balanced_buffer} (batch={buffer_batch}).'
+            )
+    if balanced_buffer_steps > 0:
+        balanced_buffer = int(balanced_buffer_steps) * int(buffer_batch)
+        if balanced_buffer < 1:
+            parser.error('--balanced-buffer-steps yields buffer_size < 1')
+        if utils.is_primary(args):
+            mode = "auto" if balanced_buffer_steps_auto else "manual"
+            _logger.info(
+                f'Balanced buffer steps ({mode})={balanced_buffer_steps} '
+                f'=> buffer_size={balanced_buffer} (batch={buffer_batch}).'
+            )
+
+    balanced_cache_threshold = args.balanced_cache_threshold
+    if balanced_cache_steps_auto:
+        balanced_cache_steps = int(math.ceil(float(balanced_cache_threshold) / float(buffer_batch)))
+        if utils.is_primary(args):
+            _logger.info(
+                f'Balanced cache threshold steps (auto) resolved to {balanced_cache_steps} '
+                f'from threshold={balanced_cache_threshold} (batch={buffer_batch}).'
+            )
+    if balanced_cache_steps > 0:
+        balanced_cache_threshold = int(balanced_cache_steps) * int(buffer_batch)
+        if balanced_cache_threshold < 0:
+            parser.error('--balanced-cache-threshold-steps yields threshold < 0')
+        if utils.is_primary(args):
+            mode = "auto" if balanced_cache_steps_auto else "manual"
+            _logger.info(
+                f'Balanced cache threshold steps ({mode})={balanced_cache_steps} '
+                f'=> threshold={balanced_cache_threshold} (batch={buffer_batch}).'
+            )
 
     model_dtype = None
     if args.model_dtype:
@@ -834,8 +1093,13 @@ def main():
     train_interpolation = args.train_interpolation
     if args.no_aug or not train_interpolation:
         train_interpolation = data_config['interpolation']
-        
+
     # Check if we should use the NaFlex scheduled loader
+    loader_prefetch_factor = None
+    if args.loader_prefetch_factor is not None and args.loader_prefetch_factor > 0:
+        loader_prefetch_factor = args.loader_prefetch_factor
+    prefetch_label = str(loader_prefetch_factor) if loader_prefetch_factor is not None else "default"
+    _logger.info("DataLoader prefetch_factor=%s (workers=%s)", prefetch_label, args.workers)
     common_loader_kwargs = dict(
         mean=data_config['mean'],
         std=data_config['std'],
@@ -844,6 +1108,8 @@ def main():
         device=device,
         distributed=args.distributed,
         use_prefetcher=args.prefetcher,
+        prefetch_factor=loader_prefetch_factor,
+        persistent_workers=args.workers > 0,
     )
 
     train_loader_kwargs = dict(
@@ -870,6 +1136,9 @@ def main():
         num_workers=args.workers,
         worker_seeding=args.worker_seeding,
     )
+    train_common_loader_kwargs = dict(common_loader_kwargs)
+    train_common_loader_kwargs['pin_memory'] = args.pin_mem
+    train_common_loader_kwargs['persistent_workers'] = args.workers > 0
 
     mixup_fn = None
     mixup_args = {}
@@ -931,7 +1200,7 @@ def main():
             rank=args.rank,
             world_size=args.world_size,
             **patch_loader_kwargs,
-            **common_loader_kwargs,
+            **train_common_loader_kwargs,
             **train_loader_kwargs,
         )
     else:
@@ -990,6 +1259,7 @@ def main():
                 base_dir = args.data_dir or args.data or '.'
                 balanced_cache_path = os.path.join(base_dir, 'class_buckets.pkl')
 
+            labelmix_batch_size = args.batch_size * args.world_size if central_labelmix else args.batch_size
             labelmix_kwargs = {
                 'mix_k': args.labelmix_mix_k,
                 'alpha_min': args.labelmix_alpha_min,
@@ -1000,7 +1270,7 @@ def main():
                 'warmup_steps': args.labelmix_warmup_steps,
                 'total_epochs': args.labelmix_total_epochs,
                 'total_steps': args.labelmix_total_steps,
-                'batch_size': args.batch_size,
+                'batch_size': labelmix_batch_size,
                 'sampling': args.labelmix_sampling,
                 'sampling_min_side_px': args.labelmix_sampling_min_side_px,
                 'sampling_max_aspect': args.labelmix_sampling_max_aspect,
@@ -1014,43 +1284,89 @@ def main():
                 base_dataset=dataset_train,
                 transform=train_transform,
                 mode=args.balanced_mode,
-                buffer_size=args.balanced_buffer,
+                buffer_size=balanced_buffer,
                 cache_path=balanced_cache_path,
-                cache_small_classes_threshold=args.balanced_cache_threshold,
+                cache_small_classes_threshold=balanced_cache_threshold,
                 input_key=balanced_input_key,
                 target_key=balanced_target_key,
                 labelmix=args.labelmix,
                 labelmix_kwargs=labelmix_kwargs,
+                dist_rank_override=0 if central_labelmix else None,
+                dist_world_size_override=1 if central_labelmix else None,
             )
 
             if collate_fn is None:
                 collate_fn = fast_collate if args.prefetcher else torch.utils.data.dataloader.default_collate
 
-            loader_train = torch.utils.data.DataLoader(
-                dataset_train,
-                batch_size=args.batch_size,
-                num_workers=args.workers,
-                collate_fn=collate_fn,
-                pin_memory=args.pin_mem,
-                drop_last=True,
-                worker_init_fn=partial(_worker_init, worker_seeding=args.worker_seeding),
-                persistent_workers=args.workers > 0,
-            )
-
-            if args.prefetcher:
-                prefetch_re_prob = args.reprob if not args.no_aug else 0.
-                loader_train = PrefetchLoader(
-                    loader_train,
-                    mean=data_config['mean'],
-                    std=data_config['std'],
-                    channels=data_config['input_size'][0],
-                    device=device,
-                    img_dtype=model_dtype or torch.float32,
-                    re_prob=prefetch_re_prob,
-                    re_mode=args.remode,
-                    re_count=args.recount,
-                    re_num_splits=re_num_splits,
+            if central_labelmix:
+                producer_workers = (
+                    args.labelmix_producer_workers
+                    if args.labelmix_producer_workers > 0
+                    else args.workers
                 )
+                producer_loader = None
+                if args.rank == args.labelmix_producer_rank:
+                    producer_prefetch = (
+                        str(loader_prefetch_factor)
+                        if loader_prefetch_factor is not None
+                        else "default"
+                    )
+                    _logger.info(
+                        "LabelMix producer DataLoader prefetch_factor=%s (workers=%s)",
+                        producer_prefetch,
+                        producer_workers,
+                    )
+                    producer_loader_kwargs = dict(
+                        dataset=dataset_train,
+                        batch_size=args.batch_size * args.world_size,
+                        num_workers=producer_workers,
+                        collate_fn=collate_fn,
+                        pin_memory=args.pin_mem,
+                        drop_last=True,
+                        worker_init_fn=partial(_worker_init, worker_seeding=args.worker_seeding),
+                        persistent_workers=producer_workers > 0,
+                    )
+                    if producer_workers > 0 and loader_prefetch_factor is not None:
+                        producer_loader_kwargs['prefetch_factor'] = loader_prefetch_factor
+                    producer_loader = torch.utils.data.DataLoader(**producer_loader_kwargs)
+                loader_train = LabelMixBroadcastLoader(
+                    producer_loader,
+                    batch_size=args.batch_size,
+                    mix_k=args.labelmix_mix_k,
+                    producer_rank=args.labelmix_producer_rank,
+                    pin_memory=args.pin_mem,
+                    group=labelmix_cpu_group,
+                    log_fn=_logger.info if args.rank == args.labelmix_producer_rank else None,
+                )
+            else:
+                loader_train_kwargs = dict(
+                    dataset=dataset_train,
+                    batch_size=args.batch_size,
+                    num_workers=args.workers,
+                    collate_fn=collate_fn,
+                    pin_memory=args.pin_mem,
+                    drop_last=True,
+                    worker_init_fn=partial(_worker_init, worker_seeding=args.worker_seeding),
+                    persistent_workers=args.workers > 0,
+                )
+                if args.workers > 0 and loader_prefetch_factor is not None:
+                    loader_train_kwargs['prefetch_factor'] = loader_prefetch_factor
+                loader_train = torch.utils.data.DataLoader(**loader_train_kwargs)
+
+                if args.prefetcher:
+                    prefetch_re_prob = args.reprob if not args.no_aug else 0.
+                    loader_train = PrefetchLoader(
+                        loader_train,
+                        mean=data_config['mean'],
+                        std=data_config['std'],
+                        channels=data_config['input_size'][0],
+                        device=device,
+                        img_dtype=model_dtype or torch.float32,
+                        re_prob=prefetch_re_prob,
+                        re_mode=args.remode,
+                        re_count=args.recount,
+                        re_num_splits=re_num_splits,
+                    )
         else:
             # wrap dataset in AugMix helper
             if num_aug_splits > 1:
@@ -1062,7 +1378,7 @@ def main():
                 input_size=data_config['input_size'],
                 collate_fn=collate_fn,
                 use_multi_epochs_loader=args.use_multi_epochs_loader,
-                **common_loader_kwargs,
+                **train_common_loader_kwargs,
                 **train_loader_kwargs,
             )
 

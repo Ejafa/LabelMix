@@ -224,6 +224,7 @@ def create_naflex_loader(
         crop_border_pixels: Optional[int] = None,
 
         num_workers: int = 4,
+        prefetch_factor: Optional[int] = None,
         distributed: bool = False,
         rank: int = 0,
         world_size: int = 1,
@@ -343,16 +344,19 @@ def create_naflex_loader(
         )
 
         # NOTE: Collation is handled by the dataset wrapper for training
-        loader = torch.utils.data.DataLoader(
-            naflex_dataset,
+        loader_kwargs = dict(
+            dataset=naflex_dataset,
             batch_size=None,
             shuffle=False,
             num_workers=num_workers,
             sampler=None,
             pin_memory=pin_memory,
             worker_init_fn=partial(_worker_init, worker_seeding=worker_seeding),
-            persistent_workers=persistent_workers
+            persistent_workers=persistent_workers,
         )
+        if prefetch_factor is not None and num_workers > 0:
+            loader_kwargs['prefetch_factor'] = prefetch_factor
+        loader = torch.utils.data.DataLoader(**loader_kwargs)
 
         if use_prefetcher:
             loader = NaFlexPrefetchLoader(
@@ -391,8 +395,8 @@ def create_naflex_loader(
             from timm.data.distributed_sampler import OrderedDistributedSampler
             sampler = OrderedDistributedSampler(dataset)
 
-        loader = torch.utils.data.DataLoader(
-            dataset,
+        loader_kwargs = dict(
+            dataset=dataset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
@@ -401,6 +405,9 @@ def create_naflex_loader(
             pin_memory=pin_memory,
             drop_last=False,
         )
+        if prefetch_factor is not None and num_workers > 0:
+            loader_kwargs['prefetch_factor'] = prefetch_factor
+        loader = torch.utils.data.DataLoader(**loader_kwargs)
 
         if use_prefetcher:
             loader = NaFlexPrefetchLoader(

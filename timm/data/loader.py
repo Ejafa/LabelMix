@@ -223,6 +223,7 @@ def create_loader(
         mean: Tuple[float, ...] = IMAGENET_DEFAULT_MEAN,
         std: Tuple[float, ...] = IMAGENET_DEFAULT_STD,
         num_workers: int = 1,
+        prefetch_factor: Optional[int] = None,
         distributed: bool = False,
         crop_pct: Optional[float] = None,
         crop_mode: Optional[str] = None,
@@ -266,6 +267,7 @@ def create_loader(
         mean: Image normalization mean.
         std: Image normalization standard deviation.
         num_workers: Num worker processes per DataLoader.
+        prefetch_factor: Batches to prefetch per worker when num_workers > 0 (default: PyTorch default).
         distributed: Enable dataloading for distributed training.
         crop_pct: Inference crop percentage (output size / resize size).
         crop_mode: Inference crop mode. One of ['squash', 'border', 'center']. Defaults to 'center' when None.
@@ -354,6 +356,8 @@ def create_loader(
         worker_init_fn=partial(_worker_init, worker_seeding=worker_seeding),
         persistent_workers=persistent_workers
     )
+    if prefetch_factor is not None and num_workers > 0:
+        loader_args['prefetch_factor'] = prefetch_factor
     try:
         loader = loader_class(dataset, **loader_args)
     except TypeError as e:

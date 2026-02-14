@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import resource
 import socket
 import subprocess
 import time
@@ -12,22 +13,24 @@ from typing import Any, Deque, Dict, List, Optional, Set
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
-    parser.add_argument("--config", default="./config/cifar100/base.yaml",
+    parser.add_argument("--config", default="./config/imagenet1k/mnv4_small.yaml",
                         help="Base config file")
-    parser.add_argument("--nproc", type=int, default=2,
+    parser.add_argument("--nproc", type=int, default=4,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=4,
+    parser.add_argument("--max-parallel", type=int, default=2,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
-    parser.add_argument("--output-root", default="./output_runs",
+    parser.add_argument("--output-root", default="./output_runs/imagenet1k",
                         help="Base output directory")
-    parser.add_argument("--log-dir", default="./logs",
+    parser.add_argument("--log-dir", default="./logs/imagenet1k",
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
-    parser.add_argument("--cuda-visible-devices", default="3,2,3,2",
+    parser.add_argument("--cuda-visible-devices", default="0,1,2,3,0,1,2,3",
                         help="Comma-separated GPU ids")
+    parser.add_argument("--ulimit-nofile", type=int, default=8192,
+                        help="Set soft RLIMIT_NOFILE (0 to skip)")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
     return parser
 
@@ -47,9 +50,26 @@ def _resolve_gpu_pool(raw: str) -> List[str]:
     return ["0"]
 
 
+def _set_nofile_limit(target: int) -> None:
+    if target <= 0:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        new_soft = min(target, hard)
+        if new_soft != soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+        print(f"RLIMIT_NOFILE: soft={new_soft}, hard={hard}")
+        if new_soft < target:
+            print(f"RLIMIT_NOFILE: requested {target} but hard limit is {hard}.")
+    except Exception as exc:
+        print(f"Warning: unable to set RLIMIT_NOFILE: {exc}")
+
+
 def main() -> None:
     parser = build_parser()
     args, extra = parser.parse_known_args()
+
+    _set_nofile_limit(args.ulimit_nofile)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     os.makedirs(args.output_root, exist_ok=True)
@@ -60,12 +80,14 @@ def main() -> None:
         f"--nproc_per_node={args.nproc}",
     ]
 
+    
+
     base_train_common: List[str] = [
         "--amp-dtype", "bfloat16",
-        "--batch-size", "128",
-        "--num-steps", "20000",
-        "--warmup-steps", "1000",
-        "--patience-steps", "1000",
+        "--batch-size", "256",
+        "--num-steps", "200000",
+        "--warmup-steps", "10000",
+        "--patience-steps", "10000",
         "--warmup-prefix",
         "--sched-on-updates",
         "--num-logs", "1000",
@@ -73,9 +95,12 @@ def main() -> None:
         "--num-saves", "10",
         "--wandb-project", "labelmix",
         "--log-wandb",
+        "--workers", "4",
+        "--loader-prefetch-factor", "4",
     ]
 
     augmentation_args: List[str] = [
+        "--img-size", "256",
         "--aa", "rand-m8-inc1-mstd1.0",
         "--aug-repeats", "0",
         "--aug-splits", "0",
@@ -90,15 +115,25 @@ def main() -> None:
         "--reprob", "0.25",
         "--remode", "pixel",
         "--recount", "1",
-        "--mixup", "0.0",
-        "--cutmix", "0.0",
-        "--mixup-prob", "1.0",
-        "--mixup-switch-prob", "0.5",
-        "--mixup-mode", "batch",
         "--smoothing", "0.1",
     ]
 
+    cutmix_mixup_args: List[str] = [
+        "--mixup", "0.8",
+        "--cutmix", "1.0",
+        "--mixup-prob", "1.0",
+        "--mixup-switch-prob", "0.5",
+        "--mixup-mode", "batch",
+    ]
+
+    # LabelMix distributed workers (DDP: each rank uses its own DataLoader workers)
+    balanced_buffer_steps = 5
+    balanced_cache_threshold_steps = 4
+
     labelmix_args: List[str] = [
+        "--balanced-mode", "1280",
+        "--balanced-buffer-steps", str(balanced_buffer_steps),
+        "--balanced-cache-threshold-steps", str(balanced_cache_threshold_steps),
         "--labelmix",
         "--labelmix-mix-k", "5",
         "--labelmix-alpha-min", "0.1",
@@ -116,10 +151,10 @@ def main() -> None:
         
 
     models = [
-        "mobilenetv4_conv_small",
+        # "mobilenetv4_conv_small",
         # "mobilenetv4_conv_medium",
         # "mobilenetv4_hybrid_medium",
-        # "vit_wee_patch16_reg1_gap_256",
+        "vit_wee_patch16_reg1_gap_256",
         # "vit_little_patch16_reg1_gap_256",
         # "vit_base_patch16_reg4_gap_256",
     ]
@@ -128,42 +163,43 @@ def main() -> None:
     experiments: List[Dict[str, Any]] = []
     for model in models:
         experiments.extend([
+            # {
+            #     "name": f"baseline_imagenet1k_{model}_noaug",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--no-aug",
+            #         "--pin-mem",
+            #     ],
+            # },
+            # {
+            #     "name": f"baseline_imagenet1k_{model}_aug_cutmix_mixup",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--pin-mem",
+            #         *cutmix_mixup_args,
+            #     ],
+            # },
             {
-                "name": f"baseline_{model}_noaug",
+                "name": f"labelmix_imagenet1k_{model}_aug",
                 "config": args.config,
                 "extra": [
                     "--model", model,
-                    "--no-aug",
                     "--pin-mem",
+                    *labelmix_args,
                 ],
             },
-            # {
-            #     "name": f"baseline_{model}_aug",
-            #     "config": args.config,
-            #     "extra": [
-            #         "--model", model,
-            #         "--pin-mem",
-            #     ],
-            # },
-            # {
-            #     "name": f"labelmix_{model}_noaug",
-            #     "config": args.config,
-            #     "extra": [
-            #         "--model", model,
-            #         "--pin-mem",
-            #         "--no-aug",
-            #         *labelmix_args,
-            #     ],
-            # },
-            # {
-            #     "name": f"labelmix_{model}_aug",
-            #     "config": args.config,
-            #     "extra": [
-            #         "--model", model,
-            #         "--pin-mem",
-            #         *labelmix_args,
-            #     ],
-            # },
+                        {
+                "name": f"labelmix_imagenet1k_{model}_noaug",
+                "config": args.config,
+                "extra": [
+                    "--model", model,
+                    "--pin-mem",
+                    "--no-aug",
+                    *labelmix_args,
+                ],
+            },
         ])
 
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
@@ -235,7 +271,7 @@ def main() -> None:
             
         cmd.extend(["--experiment", exp_name])
         cmd.extend(["--output", output_dir])
-        
+
         # Add experiment specific overrides
         cmd.extend(exp["extra"])
         # Add any command line extras passed to this script
@@ -259,6 +295,13 @@ def main() -> None:
         print(f"Log: {log_path}")
 
         log_f = open(log_path, "w", encoding="utf-8")
+        try:
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            log_f.write(f"RLIMIT_NOFILE: soft={soft}, hard={hard}\n")
+            log_f.flush()
+        except Exception as exc:
+            log_f.write(f"RLIMIT_NOFILE: unavailable ({exc})\n")
+            log_f.flush()
         proc = subprocess.Popen(cmd, env=env, stdout=log_f, stderr=subprocess.STDOUT)
         
         if args.stagger_seconds > 0:

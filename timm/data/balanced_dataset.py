@@ -356,6 +356,8 @@ class BalancedBucketDataset(IterableDataset):
         target_key: str = "label",
         labelmix: bool = False,
         labelmix_kwargs: Optional[Dict[str, Any]] = None,
+        dist_rank_override: Optional[int] = None,
+        dist_world_size_override: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.base_dataset = base_dataset
@@ -452,6 +454,8 @@ class BalancedBucketDataset(IterableDataset):
                 self._sampling_pools = [deque() for _ in range(bins)]
 
         self.local_byte_cache: Dict[int, Tuple[Any, int]] = {}
+        self.dist_rank_override = dist_rank_override
+        self.dist_world_size_override = dist_world_size_override
 
     def _sampling_bin_idx(self, alpha: float) -> int:
         bins = max(1, self.sampling_bins)
@@ -965,7 +969,10 @@ class BalancedBucketDataset(IterableDataset):
 
     def __iter__(self):
         # Distributed
-        if dist.is_available() and dist.is_initialized():
+        if self.dist_world_size_override is not None:
+            world_size = int(self.dist_world_size_override)
+            rank = int(self.dist_rank_override or 0)
+        elif dist.is_available() and dist.is_initialized():
             world_size = dist.get_world_size()
             rank = dist.get_rank()
         else:
