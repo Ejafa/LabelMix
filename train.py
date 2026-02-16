@@ -45,6 +45,7 @@ from timm.loss import (
     JsdCrossEntropy,
     SoftTargetCrossEntropy,
     LabelMixSoftTargetCrossEntropy,
+    LabelMixPlackettLuceLoss,
     BinaryCrossEntropy,
     LabelSmoothingCrossEntropy,
 )
@@ -139,6 +140,9 @@ group.add_argument('--balanced-target-key', default=None, type=str,
                    help='Target key override for balanced loading (default: --target-key or "label")')
 group.add_argument('--labelmix', action='store_true', default=False,
                    help='Enable LabelMix augmentation for balanced loading.')
+group.add_argument('--labelmix-loss', default='soft_ce', type=str,
+                   choices=['soft_ce', 'pl_loss'],
+                   help='Loss for LabelMix targets: "soft_ce" or "pl_loss".')
 group.add_argument('--labelmix-mix-k', default=5, type=int,
                    help='LabelMix K (number of mixed images per output).')
 group.add_argument('--labelmix-alpha-min', default=0.1, type=float,
@@ -1420,7 +1424,10 @@ def main():
 
     # setup loss function
     if args.labelmix:
-        train_loss_fn = LabelMixSoftTargetCrossEntropy()
+        if args.labelmix_loss == 'pl_loss':
+            train_loss_fn = LabelMixPlackettLuceLoss()
+        else:
+            train_loss_fn = LabelMixSoftTargetCrossEntropy()
     elif args.jsd_loss:
         assert num_aug_splits > 1  # JSD only valid with aug splits set
         train_loss_fn = JsdCrossEntropy(num_splits=num_aug_splits, smoothing=args.smoothing)

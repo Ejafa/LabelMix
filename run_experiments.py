@@ -31,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Comma-separated GPU ids")
     parser.add_argument("--ulimit-nofile", type=int, default=8192,
                         help="Set soft RLIMIT_NOFILE (0 to skip)")
+    parser.add_argument("--labelmix-loss", default="soft_ce", choices=["soft_ce", "pl_loss"],
+                        help="LabelMix loss to pass to train.py.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
     return parser
 
@@ -130,7 +132,7 @@ def main() -> None:
     balanced_buffer_steps = 5
     balanced_cache_threshold_steps = 4
 
-    labelmix_args: List[str] = [
+    labelmix_common_args: List[str] = [
         "--balanced-mode", "1280",
         "--balanced-buffer-steps", str(balanced_buffer_steps),
         "--balanced-cache-threshold-steps", str(balanced_cache_threshold_steps),
@@ -181,25 +183,51 @@ def main() -> None:
             #         *cutmix_mixup_args,
             #     ],
             # },
+            # {
+            #     "name": f"labelmix_imagenet1k_{model}_aug",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--pin-mem",
+            #         *labelmix_common_args,
+            #         "--labelmix-loss", "soft_ce",
+            #     ],
+            # },
+            # {
+            #     "name": f"labelmix_imagenet1k_{model}_noaug",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--pin-mem",
+            #         "--no-aug",
+            #         *labelmix_common_args,
+            #         "--labelmix-loss", "soft_ce",
+            #     ],
+            # },
+            # {
+            #     "name": f"labelmix_imagenet1k_{model}_aug_pl_loss",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--pin-mem",
+            #         "--labelmix-loss", "pl_loss",
+            #         *labelmix_common_args,
+                    
+            #     ],
+            # },
             {
-                "name": f"labelmix_imagenet1k_{model}_aug",
+                "name": f"labelmix_imagenet1k_{model}_noaug_pl_loss",
                 "config": args.config,
                 "extra": [
                     "--model", model,
                     "--pin-mem",
-                    *labelmix_args,
-                ],
-            },
-                        {
-                "name": f"labelmix_imagenet1k_{model}_noaug",
-                "config": args.config,
-                "extra": [
-                    "--model", model,
-                    "--pin-mem",
+                    "--labelmix-loss", "pl_loss",
                     "--no-aug",
-                    *labelmix_args,
+                    *labelmix_common_args,
                 ],
+
             },
+
         ])
 
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
