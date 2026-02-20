@@ -67,38 +67,82 @@ def squarify_core(sorted_weights: torch.Tensor, canvas_size: float) -> torch.Ten
 
         end = start + row_len
         row_areas = areas[start:end]
+        perm = torch.randperm(row_len, device=areas.device)
         row_sum = float(torch.sum(row_areas))
+
+        # Randomize both the placement direction within the row/column and which side
+        # of the remaining canvas we carve from, so every row/column fills in random order.
+        reverse = float(torch.rand((1,), device=areas.device).item()) < 0.5
+        from_end = float(torch.rand((1,), device=areas.device).item()) < 0.5
 
         if vertical_stack:
             row_h = row_sum / w if w > 0.0 else 0.0
-            curr_x = x
-            for k in range(row_len):
-                if k == row_len - 1:
-                    rect_w = (x + w) - curr_x
-                else:
-                    rect_w = float(row_areas[k]) / row_h if row_h > 0.0 else 0.0
-                out[start + k, 0] = curr_x
-                out[start + k, 1] = y
-                out[start + k, 2] = rect_w
-                out[start + k, 3] = row_h
-                curr_x += rect_w
-            y += row_h
-            h -= row_h
+            row_y = (y + h - row_h) if from_end else y
+            if reverse:
+                curr_x = x + w
+                for k in range(row_len):
+                    idx = int(perm[k].item())
+                    if k == row_len - 1:
+                        rect_w = curr_x - x
+                    else:
+                        rect_w = float(row_areas[idx]) / row_h if row_h > 0.0 else 0.0
+                    curr_x -= rect_w
+                    out[start + idx, 0] = curr_x
+                    out[start + idx, 1] = row_y
+                    out[start + idx, 2] = rect_w
+                    out[start + idx, 3] = row_h
+            else:
+                curr_x = x
+                for k in range(row_len):
+                    idx = int(perm[k].item())
+                    if k == row_len - 1:
+                        rect_w = (x + w) - curr_x
+                    else:
+                        rect_w = float(row_areas[idx]) / row_h if row_h > 0.0 else 0.0
+                    out[start + idx, 0] = curr_x
+                    out[start + idx, 1] = row_y
+                    out[start + idx, 2] = rect_w
+                    out[start + idx, 3] = row_h
+                    curr_x += rect_w
+            if from_end:
+                h -= row_h
+            else:
+                y += row_h
+                h -= row_h
         else:
             row_w = row_sum / h if h > 0.0 else 0.0
-            curr_y = y
-            for k in range(row_len):
-                if k == row_len - 1:
-                    rect_h = (y + h) - curr_y
-                else:
-                    rect_h = float(row_areas[k]) / row_w if row_w > 0.0 else 0.0
-                out[start + k, 0] = x
-                out[start + k, 1] = curr_y
-                out[start + k, 2] = row_w
-                out[start + k, 3] = rect_h
-                curr_y += rect_h
-            x += row_w
-            w -= row_w
+            row_x = (x + w - row_w) if from_end else x
+            if reverse:
+                curr_y = y + h
+                for k in range(row_len):
+                    idx = int(perm[k].item())
+                    if k == row_len - 1:
+                        rect_h = curr_y - y
+                    else:
+                        rect_h = float(row_areas[idx]) / row_w if row_w > 0.0 else 0.0
+                    curr_y -= rect_h
+                    out[start + idx, 0] = row_x
+                    out[start + idx, 1] = curr_y
+                    out[start + idx, 2] = row_w
+                    out[start + idx, 3] = rect_h
+            else:
+                curr_y = y
+                for k in range(row_len):
+                    idx = int(perm[k].item())
+                    if k == row_len - 1:
+                        rect_h = (y + h) - curr_y
+                    else:
+                        rect_h = float(row_areas[idx]) / row_w if row_w > 0.0 else 0.0
+                    out[start + idx, 0] = row_x
+                    out[start + idx, 1] = curr_y
+                    out[start + idx, 2] = row_w
+                    out[start + idx, 3] = rect_h
+                    curr_y += rect_h
+            if from_end:
+                w -= row_w
+            else:
+                x += row_w
+                w -= row_w
 
         start = end
 
