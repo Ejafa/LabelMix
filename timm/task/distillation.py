@@ -172,11 +172,50 @@ def _resolve_teacher(
     )
 
 
+def _create_adjusted_ranking(
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+) -> torch.Tensor:
+    """Sort logits ascending, move true label to the final position."""
+    num_samples, num_classes = logits.shape
+    sorted_idx = torch.argsort(logits, dim=-1, descending=False)
+    mask = sorted_idx != labels.unsqueeze(-1)
+    excluded = sorted_idx[mask].view(num_samples, num_classes - 1)
+    return torch.cat([excluded, labels.unsqueeze(-1)], dim=-1)
+
+
+def _plackett_luce_distillation_loss(
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        labels: torch.Tensor,
+        temperature: float = 1.0,
+) -> torch.Tensor:
+    """Plackett-Luce distillation loss with teacher-probability weighting."""
+    if teacher_logits.shape != student_logits.shape:
+        raise ValueError(
+            f"Shape mismatch: student {student_logits.shape}, teacher {teacher_logits.shape}"
+        )
+    if labels.ndim != 1 or labels.shape[0] != student_logits.shape[0]:
+        raise ValueError(
+            f"Expected labels shape [B], got {tuple(labels.shape)} for batch size {student_logits.shape[0]}"
+        )
+
+    idx = _create_adjusted_ranking(teacher_logits, labels)
+    student_perm = torch.gather(student_logits, dim=-1, index=idx)
+    teacher_perm = torch.gather(teacher_logits, dim=-1, index=idx)
+
+    terms = torch.logcumsumexp(student_perm, dim=-1) - student_perm
+    probs = F.softmax(teacher_perm / temperature, dim=-1)
+    return (terms * probs).sum(dim=-1).mean()
+
+
 class LogitDistillationTask(TrainingTask):
     """Logit-based knowledge distillation task.
 
-    Performs distillation by matching student and teacher output logits using
-    KL divergence with temperature scaling.
+    Performs distillation by matching student and teacher output logits using:
+    - KL divergence with temperature scaling (`loss_type='kl'`)
+    - Plackett-Luce distillation (`loss_type='plackett_luce'`)
+      (requires hard labels `target` with shape `[B]`)
 
     Loss weighting supports two modes:
     1. Independent weights: loss = task_loss_weight * task_loss + distill_loss_weight * distill_loss
@@ -188,7 +227,7 @@ class LogitDistillationTask(TrainingTask):
         teacher_model: Teacher model - can be a model name string, nn.Module, or DistillationTeacher
         criterion: Task loss function (default: CrossEntropyLoss)
         teacher_pretrained_path: Path to teacher pretrained weights (used when teacher_model is a string)
-        loss_type: Type of distillation loss (currently only 'kl' supported)
+        loss_type: Type of distillation loss ('kl' or 'plackett_luce')
         distill_loss_weight: Weight for distillation loss
         task_loss_weight: Weight for task loss
         temperature: Softmax temperature for distillation (typical values: 1-4)
@@ -243,8 +282,10 @@ class LogitDistillationTask(TrainingTask):
         self.loss_type = loss_type
         self.temperature = temperature
 
-        if loss_type != 'kl':
-            raise ValueError(f"Unsupported loss_type '{loss_type}'. Currently only 'kl' is supported.")
+        if loss_type not in ('kl', 'plackett_luce'):
+            raise ValueError(
+                f"Unsupported loss_type '{loss_type}'. Must be one of ('kl', 'plackett_luce')."
+            )
 
         # Register student normalization values as non-persistent buffers
         student_unwrapped = unwrap_model(student_model)
@@ -261,34 +302,45 @@ class LogitDistillationTask(TrainingTask):
         self.register_buffer('student_mean', student_mean, persistent=False)
         self.register_buffer('student_std', student_std, persistent=False)
 
-        # Determine weighting mode
-        if distill_loss_weight is not None:
-            # Mode 1: distill_weight specified - independent weights (task defaults to 1.0 if not set)
-            self.distill_loss_weight = distill_loss_weight
-            self.task_loss_weight = task_loss_weight if task_loss_weight is not None else 1.0
-            if self.verbose:
-                _logger.info(
-                    f"LogitDistillationTask: Independent weights - "
-                    f"task_weight={self.task_loss_weight}, distill_weight={distill_loss_weight}"
-                )
-        elif task_loss_weight is not None:
-            # Mode 2: only task_weight specified - complementary mode (distill = 1 - task)
-            self.task_loss_weight = task_loss_weight
-            self.distill_loss_weight = 1.0 - task_loss_weight
-            if self.verbose:
-                _logger.info(
-                    f"LogitDistillationTask: Complementary mode - "
-                    f"task_weight={task_loss_weight}, distill_weight={self.distill_loss_weight}"
-                )
-        else:
-            # Mode 3: neither specified - equal weights (both 1.0)
+        if self.loss_type == 'plackett_luce':
+            # PL loss already includes classification supervision, so use it directly.
+            self.task_loss_weight = 0.0
             self.distill_loss_weight = 1.0
-            self.task_loss_weight = 1.0
             if self.verbose:
-                _logger.info(
-                    f"LogitDistillationTask: Default equal weights - "
-                    f"task_weight={self.task_loss_weight}, distill_weight={self.distill_loss_weight}"
-                )
+                if distill_loss_weight is not None or task_loss_weight is not None:
+                    _logger.info(
+                        "LogitDistillationTask: loss_type=plackett_luce ignores task/distill weights "
+                        "and uses total_loss = kd_loss."
+                    )
+        else:
+            # Determine weighting mode for KL loss
+            if distill_loss_weight is not None:
+                # Mode 1: distill_weight specified - independent weights (task defaults to 1.0 if not set)
+                self.distill_loss_weight = distill_loss_weight
+                self.task_loss_weight = task_loss_weight if task_loss_weight is not None else 1.0
+                if self.verbose:
+                    _logger.info(
+                        f"LogitDistillationTask: Independent weights - "
+                        f"task_weight={self.task_loss_weight}, distill_weight={distill_loss_weight}"
+                    )
+            elif task_loss_weight is not None:
+                # Mode 2: only task_weight specified - complementary mode (distill = 1 - task)
+                self.task_loss_weight = task_loss_weight
+                self.distill_loss_weight = 1.0 - task_loss_weight
+                if self.verbose:
+                    _logger.info(
+                        f"LogitDistillationTask: Complementary mode - "
+                        f"task_weight={task_loss_weight}, distill_weight={self.distill_loss_weight}"
+                    )
+            else:
+                # Mode 3: neither specified - equal weights (both 1.0)
+                self.distill_loss_weight = 1.0
+                self.task_loss_weight = 1.0
+                if self.verbose:
+                    _logger.info(
+                        f"LogitDistillationTask: Default equal weights - "
+                        f"task_weight={self.task_loss_weight}, distill_weight={self.distill_loss_weight}"
+                    )
 
         if self.verbose:
             _logger.info(
@@ -333,23 +385,43 @@ class LogitDistillationTask(TrainingTask):
 
         Returns:
             Dictionary containing:
-                - 'loss': Combined training loss (task + distillation)
+                - 'loss': Training loss
                 - 'output': Student logits (for metrics)
-                - 'task_loss': Classification loss component
-                - 'kd_loss': Logit distillation loss component
+                - 'task_loss': Classification loss component (0 for plackett_luce mode)
+                - 'kd_loss': Distillation loss component
         """
         student_logits = self.student(input)
-        task_loss = self.criterion(student_logits, target)
+        if self.loss_type == 'kl':
+            task_loss = self.criterion(student_logits, target)
+        else:
+            if not torch.is_tensor(target):
+                raise ValueError(
+                    "loss_type='plackett_luce' requires hard labels target tensor with shape [B]."
+                )
+            if target.ndim != 1:
+                raise ValueError(
+                    f"loss_type='plackett_luce' requires target shape [B], got {tuple(target.shape)}."
+                )
+            target_labels = target.long()
+            task_loss = student_logits.new_zeros(())
 
         with torch.no_grad():
             input_kd = self.teacher.normalize_input(input, self.student_mean, self.student_std)
             teacher_logits = self.teacher(input_kd.detach(), return_features=False)
 
-        prob_s = F.log_softmax(student_logits / self.temperature, dim=-1)
-        prob_t = F.log_softmax(teacher_logits / self.temperature, dim=-1)
-        kd_loss = F.kl_div(prob_s, prob_t, reduction='batchmean', log_target=True) * (self.temperature ** 2)
-
-        total_loss = self.task_loss_weight * task_loss + self.distill_loss_weight * kd_loss
+        if self.loss_type == 'kl':
+            prob_s = F.log_softmax(student_logits / self.temperature, dim=-1)
+            prob_t = F.log_softmax(teacher_logits / self.temperature, dim=-1)
+            kd_loss = F.kl_div(prob_s, prob_t, reduction='batchmean', log_target=True) * (self.temperature ** 2)
+            total_loss = self.task_loss_weight * task_loss + self.distill_loss_weight * kd_loss
+        else:
+            kd_loss = _plackett_luce_distillation_loss(
+                student_logits=student_logits,
+                teacher_logits=teacher_logits,
+                labels=target_labels,
+                temperature=self.temperature,
+            )
+            total_loss = kd_loss
 
         return {
             'loss': total_loss,

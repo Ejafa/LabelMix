@@ -12,7 +12,8 @@ weight_decay: 0.05
 lr: 0.001 #3.0e-4                    
 warmup_lr: 0.0
 sched: cosine
-
+clip_grad: 5.0
+clip_mode: norm
 
 drop: 0.25
 
@@ -20,6 +21,7 @@ model_ema: true
 model_ema_decay: 0.9995
 model_ema_warmup: true
 
+  
 amp: true
 amp_dtype: bfloat16
 channels_last: true

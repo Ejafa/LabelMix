@@ -503,13 +503,16 @@ parser.add_argument('--kd-model-name', default=None, type=str,
                     help='Name of teacher model for knowledge distillation')
 parser.add_argument('--kd-distill-type', default='logit', type=str, choices=['logit', 'feature', 'token'],
                     help='Type of distillation: "logit" for output distillation, "feature" for intermediate features, "token" for models with distillation heads (default: logit)')
-parser.add_argument('--kd-loss-type', default='kl', type=str,
-                    help='Loss function for logit distillation (default: kl). Currently only "kl" supported, reserved for future extensions.')
+parser.add_argument('--kd-loss-type', default='kl', type=str, choices=['kl', 'plackett_luce'],
+                    help='Loss function for logit distillation (default: kl): "kl" or "plackett_luce". '
+                         '"plackett_luce" uses only distillation loss as total loss.')
 parser.add_argument('--distill-loss-weight', default=None, type=float,
                     help='Weight for distillation loss. If both weights specified: loss = task_weight * task + distill_weight * distill. '
-                         'If only task_weight: loss = task_weight * task + (1-task_weight) * distill. Default: 1.0 if only this specified.')
+                         'If only task_weight: loss = task_weight * task + (1-task_weight) * distill. '
+                         'Ignored when --kd-loss-type=plackett_luce.')
 parser.add_argument('--task-loss-weight', default=None, type=float,
-                    help='Weight for task (classification) loss. See --distill-loss-weight for weighting modes. Default: 1.0 if unspecified.')
+                    help='Weight for task (classification) loss. See --distill-loss-weight for weighting modes. '
+                         'Ignored when --kd-loss-type=plackett_luce.')
 parser.add_argument('--kd-temperature', default=4.0, type=float,
                     help='Temperature for softmax in distillation (default: 4.0, typical range: 1-4)')
 parser.add_argument('--kd-student-feature-dim', default=None, type=int,

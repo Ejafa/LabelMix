@@ -84,6 +84,10 @@ def main() -> None:
 
     
 
+    # Balanced dataset options
+    balanced_buffer_steps = 5
+    balanced_cache_threshold_steps = 4
+
     base_train_common: List[str] = [
         "--amp-dtype", "bfloat16",
         "--batch-size", "256",
@@ -99,6 +103,9 @@ def main() -> None:
         "--log-wandb",
         "--workers", "4",
         "--loader-prefetch-factor", "4",
+        "--balanced-mode", "1280",
+        "--balanced-buffer-steps", str(balanced_buffer_steps),
+        "--balanced-cache-threshold-steps", str(balanced_cache_threshold_steps),
     ]
 
     augmentation_args: List[str] = [
@@ -128,14 +135,7 @@ def main() -> None:
         "--mixup-mode", "batch",
     ]
 
-    # LabelMix distributed workers (DDP: each rank uses its own DataLoader workers)
-    balanced_buffer_steps = 5
-    balanced_cache_threshold_steps = 4
-
     labelmix_common_args: List[str] = [
-        "--balanced-mode", "1280",
-        "--balanced-buffer-steps", str(balanced_buffer_steps),
-        "--balanced-cache-threshold-steps", str(balanced_cache_threshold_steps),
         "--labelmix",
         "--labelmix-mix-k", "5",
         "--labelmix-alpha-min", "0.1",
@@ -156,7 +156,7 @@ def main() -> None:
         # "mobilenetv4_conv_small",
         # "mobilenetv4_conv_medium",
         # "mobilenetv4_hybrid_medium",
-        "vit_wee_patch16_reg1_gap_256",
+         "vit_wee_patch16_reg1_gap_256",
         # "vit_little_patch16_reg1_gap_256",
         # "vit_base_patch16_reg4_gap_256",
     ]
@@ -164,6 +164,10 @@ def main() -> None:
 
     experiments: List[Dict[str, Any]] = []
     for model in models:
+        model_kwargs_args: List[str] = []
+        if model.startswith("vit_"):
+            model_kwargs_args = ["--model-kwargs", "fix_init=True"]
+
         experiments.extend([
             # {
             #     "name": f"baseline_imagenet1k_{model}_noaug",
@@ -180,6 +184,7 @@ def main() -> None:
             #     "extra": [
             #         "--model", model,
             #         "--pin-mem",
+            #         *model_kwargs_args,
             #         *cutmix_mixup_args,
             #     ],
             # },
@@ -204,29 +209,41 @@ def main() -> None:
             #         "--labelmix-loss", "soft_ce",
             #     ],
             # },
-            # {
-            #     "name": f"labelmix_imagenet1k_{model}_aug_pl_loss",
-            #     "config": args.config,
-            #     "extra": [
-            #         "--model", model,
-            #         "--pin-mem",
-            #         "--labelmix-loss", "pl_loss",
-            #         *labelmix_common_args,
-                    
-            #     ],
-            # },
             {
-                "name": f"labelmix_imagenet1k_{model}_noaug_pl_loss",
+                "name": f"labelmix_imagenet1k_{model}_aug_listmle_loss",
                 "config": args.config,
                 "extra": [
                     "--model", model,
                     "--pin-mem",
                     "--labelmix-loss", "pl_loss",
-                    "--no-aug",
                     *labelmix_common_args,
                 ],
-
             },
+            # {
+            #     "name": f"labelmix_imagenet1k_{model}_noaug_pl_loss",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         "--pin-mem",
+            #         "--labelmix-loss", "pl_loss",
+            #         "--no-aug",
+            #         *labelmix_common_args,
+            #     ],
+            # },
+
+            # {
+            #     "name": f"kd_pld_imagenet1k_{model}_teacher_vit_base",
+            #     "config": args.config,
+            #     "extra": [
+            #         "--model", model,
+            #         *model_kwargs_args,
+            #         "--pin-mem",
+            #         "--kd-model-name", "timm/vit_base_patch16_rope_reg1_gap_256.sbb_in1k",
+            #         "--kd-distill-type", "logit",
+            #         "--kd-loss-type", "plackett_luce",
+            #         "--kd-temperature", "1.0",
+            #     ],
+            # },
 
         ])
 
