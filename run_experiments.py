@@ -210,7 +210,7 @@ def main() -> None:
             #     ],
             # },
             {
-                "name": f"labelmix_imagenet1k_{model}_aug_listmle_loss",
+                "name": f"labelmix_imagenet1k_{model}_aug_pl_loss",
                 "config": args.config,
                 "extra": [
                     "--model", model,

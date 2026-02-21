@@ -13,7 +13,7 @@ import torch.distributed as dist
 from PIL import Image
 from torch.utils.data import IterableDataset, get_worker_info
 
-from .labelmix_layout import generate_layout_cache
+from .labelmix_layout import squarify_core
 
 
 # ---------------------------------------------------------------------
@@ -335,12 +335,13 @@ class BalancedBucketDataset(IterableDataset):
       - groups are loaded via base_dataset[indices] when possible (batch fetch).
 
     LabelMix semantics:
-      - One Dirichlet draw per CYCLE ROW -> weights_desc -> layout_cache_desc cached per cycle row
+      - One Dirichlet draw per CYCLE ROW -> weights_desc -> base_layout_desc cached per cycle row
+      - Base boxes and symmetry-transformed boxes are cached once per row/shape
       - For each GROUP of K images within the row:
-          * Use base layout (sym=0) to compute slot sizes once (ASC)
-          * Precompute resize caches once (two orientations per slot)
-          * Pick K random symmetries from the cached 8 -> produce K outputs (one per shift)
-          * Clone each output image
+          * Use cached base boxes to compute slot sizes once (ASC)
+          * Precompute resize caches once (second orientation only if needed)
+          * Pick K random symmetries -> produce K outputs (one per shift)
+          * Emit per-shift output views directly
       - Rolling buffer + random pop; flush with shuffle
     """
 
@@ -410,7 +411,7 @@ class BalancedBucketDataset(IterableDataset):
         self.bucket_arrays = [torch.tensor(self.buckets[int(c)], dtype=torch.int64) for c in self.classes]
         self.bucket_lengths = torch.tensor([len(b) for b in self.bucket_arrays], dtype=torch.int64)
         self.bucket_len_map = {
-            int(c): int(l) for c, l in zip(self.classes.tolist(), self.bucket_lengths.tolist())
+            int(c): int(l) for c, l in zip(self.classes, self.bucket_lengths)
         }
 
         # cycles per epoch
@@ -466,7 +467,7 @@ class BalancedBucketDataset(IterableDataset):
         return int(t * (bins - 1))
 
     def _layout_is_valid(self, weights_desc: torch.Tensor, H: int, W: int) -> bool:
-        base_layout_desc = generate_layout_cache(weights_desc, canvas_size=1.0)[0]
+        base_layout_desc = squarify_core(weights_desc, canvas_size=1.0)
         base_layout_asc = torch.flip(base_layout_desc, dims=[0])
         boxes = _layout_to_pixel_boxes(base_layout_asc, H=H, W=W, canvas_size=1.0, eps=1e-7)
         if not _boxes_are_valid_and_tile(boxes, H=H, W=W):
@@ -515,9 +516,8 @@ class BalancedBucketDataset(IterableDataset):
             for _ in range(max(1, self.sampling_pool_size - len(pool))):
                 pool.append(self._sample_dirichlet_layout(alpha, H=H, W=W))
 
-        while pool:
-            w = pool.popleft()
-            return w
+        if pool:
+            return pool.popleft()
 
         return self._sample_dirichlet_layout(alpha, H=H, W=W)
 
@@ -776,47 +776,53 @@ class BalancedBucketDataset(IterableDataset):
         self,
         imgs: List[torch.Tensor],
         targets: List[int],
-        layout_cache_desc: torch.Tensor,
+        base_boxes: torch.Tensor,
+        sym_boxes_cache: Dict[int, torch.Tensor],
         weights_desc: torch.Tensor,
     ) -> List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
         """
         Group mixing:
-          1) Base layout = sym 0 -> compute base boxes once (ASC slot order)
+          1) Receive precomputed base boxes (ASC slot order)
           2) Precompute resize caches once from base slot sizes:
                resized0[slot] = resize(batch) to (hi,wi)
-               resized1[slot] = resize(batch) to (wi,hi)  (for 90/270/transpose/antitranspose)
-          3) Pick K random symmetries (one per output shift) from 8 cached layouts
+               resized1[slot] = resize(batch) to (wi,hi) only when swap symmetries are used
+          3) Pick K random symmetries (one per output shift)
+             and fetch precomputed symmetry boxes
           4) Render K outputs
-          5) Output labels/weights in ASC slot order, and CLONE each output image
+          5) Output labels/weights in ASC slot order
         """
         K = self.mix_k
 
         with torch.inference_mode():
             batch = torch.stack(imgs, dim=0).contiguous()
             _, C, H, W = batch.shape
+            is_square = H == W
 
             # Choose symmetries for each shift
-            if H == W:
+            if is_square:
                 sym_choices = torch.randint(0, 8, (K,), dtype=torch.int64)
             else:
                 allowed = torch.tensor([0, 2, 4, 5], dtype=torch.int64)
                 sym_choices = allowed[torch.randint(0, allowed.numel(), (K,))]
 
-            # Base layout = sym 0 (DESC->ASC)
-            base_layout_desc = layout_cache_desc[0]
-            base_layout_asc = torch.flip(base_layout_desc, dims=[0])
-
             # Output weights are ASC; move to same device
             weights_asc = torch.flip(weights_desc, dims=[0]).float().contiguous()
             weights_asc = weights_asc.to(device=batch.device)
 
-            base_boxes = _layout_to_pixel_boxes(base_layout_asc, H=H, W=W, canvas_size=1.0, eps=1e-7)
-            if not _boxes_are_valid_and_tile(base_boxes, H=H, W=W):
-                base_boxes = _fallback_stripes_boxes(weights_asc, H=H, W=W).to(base_boxes.device)
+            need_swap_cache = False
+            if is_square:
+                need_swap_cache = bool(
+                    torch.any(
+                        (sym_choices == 1)
+                        | (sym_choices == 3)
+                        | (sym_choices == 6)
+                        | (sym_choices == 7)
+                    ).item()
+                )
 
             # Precompute resize caches once from base slot sizes
             resized0: List[torch.Tensor] = []
-            resized1: List[torch.Tensor] = []
+            resized1: Optional[List[torch.Tensor]] = [] if need_swap_cache else None
             for slot_i in range(K):
                 x0 = int(base_boxes[slot_i, 0].item())
                 y0 = int(base_boxes[slot_i, 1].item())
@@ -826,7 +832,8 @@ class BalancedBucketDataset(IterableDataset):
                 wi = max(1, x1 - x0)
 
                 resized0.append(F.interpolate(batch, size=(hi, wi), mode="bilinear", align_corners=False))
-                resized1.append(F.interpolate(batch, size=(wi, hi), mode="bilinear", align_corners=False))
+                if resized1 is not None:
+                    resized1.append(F.interpolate(batch, size=(wi, hi), mode="bilinear", align_corners=False))
 
             shifts = self._shift_idx.to(batch.device, non_blocking=True) if batch.device.type != "cpu" else self._shift_idx
             circulant = (
@@ -840,21 +847,15 @@ class BalancedBucketDataset(IterableDataset):
 
             out_batch = batch.new_zeros((K, C, H, W))
 
-            for sym in torch.unique(sym_choices).tolist():
-                sym = int(sym)
+            for sym_t in torch.unique(sym_choices):
+                sym = int(sym_t.item())
                 mask = (sym_choices == sym)
                 shift_subset = shifts[mask]
-                if shift_subset.numel() == 0:
-                    continue
 
-                # Layout-only augmentation: symmetry to integer boxes
-                if H == W:
-                    boxes_sym = _apply_box_symmetry(base_boxes, sym=sym, S=W)
-                else:
-                    boxes_sym = _apply_box_symmetry_rect(base_boxes, sym=sym, H=H, W=W)
+                boxes_sym = sym_boxes_cache[sym]
 
                 # Symmetries that swap width/height for slots (square only)
-                swap = (H == W) and (sym in (1, 3, 6, 7))
+                swap = is_square and (sym in (1, 3, 6, 7))
 
                 for slot_i in range(K):
                     x0 = int(boxes_sym[slot_i, 0].item())
@@ -862,7 +863,7 @@ class BalancedBucketDataset(IterableDataset):
                     x1 = int(boxes_sym[slot_i, 2].item())
                     y1 = int(boxes_sym[slot_i, 3].item())
 
-                    cache = resized1[slot_i] if swap else resized0[slot_i]
+                    cache = resized1[slot_i] if (swap and resized1 is not None) else resized0[slot_i]
                     src_idx = (slot_i + shift_subset) % K
                     patches = cache.index_select(0, src_idx)
 
@@ -877,18 +878,19 @@ class BalancedBucketDataset(IterableDataset):
             out: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = []
             for s in range(K):
                 if self.debug_sym:
-                    out.append((out_batch[s].clone(), (labels_mat[s].clone(), weights_asc.clone(), int(sym_choices[s].item()))))
+                    out.append((out_batch[s], (labels_mat[s], weights_asc, int(sym_choices[s].item()))))
                 else:
-                    out.append((out_batch[s].clone(), (labels_mat[s].clone(), weights_asc.clone())))
+                    out.append((out_batch[s], (labels_mat[s], weights_asc)))
             return out
 
     def _iter_labelmix(self, schedule: torch.Tensor, worker_cycles: torch.Tensor):
         """
         LabelMix iteration:
           - one Dirichlet draw per cycle row
-          - layout cache built once per cycle row
+          - base layout built once per cycle row
+          - base boxes and symmetry boxes built once per row/shape
           - for each group of K indices inside the row:
-              produce K outputs with K random symmetries from the cached 8
+              produce K outputs with K random symmetries
           - push to rolling buffer and yield randomly
         """
         buffer: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = []
@@ -902,14 +904,18 @@ class BalancedBucketDataset(IterableDataset):
 
             weights: Optional[torch.Tensor] = None
             weights_desc: Optional[torch.Tensor] = None
-            layout_cache_desc: Optional[torch.Tensor] = None
+            base_layout_desc: Optional[torch.Tensor] = None
+            base_layout_asc: Optional[torch.Tensor] = None
+            weights_asc: Optional[torch.Tensor] = None
+            base_boxes_by_hw: Dict[Tuple[int, int], torch.Tensor] = {}
+            sym_boxes_by_hw: Dict[Tuple[int, int], Dict[int, torch.Tensor]] = {}
 
             # Within the row, group into chunks of K (no cross-row carry)
-            row_indices = schedule[row_i].tolist()
-            usable = (len(row_indices) // K) * K
+            row_indices = schedule[row_i]
+            usable = (int(row_indices.numel()) // K) * K
 
             for g0 in range(0, usable, K):
-                group_indices = [int(x) for x in row_indices[g0 : g0 + K]]
+                group_indices = row_indices[g0 : g0 + K].tolist()
                 try:
                     items = self._load_items_batch(group_indices)
 
@@ -919,12 +925,9 @@ class BalancedBucketDataset(IterableDataset):
                         imgs.append(self._process_image(img_obj))
                         tgts.append(int(tgt))
 
-                    if weights_desc is None or layout_cache_desc is None:
+                    if weights_desc is None or base_layout_desc is None:
                         shape = imgs[0].shape
-                        if len(shape) == 3:
-                            H, W = int(shape[-2]), int(shape[-1])
-                        else:
-                            H, W = int(shape[-2]), int(shape[-1])
+                        H, W = int(shape[-2]), int(shape[-1])
                         if self.sampling_enabled:
                             weights = self._get_sampling_weights(alpha, H=H, W=W)
                         else:
@@ -934,12 +937,36 @@ class BalancedBucketDataset(IterableDataset):
                             else:
                                 weights = torch.full((K,), 1.0 / K, dtype=torch.float32)
                         weights_desc, _ = torch.sort(weights, descending=True)
-                        layout_cache_desc = generate_layout_cache(weights_desc, canvas_size=1.0)
+                        base_layout_desc = squarify_core(weights_desc, canvas_size=1.0)
+                        base_layout_asc = torch.flip(base_layout_desc, dims=[0])
+                        weights_asc = torch.flip(weights_desc, dims=[0]).float().contiguous()
+
+                    H, W = int(imgs[0].shape[-2]), int(imgs[0].shape[-1])
+                    hw = (H, W)
+                    if hw not in base_boxes_by_hw:
+                        if base_layout_asc is None or weights_asc is None:
+                            raise RuntimeError("Internal error: layout caches not initialized.")
+
+                        base_boxes = _layout_to_pixel_boxes(base_layout_asc, H=H, W=W, canvas_size=1.0, eps=1e-7)
+                        if not _boxes_are_valid_and_tile(base_boxes, H=H, W=W):
+                            base_boxes = _fallback_stripes_boxes(weights_asc, H=H, W=W).to(base_boxes.device)
+                        base_boxes_by_hw[hw] = base_boxes
+
+                        if H == W:
+                            sym_boxes_by_hw[hw] = {
+                                s: _apply_box_symmetry(base_boxes, sym=s, S=W) for s in range(8)
+                            }
+                        else:
+                            sym_boxes_by_hw[hw] = {
+                                s: _apply_box_symmetry_rect(base_boxes, sym=s, H=H, W=W)
+                                for s in (0, 2, 4, 5)
+                            }
 
                     mixed_items = self._mix_group_labelmix(
                         imgs=imgs,
                         targets=tgts,
-                        layout_cache_desc=layout_cache_desc,
+                        base_boxes=base_boxes_by_hw[hw],
+                        sym_boxes_cache=sym_boxes_by_hw[hw],
                         weights_desc=weights_desc,
                     )
                     buffer.extend(mixed_items)
@@ -1007,15 +1034,12 @@ class BalancedBucketDataset(IterableDataset):
         else:
             # Non-labelmix path: batch-fetch in chunks if possible (HF speedup)
             buffer: List[Tuple[torch.Tensor, int]] = []
-            flat = [int(x) for x in schedule.flatten().tolist()]
+            flat = schedule.flatten()
 
             chunk_size = max(64, min(1024, self.buffer_size))
-            for i0 in range(0, len(flat), chunk_size):
-                chunk = flat[i0 : i0 + chunk_size]
-                try:
-                    items = self._load_items_batch(chunk)
-                except Exception:
-                    items = [self._load_item(int(i)) for i in chunk]
+            for i0 in range(0, int(flat.numel()), chunk_size):
+                chunk = flat[i0 : i0 + chunk_size].tolist()
+                items = self._load_items_batch(chunk)
 
                 for img_obj, tgt in items:
                     try:
