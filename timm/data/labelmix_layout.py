@@ -1,91 +1,156 @@
 import torch
 
-# =====================================================================
-# TorchScript Squarified Treemap Engine
-# =====================================================================
+# =============================================================================
+# Squarified Treemap (TorchScript-friendly core) + D4 layout cache
+# =============================================================================
+#
+# Design goals:
+# - The core layout algorithm is TorchScript-friendly (runs well on CPU).
+# - If input weights are on CUDA, we automatically run the control-flow layout
+#   on CPU to avoid GPU sync stalls from `.item()` and Python-style loops, then
+#   move the rectangles back to the original device.
+# - Output rectangles are in (x, y, w, h) within [0, canvas_size].
+#
+# Notes:
+# - Randomization is included (randperm + random fill direction + carve side).
+#   For deterministic results, call `torch.manual_seed(seed)` before running.
+# - `sorted_weights` are expected to be sorted descending by the caller.
 
+
+# ----------------------------
+# TorchScript helpers
+# ----------------------------
 
 @torch.jit.script
-def get_aspect_ratio_score(areas: torch.Tensor, width: float) -> float:
-    if areas.numel() == 0 or width <= 0.0:
-        return 1e9
-    s = float(torch.sum(areas))
-    if s <= 0.0:
-        return 1e9
-    min_a = float(torch.min(areas))
-    max_a = float(torch.max(areas))
-    if min_a <= 0.0:
-        return 1e9
-
-    w2 = width * width
-    s2 = s * s
-    r1 = (w2 * max_a) / s2
-    r2 = s2 / (w2 * min_a)
+def _worst_score(row_sum: float, row_min: float, row_max: float, side: float) -> float:
+    """
+    Aspect-ratio quality metric (lower is better). Equivalent to the classic
+    'worst' metric used by squarify:
+        max( (side^2 * max_a) / sum^2,  sum^2 / (side^2 * min_a) )
+    """
+    if row_sum <= 0.0 or row_min <= 0.0 or row_max <= 0.0 or side <= 0.0:
+        return 1e18
+    s2 = row_sum * row_sum
+    w2 = side * side
+    r1 = (w2 * row_max) / s2
+    r2 = s2 / (w2 * row_min)
     return r1 if r1 > r2 else r2
 
 
 @torch.jit.script
-def squarify_core(sorted_weights: torch.Tensor, canvas_size: float) -> torch.Tensor:
+def _safe_div(num: float, den: float, eps: float) -> float:
+    """Safe division for float control-flow (avoids Python max() in TorchScript)."""
+    return num / den if den > eps else 0.0
+
+
+# ----------------------------
+# TorchScript core (CPU)
+# ----------------------------
+
+@torch.jit.script
+def _squarify_core_cpu(sorted_weights_cpu: torch.Tensor, canvas_size: float) -> torch.Tensor:
     """
-    Squarified treemap in normalized [0, canvas_size] coordinates.
+    TorchScript squarified treemap on CPU.
 
     Args:
-        sorted_weights: (K,) weights (not necessarily summing to 1), typically sorted descending.
-        canvas_size: float, size of the square canvas.
+        sorted_weights_cpu: (K,) CPU tensor of nonnegative weights (float32 recommended).
+        canvas_size: square canvas side length.
 
     Returns:
-        out: (K,4) float32 rectangles in (x, y, w, h).
+        (K,4) float32 CPU tensor of rectangles (x, y, w, h) in [0, canvas_size].
     """
+    # Ensure float32 for stable geometry math
+    w_in = sorted_weights_cpu.to(dtype=torch.float32)
+
+    K = int(w_in.numel())
+    out = torch.zeros((K, 4), dtype=torch.float32, device=w_in.device)
+
+    if K == 0 or canvas_size <= 0.0:
+        return out
+
+    # Treemaps typically treat negative weights as 0 area.
+    w_in = torch.clamp(w_in, min=0.0)
+
+    # Convert weights -> areas that fill the square canvas.
     total_area = canvas_size * canvas_size
-    weight_sum = float(torch.sum(sorted_weights))
+    weight_sum = float(torch.sum(w_in).item())
     if weight_sum > 0.0:
-        areas = sorted_weights * (total_area / weight_sum)
+        areas = w_in * (total_area / weight_sum)
     else:
-        areas = torch.zeros_like(sorted_weights)
+        areas = torch.zeros_like(w_in)
 
-    x, y = 0.0, 0.0
-    w, h = canvas_size, canvas_size
-    K = int(areas.size(0))
-    out = torch.zeros((K, 4), dtype=torch.float32, device=sorted_weights.device)
+    # Current remaining canvas (top-left origin).
+    x = 0.0
+    y = 0.0
+    W = canvas_size
+    H = canvas_size
 
+    eps = 1e-12
     start = 0
-    while start < K:
-        vertical_stack = w < h
-        side = w if vertical_stack else h
+
+    # Each iteration places one "strip" (row or column), then shrinks the remaining canvas.
+    while start < K and W > 0.0 and H > 0.0:
+        vertical_stack = W < H                  # If tall, place a horizontal strip (stack vertically)
+        side = W if vertical_stack else H       # Fixed side length for scoring the strip
+
+        if side <= eps:
+            break
+
+        # Choose the best row length incrementally (O(K) overall):
+        # maintain (sum, min, max) without repeatedly reducing slices.
+        a0 = float(areas[start].item())
+        row_sum = a0
+        row_min = a0
+        row_max = a0
+        best = _worst_score(row_sum, row_min, row_max, side)
 
         row_len = 1
-        best = get_aspect_ratio_score(areas[start : start + 1], float(side))
         i = start + 1
         while i < K:
-            score = get_aspect_ratio_score(areas[start : start + row_len + 1], float(side))
+            ai = float(areas[i].item())
+            new_sum = row_sum + ai
+            new_min = row_min if row_min < ai else ai
+            new_max = row_max if row_max > ai else ai
+            score = _worst_score(new_sum, new_min, new_max, side)
+
+            # Keep extending while aspect ratio improves or stays the same.
             if score <= best:
                 best = score
+                row_sum = new_sum
+                row_min = new_min
+                row_max = new_max
                 row_len += 1
                 i += 1
             else:
                 break
 
         end = start + row_len
-        row_areas = areas[start:end]
-        perm = torch.randperm(row_len, device=areas.device)
-        row_sum = float(torch.sum(row_areas))
 
-        # Randomize both the placement direction within the row/column and which side
-        # of the remaining canvas we carve from, so every row/column fills in random order.
+        # Randomize placement order inside the strip (keeps output indexing stable).
+        perm = torch.randperm(row_len, device=areas.device) if row_len > 1 else torch.zeros((1,), dtype=torch.int64, device=areas.device)
+
+        # Randomize direction within strip and whether we carve from the far side.
         reverse = float(torch.rand((1,), device=areas.device).item()) < 0.5
         from_end = float(torch.rand((1,), device=areas.device).item()) < 0.5
 
         if vertical_stack:
-            row_h = row_sum / w if w > 0.0 else 0.0
-            row_y = (y + h - row_h) if from_end else y
+            # Place a horizontal strip of height row_h, fill it with varying widths.
+            row_h = _safe_div(row_sum, W, eps)
+            if row_h > H:
+                row_h = H  # clamp in case of tiny numerical drift
+
+            row_y = (y + H - row_h) if from_end else y
+
             if reverse:
-                curr_x = x + w
+                curr_x = x + W
                 for k in range(row_len):
                     idx = int(perm[k].item())
-                    if k == row_len - 1:
-                        rect_w = curr_x - x
-                    else:
-                        rect_w = float(row_areas[idx]) / row_h if row_h > 0.0 else 0.0
+                    area_k = float(areas[start + idx].item())
+
+                    rect_w = (curr_x - x) if (k == row_len - 1) else _safe_div(area_k, row_h, eps)
+                    if rect_w < 0.0:
+                        rect_w = 0.0
+
                     curr_x -= rect_w
                     out[start + idx, 0] = curr_x
                     out[start + idx, 1] = row_y
@@ -95,31 +160,41 @@ def squarify_core(sorted_weights: torch.Tensor, canvas_size: float) -> torch.Ten
                 curr_x = x
                 for k in range(row_len):
                     idx = int(perm[k].item())
-                    if k == row_len - 1:
-                        rect_w = (x + w) - curr_x
-                    else:
-                        rect_w = float(row_areas[idx]) / row_h if row_h > 0.0 else 0.0
+                    area_k = float(areas[start + idx].item())
+
+                    rect_w = ((x + W) - curr_x) if (k == row_len - 1) else _safe_div(area_k, row_h, eps)
+                    if rect_w < 0.0:
+                        rect_w = 0.0
+
                     out[start + idx, 0] = curr_x
                     out[start + idx, 1] = row_y
                     out[start + idx, 2] = rect_w
                     out[start + idx, 3] = row_h
                     curr_x += rect_w
-            if from_end:
-                h -= row_h
-            else:
+
+            # Shrink the remaining canvas by removing the placed strip.
+            H -= row_h
+            if not from_end:
                 y += row_h
-                h -= row_h
+
         else:
-            row_w = row_sum / h if h > 0.0 else 0.0
-            row_x = (x + w - row_w) if from_end else x
+            # Place a vertical strip of width row_w, fill it with varying heights.
+            row_w = _safe_div(row_sum, H, eps)
+            if row_w > W:
+                row_w = W  # clamp in case of tiny numerical drift
+
+            row_x = (x + W - row_w) if from_end else x
+
             if reverse:
-                curr_y = y + h
+                curr_y = y + H
                 for k in range(row_len):
                     idx = int(perm[k].item())
-                    if k == row_len - 1:
-                        rect_h = curr_y - y
-                    else:
-                        rect_h = float(row_areas[idx]) / row_w if row_w > 0.0 else 0.0
+                    area_k = float(areas[start + idx].item())
+
+                    rect_h = (curr_y - y) if (k == row_len - 1) else _safe_div(area_k, row_w, eps)
+                    if rect_h < 0.0:
+                        rect_h = 0.0
+
                     curr_y -= rect_h
                     out[start + idx, 0] = row_x
                     out[start + idx, 1] = curr_y
@@ -129,64 +204,123 @@ def squarify_core(sorted_weights: torch.Tensor, canvas_size: float) -> torch.Ten
                 curr_y = y
                 for k in range(row_len):
                     idx = int(perm[k].item())
-                    if k == row_len - 1:
-                        rect_h = (y + h) - curr_y
-                    else:
-                        rect_h = float(row_areas[idx]) / row_w if row_w > 0.0 else 0.0
+                    area_k = float(areas[start + idx].item())
+
+                    rect_h = ((y + H) - curr_y) if (k == row_len - 1) else _safe_div(area_k, row_w, eps)
+                    if rect_h < 0.0:
+                        rect_h = 0.0
+
                     out[start + idx, 0] = row_x
                     out[start + idx, 1] = curr_y
                     out[start + idx, 2] = row_w
                     out[start + idx, 3] = rect_h
                     curr_y += rect_h
-            if from_end:
-                w -= row_w
-            else:
+
+            # Shrink the remaining canvas by removing the placed strip.
+            W -= row_w
+            if not from_end:
                 x += row_w
-                w -= row_w
 
         start = end
 
     return out
 
 
-# =====================================================================
-# Layout Cache with D4 Symmetries (layout-only augmentation)
-# =====================================================================
+# ----------------------------
+# Public API: device-aware core
+# ----------------------------
 
-
-def generate_layout_cache(sorted_weights: torch.Tensor, canvas_size: float = 1.0) -> torch.Tensor:
+def squarify_core(sorted_weights: torch.Tensor, canvas_size: float) -> torch.Tensor:
     """
-    Generate base squarified treemap and precompute all 8 D4 symmetries
-    in normalized coordinates.
+    Device-aware wrapper around the TorchScript CPU core.
+
+    - If `sorted_weights` is CUDA, runs the sequential control-flow on CPU and
+      returns rectangles on the original CUDA device.
+    - If `sorted_weights` is CPU, runs entirely on CPU.
+
+    Args:
+        sorted_weights: (K,) tensor, typically sorted descending.
+        canvas_size: size of square canvas.
 
     Returns:
-        layout_cache: (8, K, 4) float tensor, each (K,4) is (x,y,w,h)
-          0: identity
-          1: rot90
-          2: rot180
-          3: rot270
-          4: flipH
-          5: flipV
-          6: transpose
-          7: anti-transpose
+        (K,4) float32 tensor of rectangles on the same device as `sorted_weights`.
     """
-    base_layout = squarify_core(sorted_weights, float(canvas_size))
-    x, y, w, h = base_layout.unbind(-1)
+    if sorted_weights.is_cuda:
+        base_cpu = _squarify_core_cpu(sorted_weights.detach().cpu(), float(canvas_size))
+        return base_cpu.to(device=sorted_weights.device)
+    return _squarify_core_cpu(sorted_weights, float(canvas_size))
+
+
+# ----------------------------
+# Layout cache: D4 symmetries
+# ----------------------------
+
+def generate_layout_cache(sorted_weights: torch.Tensor, canvas_size: float = 1.0, clamp: bool = False) -> torch.Tensor:
+    """
+    Generate the base squarified treemap, then precompute all 8 D4 symmetries.
+
+    Output layout_cache has shape (8, K, 4), each slice is (K,4) as (x,y,w,h):
+      0: identity
+      1: rot90
+      2: rot180
+      3: rot270
+      4: flipH        (mirror left-right)
+      5: flipV        (mirror top-bottom)
+      6: transpose    (reflect across y=x)
+      7: anti-transpose (reflect across y=-x within [0,S])
+
+    Args:
+        sorted_weights: (K,) weights, typically sorted descending.
+        canvas_size: size of square canvas (default 1.0).
+        clamp: if True, clamps for tiny numerical drift and enforces x+w<=S, y+h<=S.
+
+    Returns:
+        (8, K, 4) tensor on the same device as `sorted_weights`.
+    """
+    base = squarify_core(sorted_weights, float(canvas_size))  # (K,4) on input device
     S = float(canvas_size)
+    K = int(base.size(0))
 
-    layouts = [
-        torch.stack([x, y, w, h], dim=-1),
-        torch.stack([y, S - x - w, h, w], dim=-1),
-        torch.stack([S - x - w, S - y - h, w, h], dim=-1),
-        torch.stack([S - y - h, x, h, w], dim=-1),
-        torch.stack([S - x - w, y, w, h], dim=-1),
-        torch.stack([x, S - y - h, w, h], dim=-1),
-        torch.stack([y, x, h, w], dim=-1),
-        torch.stack([S - y - h, S - x - w, h, w], dim=-1),
-    ]
+    # Views into base (no copies)
+    x = base[:, 0]
+    y = base[:, 1]
+    w = base[:, 2]
+    h = base[:, 3]
 
-    layout_cache = torch.stack(layouts, dim=0)
-    layout_cache[..., 0:2] = layout_cache[..., 0:2].clamp(0.0, S)
-    layout_cache[..., 2:4] = layout_cache[..., 2:4].clamp(0.0, S)
+    # Common reused terms
+    xr = S - x - w
+    yr = S - y - h
 
-    return layout_cache
+    out = torch.empty((8, K, 4), dtype=base.dtype, device=base.device)
+
+    # 0: identity
+    out[0, :, 0] = x;  out[0, :, 1] = y;  out[0, :, 2] = w;  out[0, :, 3] = h
+    # 1: rot90
+    out[1, :, 0] = y;  out[1, :, 1] = xr; out[1, :, 2] = h;  out[1, :, 3] = w
+    # 2: rot180
+    out[2, :, 0] = xr; out[2, :, 1] = yr; out[2, :, 2] = w;  out[2, :, 3] = h
+    # 3: rot270
+    out[3, :, 0] = yr; out[3, :, 1] = x;  out[3, :, 2] = h;  out[3, :, 3] = w
+    # 4: flipH (mirror left-right)
+    out[4, :, 0] = xr; out[4, :, 1] = y;  out[4, :, 2] = w;  out[4, :, 3] = h
+    # 5: flipV (mirror top-bottom)
+    out[5, :, 0] = x;  out[5, :, 1] = yr; out[5, :, 2] = w;  out[5, :, 3] = h
+    # 6: transpose (reflect across y=x)
+    out[6, :, 0] = y;  out[6, :, 1] = x;  out[6, :, 2] = h;  out[6, :, 3] = w
+    # 7: anti-transpose (reflect across y=-x within [0,S])
+    out[7, :, 0] = yr; out[7, :, 1] = xr; out[7, :, 2] = h;  out[7, :, 3] = w
+
+    if clamp:
+        # Clamp x/y into [0,S] and w/h to nonnegative.
+        out[:, :, 0].clamp_(0.0, S)
+        out[:, :, 1].clamp_(0.0, S)
+        out[:, :, 2].clamp_min_(0.0)
+        out[:, :, 3].clamp_min_(0.0)
+
+        # Enforce containment: x+w <= S and y+h <= S (avoids "independent clamp" artifacts).
+        max_w = (S - out[:, :, 0]).clamp_min(0.0)
+        max_h = (S - out[:, :, 1]).clamp_min(0.0)
+        out[:, :, 2].copy_(torch.minimum(out[:, :, 2], max_w))
+        out[:, :, 3].copy_(torch.minimum(out[:, :, 3], max_h))
+
+    return out
