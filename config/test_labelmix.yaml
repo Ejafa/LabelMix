@@ -123,7 +123,7 @@ amp_dtype: bfloat16
 workers: 8
 # pin_mem: false
 # no_prefetcher: true
-# no_aug: true
+no_aug: true
 
 # ==========================================
 # Logging
@@ -143,10 +143,17 @@ balanced_cache_threshold: 256
 labelmix: true
 labelmix_mix_k: 5
 labelmix_alpha_min: 0.1
-labelmix_alpha_max: 1.0
+labelmix_alpha_max: 2
 labelmix_schedule: linear
 labelmix_reverse: false
 labelmix_step_mode: total
+labelmix_sampling: true
+labelmix_sampling_min_side_px: 8
+labelmix_sampling_max_aspect: 20
+labelmix_sampling_bins: 16
+labelmix_sampling_pool_size: 256
+labelmix_sampling_low_watermark: 64
+labelmix_sampling_max_attempts: 200
 # labelmix_total_steps: 2000  # optional; defaults to num_steps if omitted
 
 # Short run overrides

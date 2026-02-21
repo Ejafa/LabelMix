@@ -4,7 +4,7 @@ import argparse
 import json
 import logging
 import os
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import torch
 import yaml
@@ -69,6 +69,50 @@ def _is_ascending(weights: torch.Tensor, eps: float = 1e-7) -> bool:
     if weights.numel() <= 1:
         return True
     return bool(torch.all(weights[1:] + eps >= weights[:-1]))
+
+
+def _filter_labelmix_samples(
+    dataset: BalancedBucketDataset,
+    imgs: torch.Tensor,
+    labels: torch.Tensor,
+    weights: torch.Tensor,
+    sym_ids: Optional[torch.Tensor],
+    sample_count: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
+    """Reject samples whose LabelMix layout violates min-side/aspect constraints."""
+    keep: List[int] = []
+    rejected = 0
+    max_keep = min(int(sample_count), int(labels.shape[0]))
+
+    for i in range(int(labels.shape[0])):
+        if len(keep) >= max_keep:
+            break
+        w = weights[i]
+        w_desc, _ = torch.sort(w.detach(), descending=True)
+        H = int(imgs[i].shape[-2])
+        W = int(imgs[i].shape[-1])
+        if dataset._layout_is_valid(w_desc, H=H, W=W):
+            keep.append(i)
+        else:
+            rejected += 1
+
+    if not keep:
+        labels_empty = labels[:0]
+        weights_empty = weights[:0]
+        return (
+            labels_empty,
+            weights_empty,
+            imgs[:0],
+            sym_ids[:0] if sym_ids is not None else None,
+            rejected,
+        )
+
+    labels = labels[keep]
+    weights = weights[keep]
+    imgs = imgs[keep]
+    if sym_ids is not None:
+        sym_ids = sym_ids[keep]
+    return labels, weights, imgs, sym_ids, rejected
 
 
 def labelmix_collate(batch):
@@ -352,11 +396,34 @@ def main() -> None:
 
         labels, weights = targets[0], targets[1]
         sym_ids = targets[2] if len(targets) >= 3 else None
-        labels = labels[:sample_count]
-        weights = weights[:sample_count]
-        imgs = inputs[:sample_count]
-        if sym_ids is not None:
-            sym_ids = sym_ids[:sample_count]
+        imgs = inputs
+
+        if sampling_enabled and hasattr(dataset_train, "_layout_is_valid"):
+            labels, weights, imgs, sym_ids, rejected = _filter_labelmix_samples(
+                dataset_train,
+                imgs=imgs,
+                labels=labels,
+                weights=weights,
+                sym_ids=sym_ids,
+                sample_count=sample_count,
+            )
+            if labels.numel() == 0:
+                _logger.warning(
+                    "All samples rejected by aspect ratio constraints at step %d.", step
+                )
+                continue
+            if rejected:
+                _logger.info(
+                    "Rejected %d samples by aspect ratio constraints at step %d.",
+                    rejected,
+                    step,
+                )
+        else:
+            labels = labels[:sample_count]
+            weights = weights[:sample_count]
+            imgs = imgs[:sample_count]
+            if sym_ids is not None:
+                sym_ids = sym_ids[:sample_count]
 
         print(f"\nStep {step}: showing {labels.shape[0]} samples")
         for i in range(labels.shape[0]):
