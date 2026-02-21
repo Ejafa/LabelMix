@@ -54,7 +54,7 @@ std: [1, 1, 1]
 # # Augmentation & Regularization (NEUTRALIZED)
 # # ==========================================
 # # Auto-Augmentation Policy
-# aa: null                        # Set to null/None to disable RandAugment
+aa: rand-m8-inc1-mstd1.0        # RandAugment magnitude 8, std 1.0
 # aug_repeats: 0.0                # No repetition
 # aug_splits: 0                   
 
