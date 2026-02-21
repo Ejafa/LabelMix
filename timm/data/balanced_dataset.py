@@ -910,9 +910,13 @@ class BalancedBucketDataset(IterableDataset):
             base_boxes_by_hw: Dict[Tuple[int, int], torch.Tensor] = {}
             sym_boxes_by_hw: Dict[Tuple[int, int], Dict[int, torch.Tensor]] = {}
 
-            # Within the row, group into chunks of K (no cross-row carry)
+            # Within the row, group into chunks of K.
+            # If there is a remainder, pad one tail group from this row and
+            # keep only `remainder` mixed outputs so row output count stays exact.
             row_indices = schedule[row_i]
-            usable = (int(row_indices.numel()) // K) * K
+            row_n = int(row_indices.numel())
+            usable = (row_n // K) * K
+            remainder = row_n - usable
 
             for g0 in range(0, usable, K):
                 group_indices = row_indices[g0 : g0 + K].tolist()
@@ -973,6 +977,85 @@ class BalancedBucketDataset(IterableDataset):
                 except Exception as exc:
                     last_exc = exc
                     continue
+
+                while len(buffer) >= self.buffer_size:
+                    i = random.randint(0, len(buffer) - 1)
+                    buffer[i], buffer[-1] = buffer[-1], buffer[i]
+                    emitted += 1
+                    yield buffer.pop()
+
+            if remainder > 0:
+                # Tail indices that would otherwise be dropped.
+                tail = row_indices[usable:]
+                need = K - remainder
+
+                # Fill from earlier indices in the same row (without replacement).
+                pool = row_indices[:usable]
+                if int(pool.numel()) < need:
+                    # Defensive fallback (should not happen when num_classes >= mix_k).
+                    perm = torch.randperm(row_n, dtype=torch.int64)
+                    fill = row_indices[perm[:need]]
+                else:
+                    perm = torch.randperm(int(pool.numel()), dtype=torch.int64)
+                    fill = pool[perm[:need]]
+
+                group_indices = torch.cat([tail, fill], dim=0).tolist()
+                try:
+                    items = self._load_items_batch(group_indices)
+
+                    imgs: List[torch.Tensor] = []
+                    tgts: List[int] = []
+                    for img_obj, tgt in items:
+                        imgs.append(self._process_image(img_obj))
+                        tgts.append(int(tgt))
+
+                    if weights_desc is None or base_layout_desc is None:
+                        shape = imgs[0].shape
+                        H, W = int(shape[-2]), int(shape[-1])
+                        if self.sampling_enabled:
+                            weights = self._get_sampling_weights(alpha, H=H, W=W)
+                        else:
+                            if alpha > 0.0:
+                                dirichlet = torch.distributions.Dirichlet(torch.full((K,), alpha))
+                                weights = dirichlet.sample().to(dtype=torch.float32)
+                            else:
+                                weights = torch.full((K,), 1.0 / K, dtype=torch.float32)
+                        weights_desc, _ = torch.sort(weights, descending=True)
+                        base_layout_desc = squarify_core(weights_desc, canvas_size=1.0)
+                        base_layout_asc = torch.flip(base_layout_desc, dims=[0])
+                        weights_asc = torch.flip(weights_desc, dims=[0]).float().contiguous()
+
+                    H, W = int(imgs[0].shape[-2]), int(imgs[0].shape[-1])
+                    hw = (H, W)
+                    if hw not in base_boxes_by_hw:
+                        if base_layout_asc is None or weights_asc is None:
+                            raise RuntimeError("Internal error: layout caches not initialized.")
+
+                        base_boxes = _layout_to_pixel_boxes(base_layout_asc, H=H, W=W, canvas_size=1.0, eps=1e-7)
+                        if not _boxes_are_valid_and_tile(base_boxes, H=H, W=W):
+                            base_boxes = _fallback_stripes_boxes(weights_asc, H=H, W=W).to(base_boxes.device)
+                        base_boxes_by_hw[hw] = base_boxes
+
+                        if H == W:
+                            sym_boxes_by_hw[hw] = {
+                                s: _apply_box_symmetry(base_boxes, sym=s, S=W) for s in range(8)
+                            }
+                        else:
+                            sym_boxes_by_hw[hw] = {
+                                s: _apply_box_symmetry_rect(base_boxes, sym=s, H=H, W=W)
+                                for s in (0, 2, 4, 5)
+                            }
+
+                    mixed_items = self._mix_group_labelmix(
+                        imgs=imgs,
+                        targets=tgts,
+                        base_boxes=base_boxes_by_hw[hw],
+                        sym_boxes_cache=sym_boxes_by_hw[hw],
+                        weights_desc=weights_desc,
+                    )
+                    buffer.extend(mixed_items[:remainder])
+                except Exception as exc:
+                    last_exc = exc
 
                 while len(buffer) >= self.buffer_size:
                     i = random.randint(0, len(buffer) - 1)
