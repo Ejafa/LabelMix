@@ -31,6 +31,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", default=None, type=str, help="Dataset root override")
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--steps", default=100, type=int)
+    parser.add_argument("--steps-per-epoch", default=0, type=int,
+                        help="Steps per epoch for implicit epoch advancement (0 = use len(dataloader)).")
     parser.add_argument("--sample-every", default=10, type=int)
     parser.add_argument("--sample-count", default=10, type=int)
     parser.add_argument("--output-dir", default="output_test", type=str)
@@ -44,6 +46,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--labelmix-sampling-low-watermark", default=32, type=int)
     parser.add_argument("--labelmix-sampling-max-attempts", default=200, type=int)
     parser.add_argument("--labelmix-debug-sym", action="store_true", default=False)
+    parser.add_argument("--labelmix-mix-k", default=5, type=int,
+                        help="LabelMix K (number of source images per output, >= 1).")
+    parser.add_argument("--labelmix-k-min", default=None, type=int,
+                        help="LabelMix K minimum for K scheduler (default: --labelmix-mix-k).")
+    parser.add_argument("--labelmix-k-max", default=None, type=int,
+                        help="LabelMix K maximum for K scheduler (default: --labelmix-mix-k).")
+    parser.add_argument("--labelmix-k-schedule", default="linear", type=str,
+                        choices=["fixed", "linear", "cosine"],
+                        help="LabelMix K schedule over epochs.")
+    parser.add_argument("--labelmix-k-reverse", action="store_true", default=False,
+                        help="Reverse LabelMix K schedule (max->min).")
+    parser.add_argument("--labelmix-k-warmup-epochs", default=0, type=int,
+                        help="Warmup epochs for LabelMix K schedule.")
+    parser.add_argument("--labelmix-k-total-epochs", default=None, type=int,
+                        help="Total epochs for LabelMix K schedule (default: inferred from total run length).")
+    parser.add_argument("--labelmix-epoch", default=0, type=int,
+                        help="Epoch index to inspect (for K/alpha scheduling).")
     args, _ = parser.parse_known_args()
 
     if args.config:
@@ -322,8 +341,38 @@ def main() -> None:
         balanced_cache_path = os.path.join(base_dir, "class_buckets.pkl")
 
     sampling_enabled = _ensure_bool(getattr(args, "labelmix_sampling", False))
+    labelmix_mix_k = int(getattr(args, "labelmix_mix_k", 5))
+    labelmix_k_min = getattr(args, "labelmix_k_min", None)
+    if labelmix_k_min is None:
+        labelmix_k_min = labelmix_mix_k
+    labelmix_k_max = getattr(args, "labelmix_k_max", None)
+    if labelmix_k_max is None:
+        labelmix_k_max = labelmix_mix_k
+
+    default_train_epochs = getattr(args, "epochs", None)
+    if default_train_epochs is None:
+        default_train_epochs = getattr(args, "labelmix_total_epochs", None)
+    if default_train_epochs is None:
+        default_train_epochs = 1
+
+    explicit_k_total_epochs = (
+        getattr(args, "labelmix_k_total_epochs", None)
+        if getattr(args, "labelmix_k_total_epochs", None) is not None
+        else getattr(args, "labelmix_total_epochs", None)
+    )
+    labelmix_k_total_epochs = (
+        explicit_k_total_epochs if explicit_k_total_epochs is not None else default_train_epochs
+    )
+
     labelmix_kwargs = {
-        "mix_k": int(getattr(args, "labelmix_mix_k", 5)),
+        "mix_k": int(labelmix_mix_k),
+        "k_min": int(labelmix_k_min),
+        "k_max": int(labelmix_k_max),
+        "k_schedule": str(getattr(args, "labelmix_k_schedule", "linear")),
+        "k_reverse": _ensure_bool(getattr(args, "labelmix_k_reverse", False)),
+        "k_warmup_epochs": int(getattr(args, "labelmix_k_warmup_epochs", 0)),
+        "k_total_epochs": labelmix_k_total_epochs,
+        "train_epochs": default_train_epochs,
         "alpha_min": float(getattr(args, "labelmix_alpha_min", 0.1)),
         "alpha_max": float(getattr(args, "labelmix_alpha_max", 1.0)),
         "schedule": str(getattr(args, "labelmix_schedule", "linear")),
@@ -370,15 +419,31 @@ def main() -> None:
     output_dir = getattr(args, "output_dir", "output_test")
     os.makedirs(output_dir, exist_ok=True)
 
-    data_iter = iter(loader)
     steps = int(args.steps)
     sample_every = int(args.sample_every)
     sample_count = int(args.sample_count)
+    steps_per_epoch_arg = int(getattr(args, "steps_per_epoch", 0) or 0)
+    try:
+        steps_per_epoch = steps_per_epoch_arg if steps_per_epoch_arg > 0 else int(len(loader))
+    except TypeError:
+        steps_per_epoch = steps
+    steps_per_epoch = max(1, steps_per_epoch)
 
     mean = data_config['mean']
     std = data_config['std']
 
+    base_epoch = int(getattr(args, "labelmix_epoch", 0))
+    current_epoch = None
+    data_iter = None
+
     for step in range(1, steps + 1):
+        epoch = base_epoch + (step - 1) // steps_per_epoch
+        if epoch != current_epoch:
+            current_epoch = epoch
+            if _ensure_bool(getattr(args, "labelmix", True)) and hasattr(dataset_train, "set_epoch"):
+                dataset_train.set_epoch(current_epoch)
+            data_iter = iter(loader)
+
         try:
             batch = next(data_iter)
         except StopIteration:
@@ -425,7 +490,7 @@ def main() -> None:
             if sym_ids is not None:
                 sym_ids = sym_ids[:sample_count]
 
-        print(f"\nStep {step}: showing {labels.shape[0]} samples")
+        print(f"\nStep {step} (epoch {current_epoch}): showing {labels.shape[0]} samples")
         for i in range(labels.shape[0]):
             lbl = labels[i].detach().cpu()
             w = weights[i].detach().cpu()

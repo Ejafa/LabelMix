@@ -142,8 +142,16 @@ balanced_cache_threshold: 256
 
 labelmix: true
 labelmix_mix_k: 5
-labelmix_alpha_min: 0.1
-labelmix_alpha_max: 2
+# labelmix_epoch: 10
+steps_per_epoch: 5
+labelmix_k_min: 1
+labelmix_k_max: 6
+labelmix_k_schedule: linear
+labelmix_k_reverse: false
+labelmix_k_warmup_epochs: 0
+labelmix_k_total_epochs: 20
+labelmix_alpha_min: 1
+labelmix_alpha_max: 1
 labelmix_schedule: linear
 labelmix_reverse: false
 labelmix_step_mode: total
