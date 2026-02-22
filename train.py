@@ -569,6 +569,11 @@ class RepeatingLoader:
     def __iter__(self):
         return self
 
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        self._set_epoch(self.epoch)
+        self.data_iter = iter(self.loader)
+
     def __next__(self):
         try:
             batch = next(self.data_iter)
@@ -1709,6 +1714,20 @@ def main():
             lr_scheduler.step(start_step, metric=None)
         else:
             lr_scheduler.step_update(start_step)
+
+    # Make dataset-side schedules (alpha / K) resume-aware by restoring epoch
+    # from step count when possible.
+    if start_step > 0 and steps_per_epoch is not None:
+        resume_epoch = max(0, int(start_step // steps_per_epoch))
+        if hasattr(loader_train, 'set_epoch'):
+            loader_train.set_epoch(resume_epoch)
+            if utils.is_primary(args):
+                _logger.info(
+                    "Resumed loader/dataset epoch=%d from start_step=%d (steps_per_epoch=%d).",
+                    resume_epoch,
+                    start_step,
+                    steps_per_epoch,
+                )
 
     if utils.is_primary(args):
         if args.warmup_prefix:
