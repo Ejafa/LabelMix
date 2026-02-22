@@ -144,7 +144,20 @@ group.add_argument('--labelmix-loss', default='soft_ce', type=str,
                    choices=['soft_ce', 'pl_loss'],
                    help='Loss for LabelMix targets: "soft_ce" or "pl_loss".')
 group.add_argument('--labelmix-mix-k', default=5, type=int,
-                   help='LabelMix K (number of mixed images per output).')
+                   help='LabelMix K (number of source images per output, >= 1).')
+group.add_argument('--labelmix-k-min', default=None, type=int,
+                   help='LabelMix K minimum for K scheduler (default: --labelmix-mix-k).')
+group.add_argument('--labelmix-k-max', default=None, type=int,
+                   help='LabelMix K maximum for K scheduler (default: --labelmix-mix-k).')
+group.add_argument('--labelmix-k-schedule', default='linear', type=str,
+                   choices=['fixed', 'linear', 'cosine'],
+                   help='LabelMix K schedule over epochs.')
+group.add_argument('--labelmix-k-reverse', action='store_true', default=False,
+                   help='Reverse LabelMix K schedule (max->min).')
+group.add_argument('--labelmix-k-warmup-epochs', default=0, type=int,
+                   help='Warmup epochs for LabelMix K schedule.')
+group.add_argument('--labelmix-k-total-epochs', default=None, type=int,
+                   help='Total epochs for LabelMix K schedule (default: inferred from total run length).')
 group.add_argument('--labelmix-alpha-min', default=0.1, type=float,
                    help='LabelMix Dirichlet alpha min.')
 group.add_argument('--labelmix-alpha-max', default=1.0, type=float,
@@ -626,6 +639,12 @@ class LabelMixBroadcastLoader:
     def __iter__(self):
         if self.rank == self.producer_rank:
             self._iter = None
+        # Target shape can change across epochs (e.g. K scheduling), so refresh
+        # scatter metadata and buffers at each new epoch iterator.
+        self._meta_ready = False
+        self._input_buf = None
+        self._labels_buf = None
+        self._weights_buf = None
         return self
 
     def __getattr__(self, name):
@@ -799,8 +818,22 @@ def main():
     if args.labelmix:
         if not args.balanced_mode:
             parser.error('--labelmix requires --balanced-mode to be set')
-        if args.labelmix_mix_k < 2:
-            parser.error('--labelmix-mix-k must be >= 2')
+        if args.labelmix_mix_k < 1:
+            parser.error('--labelmix-mix-k must be >= 1')
+        if args.labelmix_k_min is not None and args.labelmix_k_min < 1:
+            parser.error('--labelmix-k-min must be >= 1')
+        if args.labelmix_k_max is not None and args.labelmix_k_max < 1:
+            parser.error('--labelmix-k-max must be >= 1')
+        if (
+            args.labelmix_k_min is not None
+            and args.labelmix_k_max is not None
+            and args.labelmix_k_max < args.labelmix_k_min
+        ):
+            parser.error('--labelmix-k-max must be >= --labelmix-k-min')
+        if args.labelmix_k_warmup_epochs < 0:
+            parser.error('--labelmix-k-warmup-epochs must be >= 0')
+        if args.labelmix_k_total_epochs is not None and args.labelmix_k_total_epochs <= 0:
+            parser.error('--labelmix-k-total-epochs must be > 0')
         if args.labelmix_step_mode == 'total' and not (args.labelmix_total_epochs or args.labelmix_total_steps):
             parser.error('--labelmix-step-mode=total requires --labelmix-total-epochs or --labelmix-total-steps')
     elif args.labelmix_producer_rank >= 0:
@@ -1150,6 +1183,8 @@ def main():
     mixup_fn = None
     mixup_args = {}
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    labelmix_train_dataset = None
+    labelmix_k_total_epochs_auto = False
     if mixup_active:
         mixup_args = dict(
             mixup_alpha=args.mixup,
@@ -1267,8 +1302,34 @@ def main():
                 balanced_cache_path = os.path.join(base_dir, 'class_buckets.pkl')
 
             labelmix_batch_size = args.batch_size * args.world_size if central_labelmix else args.batch_size
+            # Some step-based configs do not define --epochs; keep K scheduling robust.
+            default_train_epochs = getattr(args, 'epochs', None)
+            if default_train_epochs is None:
+                default_train_epochs = args.labelmix_total_epochs
+            if default_train_epochs is None:
+                default_train_epochs = 1
+            labelmix_k_min = args.labelmix_k_min if args.labelmix_k_min is not None else args.labelmix_mix_k
+            labelmix_k_max = args.labelmix_k_max if args.labelmix_k_max is not None else args.labelmix_mix_k
+            explicit_k_total_epochs = (
+                args.labelmix_k_total_epochs
+                if args.labelmix_k_total_epochs is not None
+                else args.labelmix_total_epochs
+            )
+            labelmix_k_total_epochs_auto = explicit_k_total_epochs is None
+            labelmix_k_total_epochs = (
+                explicit_k_total_epochs
+                if explicit_k_total_epochs is not None
+                else default_train_epochs
+            )
             labelmix_kwargs = {
                 'mix_k': args.labelmix_mix_k,
+                'k_min': labelmix_k_min,
+                'k_max': labelmix_k_max,
+                'k_schedule': args.labelmix_k_schedule,
+                'k_reverse': args.labelmix_k_reverse,
+                'k_warmup_epochs': args.labelmix_k_warmup_epochs,
+                'k_total_epochs': labelmix_k_total_epochs,
+                'train_epochs': default_train_epochs,
                 'alpha_min': args.labelmix_alpha_min,
                 'alpha_max': args.labelmix_alpha_max,
                 'schedule': args.labelmix_schedule,
@@ -1301,6 +1362,7 @@ def main():
                 dist_rank_override=0 if central_labelmix else None,
                 dist_world_size_override=1 if central_labelmix else None,
             )
+            labelmix_train_dataset = dataset_train if args.labelmix else None
 
             if collate_fn is None:
                 collate_fn = fast_collate if args.prefetcher else torch.utils.data.dataloader.default_collate
@@ -1601,6 +1663,20 @@ def main():
     )
     if num_steps != args.num_steps:
         args.num_steps = num_steps
+
+    # Default K schedule horizon follows total run length so K progresses over all epochs.
+    if args.labelmix and labelmix_k_total_epochs_auto and steps_per_epoch is not None and labelmix_train_dataset is not None:
+        effective_total_epochs = max(1, int(math.ceil(args.num_steps / steps_per_epoch)))
+        if getattr(labelmix_train_dataset, 'k_scheduler', None) is not None:
+            labelmix_train_dataset.k_scheduler.total_epochs = effective_total_epochs
+            labelmix_train_dataset.set_epoch(getattr(labelmix_train_dataset, '_epoch', 0))
+            if utils.is_primary(args):
+                _logger.info(
+                    "LabelMix K schedule total_epochs auto-set to %d (num_steps=%d, steps_per_epoch=%d).",
+                    effective_total_epochs,
+                    args.num_steps,
+                    steps_per_epoch,
+                )
 
     log_interval = args.log_interval
     if args.num_logs is not None:

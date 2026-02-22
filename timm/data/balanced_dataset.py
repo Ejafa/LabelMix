@@ -102,6 +102,57 @@ class AlphaScheduler:
         return (self.alpha_max - p * span) if self.reverse else (self.alpha_min + p * span)
 
 
+class KScheduler:
+    """
+    Epoch-level integer K schedule.
+
+    K is updated once per epoch and progresses over total epochs.
+    Modes: fixed | linear | cosine
+    """
+
+    def __init__(
+        self,
+        k_min: int = 4,
+        k_max: int = 4,
+        schedule: str = "fixed",
+        reverse: bool = False,
+        warmup_epochs: int = 0,
+        total_epochs: Optional[int] = None,
+    ) -> None:
+        self.k_min = int(k_min)
+        self.k_max = int(k_max)
+        if self.k_min < 1 or self.k_max < 1:
+            raise ValueError("k_min and k_max must be >= 1")
+        if self.k_max < self.k_min:
+            raise ValueError(f"k_max must be >= k_min (got {self.k_max} < {self.k_min})")
+
+        self.schedule = str(schedule).lower()
+        self.reverse = bool(reverse)
+        self.warmup_epochs = max(0, int(warmup_epochs))
+        self.total_epochs = max(1, int(total_epochs) if total_epochs is not None else 1)
+
+    def get_k(self, epoch: int) -> int:
+        if self.schedule == "fixed" or self.k_min == self.k_max:
+            return self.k_min
+
+        epoch = int(epoch)
+        if epoch < self.warmup_epochs:
+            return self.k_max if self.reverse else self.k_min
+
+        eff_curr = epoch - self.warmup_epochs
+        eff_tot = max(1, self.total_epochs - self.warmup_epochs - 1)
+        p = float(max(0.0, min(1.0, eff_curr / eff_tot)))
+
+        if self.schedule == "cosine":
+            p = 0.5 * (1.0 - math.cos(math.pi * p))
+
+        span = float(self.k_max - self.k_min)
+        kf = (self.k_max - p * span) if self.reverse else (self.k_min + p * span)
+        # Round-to-nearest integer (half-up) for stable curriculum steps.
+        k = int(math.floor(kf + 0.5))
+        return max(self.k_min, min(self.k_max, k))
+
+
 # =====================================================================
 # Layout -> Integer Boxes (robust tiling helpers)
 # =====================================================================
@@ -335,6 +386,7 @@ class BalancedBucketDataset(IterableDataset):
       - groups are loaded via base_dataset[indices] when possible (batch fetch).
 
     LabelMix semantics:
+      - K can be scheduled per epoch (epoch-level integer curriculum)
       - One Dirichlet draw per CYCLE ROW -> weights_desc -> base_layout_desc cached per cycle row
       - Base boxes and symmetry-transformed boxes are cached once per row/shape
       - For each GROUP of K images within the row:
@@ -373,8 +425,9 @@ class BalancedBucketDataset(IterableDataset):
         self.labelmix = bool(labelmix)
         self.lm_config = labelmix_kwargs or {}
         self.mix_k = int(self.lm_config.get("mix_k", 4))
-        if self.mix_k < 2:
-            raise ValueError("mix_k must be >= 2")
+        if self.mix_k < 1:
+            raise ValueError("mix_k must be >= 1")
+        self.k_scheduler: Optional[KScheduler] = None
 
         self.debug_sym = bool(self.lm_config.get("debug_sym", False))
 
@@ -388,11 +441,11 @@ class BalancedBucketDataset(IterableDataset):
         self._sampling_pools: Optional[List[deque]] = None
         self._sampling_hw: Optional[Tuple[int, int]] = None
 
-        # Precompute indices for cyclic permutation:
+        # Precompute indices for cyclic permutation (can be updated by K scheduler):
         # circulant_idx[shift, slot] = (slot + shift) % K
-        K = self.mix_k
-        self._shift_idx = torch.arange(K, dtype=torch.int64)
-        self._circulant_idx = (self._shift_idx[:, None] + self._shift_idx[None, :]) % K
+        self._shift_idx = torch.empty(0, dtype=torch.int64)
+        self._circulant_idx = torch.empty((0, 0), dtype=torch.int64)
+        self._set_mix_k(self.mix_k)
 
         # Identify HF-style dataset
         self.is_hf = hasattr(base_dataset, "column_names") or hasattr(base_dataset, "features")
@@ -450,6 +503,32 @@ class BalancedBucketDataset(IterableDataset):
                 total_steps=self.lm_config.get("total_steps"),
                 batch_size=self.lm_config.get("batch_size"),
             )
+
+            k_min = int(self.lm_config.get("k_min", self.mix_k))
+            k_max = int(self.lm_config.get("k_max", self.mix_k))
+            k_schedule = str(self.lm_config.get("k_schedule", "linear"))
+            k_reverse = bool(self.lm_config.get("k_reverse", False))
+            k_warmup_epochs = int(self.lm_config.get("k_warmup_epochs", 0))
+            k_total_epochs = self.lm_config.get("k_total_epochs")
+            if k_total_epochs is None:
+                k_total_epochs = self.lm_config.get("total_epochs")
+            if k_total_epochs is None:
+                k_total_epochs = self.lm_config.get("train_epochs")
+            self.k_scheduler = KScheduler(
+                k_min=k_min,
+                k_max=k_max,
+                schedule=k_schedule,
+                reverse=k_reverse,
+                warmup_epochs=k_warmup_epochs,
+                total_epochs=k_total_epochs,
+            )
+            if self.k_scheduler.k_max > self.num_classes:
+                raise ValueError(
+                    f"LabelMix K scheduler requires k_max <= num_classes "
+                    f"(got {self.k_scheduler.k_max} > {self.num_classes})"
+                )
+            self._set_mix_k(self.k_scheduler.get_k(0))
+
             if self.sampling_enabled:
                 bins = max(1, self.sampling_bins)
                 self._sampling_pools = [deque() for _ in range(bins)]
@@ -457,6 +536,20 @@ class BalancedBucketDataset(IterableDataset):
         self.local_byte_cache: Dict[int, Tuple[Any, int]] = {}
         self.dist_rank_override = dist_rank_override
         self.dist_world_size_override = dist_world_size_override
+
+    def _set_mix_k(self, mix_k: int) -> None:
+        mix_k = int(mix_k)
+        if mix_k < 1:
+            raise ValueError("mix_k must be >= 1")
+        self.mix_k = mix_k
+        self._shift_idx = torch.arange(mix_k, dtype=torch.int64)
+        self._circulant_idx = (self._shift_idx[:, None] + self._shift_idx[None, :]) % mix_k
+
+        # Sampling pools store K-sized weight tensors; clear when K changes.
+        if self._sampling_pools is not None:
+            for pool in self._sampling_pools:
+                pool.clear()
+            self._sampling_hw = None
 
     def _sampling_bin_idx(self, alpha: float) -> int:
         bins = max(1, self.sampling_bins)
@@ -523,6 +616,8 @@ class BalancedBucketDataset(IterableDataset):
 
     def set_epoch(self, epoch: int) -> None:
         self._epoch = int(epoch)
+        if self.labelmix and self.k_scheduler is not None:
+            self._set_mix_k(self.k_scheduler.get_k(self._epoch))
 
     def __len__(self) -> int:
         if dist.is_available() and dist.is_initialized():
@@ -758,11 +853,10 @@ class BalancedBucketDataset(IterableDataset):
             if n <= 0:
                 raise ValueError("Empty class bucket encountered.")
 
-            if self.mode == "min":
-                schedule[:, ci] = indices[worker_cycles % n]
-            else:
-                r = torch.randint(n, (num_rows,), generator=rng, dtype=torch.int64)
-                schedule[:, ci] = indices[r]
+            # Use the same randomness policy for all modes: random-with-replacement.
+            # `mode` still controls M (cycles/epoch), while sampling stays stochastic.
+            r = torch.randint(n, (num_rows,), generator=rng, dtype=torch.int64)
+            schedule[:, ci] = indices[r]
 
         noise = torch.rand(schedule.shape, generator=rng)
         order = torch.argsort(noise, dim=1)

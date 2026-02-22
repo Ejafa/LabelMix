@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Base config file")
     parser.add_argument("--nproc", type=int, default=4,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=2,
+    parser.add_argument("--max-parallel", type=int, default=1,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
@@ -33,6 +33,22 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Set soft RLIMIT_NOFILE (0 to skip)")
     parser.add_argument("--labelmix-loss", default="soft_ce", choices=["soft_ce", "pl_loss"],
                         help="LabelMix loss to pass to train.py.")
+    parser.add_argument("--labelmix-mix-k", type=int, default=5,
+                        help="Base LabelMix K.")
+    parser.add_argument("--labelmix-k-min", type=int, default=1,
+                        help="Minimum K for LabelMix K scheduling.")
+    parser.add_argument("--labelmix-k-max", type=int, default=5,
+                        help="Maximum K for LabelMix K scheduling.")
+    parser.add_argument("--labelmix-k-schedule", default="linear", choices=["fixed", "linear", "cosine"],
+                        help="LabelMix K schedule.")
+    parser.add_argument("--labelmix-k-reverse", action="store_true",
+                        help="Reverse LabelMix K schedule (max->min).")
+    parser.add_argument("--labelmix-k-warmup-epochs", type=int, default=0,
+                        help="Warmup epochs for LabelMix K schedule.")
+    parser.add_argument("--labelmix-k-total-epochs", type=int, default=None,
+                        help="Total epochs for LabelMix K schedule.")
+    parser.add_argument("--labelmix-alpha", type=float, default=1.0,
+                        help="Fixed alpha value for LabelMix (used for both alpha min/max).")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
     return parser
 
@@ -135,12 +151,22 @@ def main() -> None:
         "--mixup-mode", "batch",
     ]
 
+    labelmix_mix_k = "5"
+    labelmix_k_min = "1"
+    labelmix_k_max = "5"
+    labelmix_k_schedule = "linear"
+    labelmix_alpha_min = "1.0"
+    labelmix_alpha_max = "1.0"
+
     labelmix_common_args: List[str] = [
         "--labelmix",
-        "--labelmix-mix-k", "5",
-        "--labelmix-alpha-min", "0.1",
-        "--labelmix-alpha-max", "1.0",
-        "--labelmix-schedule", "linear",
+        "--labelmix-mix-k", labelmix_mix_k,
+        "--labelmix-k-min", labelmix_k_min,
+        "--labelmix-k-max", labelmix_k_max,
+        "--labelmix-k-schedule", labelmix_k_schedule,
+        "--labelmix-alpha-min", labelmix_alpha_min,
+        "--labelmix-alpha-max", labelmix_alpha_max,
+        "--labelmix-schedule", "fixed",
         "--labelmix-step-mode", "total",
         "--labelmix-sampling",
         "--labelmix-sampling-min-side-px", "8",
@@ -150,6 +176,12 @@ def main() -> None:
         "--labelmix-sampling-low-watermark", "64",
         "--labelmix-sampling-max-attempts", "200",
     ]
+    if args.labelmix_k_reverse:
+        labelmix_common_args.append("--labelmix-k-reverse")
+    if args.labelmix_k_warmup_epochs > 0:
+        labelmix_common_args.extend(["--labelmix-k-warmup-epochs", str(args.labelmix_k_warmup_epochs)])
+    if args.labelmix_k_total_epochs is not None:
+        labelmix_common_args.extend(["--labelmix-k-total-epochs", str(args.labelmix_k_total_epochs)])
         
 
     models = [
@@ -210,11 +242,23 @@ def main() -> None:
             #     ],
             # },
             {
-                "name": f"labelmix_imagenet1k_{model}_aug_pl_loss",
+                "name": f"labelmix_imagenet1k_{model}_aug_k_sched_soft_ce",
                 "config": args.config,
                 "extra": [
                     "--model", model,
                     "--pin-mem",
+                    *model_kwargs_args,
+                    "--labelmix-loss", "soft_ce",
+                    *labelmix_common_args,
+                ],
+            },
+            {
+                "name": f"labelmix_imagenet1k_{model}_aug_k_sched_pl_loss",
+                "config": args.config,
+                "extra": [
+                    "--model", model,
+                    "--pin-mem",
+                    *model_kwargs_args,
                     "--labelmix-loss", "pl_loss",
                     *labelmix_common_args,
                 ],
