@@ -16,17 +16,19 @@ Hacked together by / Copyright 2020 Ross Wightman (https://github.com/rwightman)
 """
 import argparse
 import copy
+import glob
 import importlib
 import json
 import logging
 import math
 import os
+import re
 import time
 from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
 from functools import partial
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -81,6 +83,12 @@ has_compile = hasattr(torch, 'compile')
 
 
 _logger = logging.getLogger('train')
+
+_WANDB_RUN_PATTERNS: List[re.Pattern[str]] = [
+    re.compile(r"wandb:\s+setting up run\s+([A-Za-z0-9]+)"),
+    re.compile(r"/runs/([A-Za-z0-9]+)\b"),
+    re.compile(r"run-\d{8}_\d{6}-([A-Za-z0-9]+)\b"),
+]
 
 # The first arg parser parses out only the --config argument, this argument is used to
 # load a yaml file containing key-values that override the defaults for the main parser below
@@ -496,6 +504,14 @@ group.add_argument('--wandb-tags', default=[], type=str, nargs='+',
                    help='wandb tags')
 group.add_argument('--wandb-resume-id', default='', type=str, metavar='ID',
                    help='If resuming a run, the id of the run in wandb')
+group.add_argument('--check-resume', action='store_true', default=False,
+                   help='Auto-detect --resume checkpoint and wandb resume id from local metadata.')
+group.add_argument('--check-resume-status-file', default='./experiment_status.yaml', type=str, metavar='PATH',
+                   help='Status YAML used to recover wandb id when --check-resume is enabled.')
+group.add_argument('--check-resume-log-dir', default='./logs', type=str, metavar='DIR',
+                   help='Log root scanned for wandb id fallback when --check-resume is enabled.')
+group.add_argument('--check-resume-search-limit', default=30, type=int, metavar='N',
+                   help='Max number of recent log files to inspect for wandb id during --check-resume.')
 
 # NaFlex scheduled loader arguments
 group.add_argument('--naflex-loader', action='store_true', default=False,
@@ -534,6 +550,248 @@ parser.add_argument('--kd-teacher-feature-dim', default=None, type=int,
                     help='Teacher model feature dimension (auto-detected from model.head_hidden_size or model.num_features if not specified)')
 parser.add_argument('--kd-token-distill-type', default='soft', type=str, choices=['soft', 'hard'],
                     help='Token distillation type: "soft" for KL-div with temperature, "hard" for CE with teacher argmax (default: soft)')
+
+
+def _extract_wandb_id_from_text(text: str) -> Optional[str]:
+    for pattern in _WANDB_RUN_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extract_wandb_id_from_file(path: str, max_bytes: int = 1_048_576) -> Optional[str]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read(max_bytes)
+    except Exception:
+        return None
+    return _extract_wandb_id_from_text(content)
+
+
+def _normalized_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+
+
+def _find_wandb_id_in_status_file(
+    status_file: str,
+    output_dir: Optional[str],
+    experiment: Optional[str],
+) -> Optional[str]:
+    if not status_file or not os.path.exists(status_file):
+        return None
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    output_norm = _normalized_path(output_dir) if output_dir else None
+
+    def _entry_wandb_id(entry: Dict[str, Any]) -> Optional[str]:
+        value = str(entry.get("wandb_id") or "").strip()
+        if value:
+            return value
+        log_path = str(entry.get("log") or "").strip()
+        return _extract_wandb_id_from_file(log_path)
+
+    if output_norm:
+        for entry in data.values():
+            if not isinstance(entry, dict):
+                continue
+            entry_output = str(entry.get("output") or "").strip()
+            if not entry_output:
+                continue
+            try:
+                same_output = _normalized_path(entry_output) == output_norm
+            except Exception:
+                same_output = False
+            if not same_output:
+                continue
+            found = _entry_wandb_id(entry)
+            if found:
+                return found
+
+    exp_name = str(experiment or "").strip()
+    if not exp_name:
+        return None
+
+    best_id = None
+    best_stamp = ""
+    for entry in data.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("name") or "").strip() != exp_name:
+            continue
+        found = _entry_wandb_id(entry)
+        if not found:
+            continue
+        stamp = str(entry.get("updated_at") or entry.get("created_at") or "")
+        if best_id is None or stamp >= best_stamp:
+            best_id = found
+            best_stamp = stamp
+    return best_id
+
+
+def _find_wandb_id_in_logs(log_root: str, experiment: Optional[str], search_limit: int) -> Optional[str]:
+    if not log_root or search_limit < 1:
+        return None
+    exp_name = str(experiment or "").strip()
+    if not exp_name:
+        return None
+
+    pattern = os.path.join(log_root, "**", f"{exp_name}*.txt")
+    try:
+        files = [p for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)]
+    except Exception:
+        return None
+    if not files:
+        return None
+
+    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for path in files[:search_limit]:
+        found = _extract_wandb_id_from_file(path)
+        if found:
+            return found
+    return None
+
+
+def _auto_configure_resume(args) -> bool:
+    if not args.check_resume:
+        return False
+
+    changed = False
+    if not args.resume:
+        resume_candidates = []
+        if args.experiment:
+            out_root = args.output if args.output else "./output/train"
+            resume_candidates.append(os.path.join(out_root, args.experiment, "last.pth.tar"))
+        elif args.output:
+            resume_candidates.append(os.path.join(args.output, "last.pth.tar"))
+
+        for candidate in resume_candidates:
+            if os.path.isfile(candidate):
+                args.resume = candidate
+                changed = True
+                _logger.info("Auto-resume: using checkpoint %s", candidate)
+                break
+
+    if args.log_wandb and args.resume and not args.wandb_resume_id:
+        resume_output_dir = os.path.dirname(args.resume)
+        wandb_id = _find_wandb_id_in_status_file(
+            args.check_resume_status_file,
+            resume_output_dir,
+            args.experiment,
+        )
+        if not wandb_id:
+            wandb_id = _find_wandb_id_in_logs(
+                args.check_resume_log_dir,
+                args.experiment,
+                int(args.check_resume_search_limit),
+            )
+        if wandb_id:
+            args.wandb_resume_id = wandb_id
+            changed = True
+            _logger.info("Auto-resume: using wandb run id %s", wandb_id)
+        else:
+            _logger.warning(
+                "Auto-resume: checkpoint found but wandb run id not found. "
+                "Training resume will continue without wandb run resume."
+            )
+
+    return changed
+
+
+def _status_key_for_experiment(exp_name: str) -> str:
+    safe = "".join(ch if ch.isalnum() else "_" for ch in str(exp_name)).strip("_")
+    return f"experiment_{safe or 'default'}"
+
+
+def _load_status_yaml(path: str) -> Dict[str, Dict[str, Any]]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = yaml.safe_load(f)
+    except Exception:
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, value in obj.items():
+        if isinstance(key, str) and isinstance(value, dict):
+            out[key] = value
+    return out
+
+
+def _save_status_yaml(path: str, status_data: Dict[str, Dict[str, Any]]) -> None:
+    if not path:
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(status_data, f, sort_keys=True, default_flow_style=False)
+    os.replace(tmp_path, path)
+
+
+def _update_training_status(
+    args,
+    *,
+    exp_name: str,
+    output_dir: str,
+    state: str,
+    wandb_id: Optional[str] = None,
+    start_step: Optional[int] = None,
+    last_step: Optional[int] = None,
+    launch_increment: bool = False,
+    last_exit_code: Optional[int] = None,
+) -> None:
+    if not getattr(args, "check_resume", False):
+        return
+
+    now = datetime.now().strftime("%Y%m%d-%H%M%S")
+    status_file = str(getattr(args, "check_resume_status_file", "") or "")
+    data = _load_status_yaml(status_file)
+    key = _status_key_for_experiment(exp_name)
+
+    entry: Dict[str, Any] = data.get(key, {}) if isinstance(data.get(key), dict) else {}
+    if not entry.get("created_at"):
+        entry["created_at"] = now
+
+    entry["name"] = exp_name
+    entry["output"] = output_dir
+    entry["config"] = str(getattr(args, "config", "") or "")
+    entry["status"] = state
+    entry["updated_at"] = now
+    entry["resume_checkpoint"] = args.resume if args.resume else None
+    entry["resume_used"] = bool(args.resume)
+    entry["finished"] = bool(state == "finished")
+
+    if start_step is not None:
+        entry["start_step"] = int(start_step)
+    if last_step is not None:
+        entry["last_step"] = int(last_step)
+    if last_exit_code is not None:
+        entry["last_exit_code"] = int(last_exit_code)
+    if launch_increment:
+        entry["launch_count"] = int(entry.get("launch_count", 0)) + 1
+        entry["last_started_at"] = now
+    if state in ("finished", "failed", "interrupted"):
+        entry["last_finished_at"] = now
+
+    if wandb_id:
+        entry["wandb_id"] = str(wandb_id)
+    elif args.wandb_resume_id and not entry.get("wandb_id"):
+        entry["wandb_id"] = str(args.wandb_resume_id)
+
+    data[key] = entry
+    _save_status_yaml(status_file, data)
 
 
 def _parse_args():
@@ -773,6 +1031,13 @@ def main():
             return int(raw), False
         parser.error(f'{name} must be a non-negative int or "auto"')
         return 0, False
+
+    if args.check_resume_search_limit < 1:
+        parser.error('--check-resume-search-limit must be >= 1')
+
+    if _auto_configure_resume(args):
+        # Keep saved args.yaml aligned with any auto-resume updates.
+        args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
 
     if args.device_modules:
         for module in args.device_modules:
@@ -1600,6 +1865,7 @@ def main():
     best_step = None
     saver = None
     output_dir = None
+    exp_name = None
     summary_path = None
     summary_header_written = False
     if utils.is_primary(args):
@@ -1628,6 +1894,13 @@ def main():
         with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
             f.write(args_text)
 
+        _update_training_status(
+            args,
+            exp_name=exp_name,
+            output_dir=output_dir,
+            state='setup',
+        )
+
         if args.log_wandb:
             if has_wandb:
                 assert not args.wandb_resume_id or args.resume
@@ -1639,6 +1912,16 @@ def main():
                     resume="must" if args.wandb_resume_id else None,
                     id=args.wandb_resume_id if args.wandb_resume_id else None,
                 )
+                run = getattr(wandb, "run", None)
+                run_id = getattr(run, "id", None) if run is not None else None
+                if run_id:
+                    _update_training_status(
+                        args,
+                        exp_name=exp_name,
+                        output_dir=output_dir,
+                        state='setup',
+                        wandb_id=str(run_id),
+                    )
             else:
                 _logger.warning(
                     "You've requested to log metrics to wandb but package not found. "
@@ -1729,6 +2012,16 @@ def main():
                     steps_per_epoch,
                 )
 
+    if utils.is_primary(args) and output_dir is not None and exp_name is not None:
+        _update_training_status(
+            args,
+            exp_name=exp_name,
+            output_dir=output_dir,
+            state='running',
+            start_step=start_step,
+            launch_increment=True,
+        )
+
     if utils.is_primary(args):
         if args.warmup_prefix:
             sched_explain = '(warmup_steps + num_steps + cooldown_steps). Warmup added to total when warmup_prefix=True'
@@ -1743,6 +2036,9 @@ def main():
     optimizer.zero_grad()
     global_step = start_step
     latest_metric = None
+    interrupted = False
+    run_error: Optional[Exception] = None
+    run_error_tb = None
     try:
         while global_step < num_steps:
             step = global_step + 1
@@ -1876,10 +2172,50 @@ def main():
             results.append(latest_results)
 
     except KeyboardInterrupt:
-        pass
+        interrupted = True
+    except Exception as exc:
+        run_error = exc
+        run_error_tb = exc.__traceback__
+
+    if utils.is_primary(args) and output_dir is not None and exp_name is not None:
+        run = getattr(wandb, "run", None) if (args.log_wandb and has_wandb) else None
+        run_id = getattr(run, "id", None) if run is not None else None
+        if run_error is not None:
+            _update_training_status(
+                args,
+                exp_name=exp_name,
+                output_dir=output_dir,
+                state='failed',
+                wandb_id=str(run_id) if run_id else None,
+                last_step=global_step,
+                last_exit_code=1,
+            )
+        elif interrupted:
+            _update_training_status(
+                args,
+                exp_name=exp_name,
+                output_dir=output_dir,
+                state='interrupted',
+                wandb_id=str(run_id) if run_id else None,
+                last_step=global_step,
+                last_exit_code=130,
+            )
+        else:
+            _update_training_status(
+                args,
+                exp_name=exp_name,
+                output_dir=output_dir,
+                state='finished',
+                wandb_id=str(run_id) if run_id else None,
+                last_step=global_step,
+                last_exit_code=0,
+            )
 
     if args.distributed:
         torch.distributed.destroy_process_group()
+
+    if run_error is not None:
+        raise run_error.with_traceback(run_error_tb)
 
     if best_metric is not None:
         # log best metric as tracked by checkpoint saver
