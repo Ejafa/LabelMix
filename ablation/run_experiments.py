@@ -14,17 +14,15 @@ import yaml
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
-    parser.add_argument("--config", default="./config/imagenet1k/mnv4_small.yaml",
-                        help="Base config file")
     parser.add_argument("--nproc", type=int, default=4,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=1,
+    parser.add_argument("--max-parallel", type=int, default=3,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
-    parser.add_argument("--output-root", default="./output_runs/imagenet1k",
+    parser.add_argument("--output-root", default="./output_runs/imagenet1k-64",
                         help="Base output directory passed to train.py --output")
-    parser.add_argument("--log-dir", default="./logs/imagenet1k",
+    parser.add_argument("--log-dir", default="./logs/imagenet1k-64",
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
@@ -40,8 +38,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Total epochs for LabelMix K schedule.")
     parser.add_argument("--status-file", default="./experiment_status.yaml",
                         help="Status YAML used to skip finished experiments.")
-    parser.add_argument("--disable-status-checkup", action="store_true",
-                        help="Deprecated (ignored).")
     parser.add_argument("--disable-train-check-resume", action="store_true",
                         help="Do not pass --check-resume to train.py.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
@@ -130,16 +126,16 @@ def main() -> None:
 
     base_train_common: List[str] = [
         "--amp-dtype", "bfloat16",
-        "--batch-size", "256",
-        "--num-steps", "200000",
-        "--warmup-steps", "10000",
-        "--patience-steps", "10000",
+        "--batch-size", "256", # global bach size 1024
+        "--num-steps", "125000", # 100 epochs
+        "--warmup-steps", "12500", # 10 warmup epochs
+        "--patience-steps", "12500", # 10 epochs
         "--warmup-prefix",
         "--sched-on-updates",
         "--num-logs", "1000",
         "--num-evals", "100",
         "--num-saves", "10",
-        "--wandb-project", "labelmix",
+        "--wandb-project", "labelmix-ablation",
         "--log-wandb",
         "--workers", "4",
         "--loader-prefetch-factor", "4",
@@ -148,23 +144,16 @@ def main() -> None:
         "--balanced-cache-threshold-steps", str(balanced_cache_threshold_steps),
     ]
 
-    augmentation_args: List[str] = [
-        "--img-size", "256",
-        "--aa", "rand-m8-inc1-mstd1.0",
-        "--aug-repeats", "0",
-        "--aug-splits", "0",
-        "--train-interpolation", "random",
-        "--scale", "0.08", "1.0",
-        "--ratio", "0.75", "1.3333333333333333",
-        "--hflip", "0.5",
-        "--vflip", "0.0",
-        "--color-jitter", "0.4",
-        "--grayscale-prob", "0.1",
-        "--gaussian-blur-prob", "0.05",
-        "--reprob", "0.25",
-        "--remode", "pixel",
-        "--recount", "1",
-        "--smoothing", "0.1",
+    imagenet_64_args: List[str] = [
+        "--dataset", "hfds/ChocolateDave/imagenet-64",
+        "--data-dir", "./data/imagenet-64",
+        "--train-split", "train",
+        "--val-split", "val",
+        "--input-key", "image",
+        "--target-key", "label",
+        "--balanced-mode", "1280",
+        "--mean", "0", "0", "0",
+        "--std", "1", "1", "1",
     ]
 
     labelmix_common_args: List[str] = [
@@ -192,41 +181,30 @@ def main() -> None:
     if args.labelmix_k_total_epochs is not None:
         labelmix_common_args.extend(["--labelmix-k-total-epochs", str(args.labelmix_k_total_epochs)])
 
-    models = [
-        "vit_wee_patch16_reg1_gap_256",
-    ]
+    model_to_config: Dict[str, str] = {
+        "vit_wee": "ablation/configs/vit_wee.yaml",
+        "mnv4_conv_medium": "ablation/configs/mnv4_conv_medium.yaml",
+    }
 
     experiments: List[Dict[str, Any]] = []
-    for model in models:
+    lr = [0.1, 0.01, 0.001, 0.0001]
+    for model, model_config in model_to_config.items():
         model_kwargs_args: List[str] = []
         if model.startswith("vit_"):
             model_kwargs_args = ["--model-kwargs", "fix_init=True"]
 
-        experiments.extend([
-            
-            {
-                "name": f"labelmix_imagenet1k_{model}_aug_k_sched_pl_loss",
-                "config": args.config,
+        for lr_value in lr:
+            lr_tag = str(lr_value).replace(".", "p")
+            experiments.append({
+                "name": f"baseline_imagenet1k-64_{model}_lr{lr_tag}",
+                "config": model_config,
                 "extra": [
-                    "--model", model,
                     "--pin-mem",
                     *model_kwargs_args,
-                    "--labelmix-loss", "pl_loss",
-                    *labelmix_common_args,
+                    "--lr", str(lr_value),
+                    *imagenet_64_args,
                 ],
-            },
-            {
-                "name": f"labelmix_imagenet1k_{model}_aug_k_sched_soft_ce",
-                "config": args.config,
-                "extra": [
-                    "--model", model,
-                    "--pin-mem",
-                    *model_kwargs_args,
-                    "--labelmix-loss", "soft_ce",
-                    *labelmix_common_args,
-                ],
-            },
-        ])
+            })
 
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
     if args.nproc <= 0:
@@ -254,7 +232,7 @@ def main() -> None:
             continue
         jobs.append({
             "name": exp_name,
-            "config": str(exp.get("config", args.config)),
+            "config": str(exp["config"]),
             "extra": list(exp.get("extra", [])),
             "runner_extra": list(extra),
             "log_path": os.path.join(args.log_dir, f"{exp_name}_{ts}.txt"),
@@ -307,7 +285,6 @@ def main() -> None:
         cmd.append("train.py")
         cmd.extend(["-c", exp_config])
         cmd.extend(base_train_common)
-        cmd.extend(augmentation_args)
         cmd.extend(["--experiment", exp_name])
         cmd.extend(["--output", args.output_root])
         cmd.extend(exp_extra)
