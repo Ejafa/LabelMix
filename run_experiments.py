@@ -244,7 +244,8 @@ def main() -> None:
     print(f"Formed GPU Groups: {groups}")
     print(f"Max Parallel Jobs: {max_parallel}")
 
-    finished_names = _load_finished_names(str(args.status_file))
+    status_file_path = str(args.status_file)
+    finished_names = _load_finished_names(status_file_path)
     jobs: List[Dict[str, Any]] = []
     for exp in experiments:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -295,7 +296,7 @@ def main() -> None:
         runner_extra = list(job.get("runner_extra", []))
         expected_output_dir = os.path.join(args.output_root, exp_name)
 
-        if not args.disable_train_check_resume:
+        if not args.disable_train_check_resume and os.path.exists(status_file_path):
             _upsert_flag(exp_extra, "--check-resume")
             _upsert_flag(exp_extra, "--check-resume-log-dir", args.log_dir)
 
@@ -382,10 +383,8 @@ def main() -> None:
             for info in finished:
                 running.remove(info)
 
-            while len(running) < max_parallel:
+            if len(running) < max_parallel:
                 info = _start_next()
-                if info is None:
-                    break
                 if info:
                     running.append(info)
 

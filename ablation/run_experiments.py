@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
     parser.add_argument("--nproc", type=int, default=4,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=3,
+    parser.add_argument("--max-parallel", type=int, default=8,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
-    parser.add_argument("--cuda-visible-devices", default="0,1,2,3,0,1,2,3",
+    parser.add_argument("--cuda-visible-devices", default="0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3",
                         help="Comma-separated GPU ids")
     parser.add_argument("--ulimit-nofile", type=int, default=8192,
                         help="Set soft RLIMIT_NOFILE (0 to skip)")
@@ -142,6 +142,7 @@ def main() -> None:
         "--balanced-mode", "1280",
         "--balanced-buffer-steps", str(balanced_buffer_steps),
         "--balanced-cache-threshold-steps", str(balanced_cache_threshold_steps),
+        "--img-size", "64"
     ]
 
     imagenet_64_args: List[str] = [
@@ -152,8 +153,8 @@ def main() -> None:
         "--input-key", "image",
         "--target-key", "label",
         "--balanced-mode", "1280",
-        "--mean", "0", "0", "0",
-        "--std", "1", "1", "1",
+#        "--mean", "0", "0", "0",
+#        "--std", "1", "1", "1",
     ]
 
     labelmix_common_args: List[str] = [
@@ -187,11 +188,11 @@ def main() -> None:
     }
 
     experiments: List[Dict[str, Any]] = []
-    lr = [0.1, 0.01, 0.001, 0.0001]
+    lr = [1e-1, 5e-2, 1e-2, 5e-3, 1e-3, 5e-4, 1e-4]
     for model, model_config in model_to_config.items():
         model_kwargs_args: List[str] = []
         if model.startswith("vit_"):
-            model_kwargs_args = ["--model-kwargs", "fix_init=True"]
+            model_kwargs_args = ["--model-kwargs", "fix_init=True", "img_size=64"]
 
         for lr_value in lr:
             lr_tag = str(lr_value).replace(".", "p")
@@ -222,7 +223,8 @@ def main() -> None:
     print(f"Formed GPU Groups: {groups}")
     print(f"Max Parallel Jobs: {max_parallel}")
 
-    finished_names = _load_finished_names(str(args.status_file))
+    status_file_path = str(args.status_file)
+    finished_names = _load_finished_names(status_file_path)
     jobs: List[Dict[str, Any]] = []
     for exp in experiments:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -273,7 +275,7 @@ def main() -> None:
         runner_extra = list(job.get("runner_extra", []))
         expected_output_dir = os.path.join(args.output_root, exp_name)
 
-        if not args.disable_train_check_resume:
+        if not args.disable_train_check_resume and os.path.exists(status_file_path):
             _upsert_flag(exp_extra, "--check-resume")
             _upsert_flag(exp_extra, "--check-resume-log-dir", args.log_dir)
 
