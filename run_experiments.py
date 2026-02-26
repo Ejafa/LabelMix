@@ -296,7 +296,7 @@ def main() -> None:
         runner_extra = list(job.get("runner_extra", []))
         expected_output_dir = os.path.join(args.output_root, exp_name)
 
-        if not args.disable_train_check_resume and os.path.exists(status_file_path):
+        if not args.disable_train_check_resume and not os.path.exists(status_file_path):
             _upsert_flag(exp_extra, "--check-resume")
             _upsert_flag(exp_extra, "--check-resume-log-dir", args.log_dir)
 
