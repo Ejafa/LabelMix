@@ -13,6 +13,8 @@ from typing import Iterable
 
 import yaml
 
+DEFAULT_DATASET = "hfds/ilsvrc/imagenet-1k"
+
 
 def _load_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -103,7 +105,11 @@ def main() -> int:
         default="config/imagenet1k/mnv4_small.yaml",
         help="Path to config file with dataset and data_dir entries.",
     )
-    parser.add_argument("--dataset", default=None, help="Override dataset name (hfds/...).")
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help=f"Override dataset name (hfds/...). Default: {DEFAULT_DATASET}",
+    )
     parser.add_argument("--data-dir", default=None, help="Override data_dir from config.")
     parser.add_argument(
         "--split",
@@ -124,11 +130,9 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
-    dataset = args.dataset or cfg.get("dataset")
+    dataset = args.dataset or cfg.get("dataset") or DEFAULT_DATASET
     data_dir = args.data_dir or cfg.get("data_dir")
 
-    if not dataset:
-        raise SystemExit("Config missing `dataset` and no --dataset override provided.")
     if not data_dir:
         raise SystemExit("Config missing `data_dir` and no --data-dir override provided.")
 
