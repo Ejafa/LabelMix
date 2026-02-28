@@ -4,3 +4,5 @@ pyyaml
 huggingface_hub>=0.17.0
 safetensors>=0.2
 numpy
+datasets
+wandb
