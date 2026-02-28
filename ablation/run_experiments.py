@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
     parser.add_argument("--nproc", type=int, default=4,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=8,
+    parser.add_argument("--max-parallel", type=int, default=4,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
@@ -142,14 +142,14 @@ def main() -> None:
         "--balanced-mode", "1280",
         "--balanced-buffer-steps", str(balanced_buffer_steps),
         "--balanced-cache-threshold-steps", str(balanced_cache_threshold_steps),
-        "--img-size", "64"
+        "--img-size", "64",
     ]
 
     imagenet_64_args: List[str] = [
-        "--dataset", "hfds/ChocolateDave/imagenet-64",
+        "--dataset", "hfds/benjamin-paine/imagenet-1k-64x64",
         "--data-dir", "./data/imagenet-64",
         "--train-split", "train",
-        "--val-split", "val",
+        "--val-split", "validation",
         "--input-key", "image",
         "--target-key", "label",
         "--balanced-mode", "1280",
@@ -159,22 +159,27 @@ def main() -> None:
 
     labelmix_common_args: List[str] = [
         "--labelmix",
-        "--labelmix-mix-k", "5",
+        # "--labelmix-mix-k", "4",
         "--labelmix-k-min", "1",
-        "--labelmix-k-max", "5",
+        "--labelmix-k-max", "4",
         "--labelmix-k-schedule", "linear",
         "--labelmix-alpha-min", "1.0",
         "--labelmix-alpha-max", "1.0",
         "--labelmix-schedule", "fixed",
         "--labelmix-step-mode", "total",
-        "--labelmix-sampling",
-        "--labelmix-sampling-min-side-px", "8",
-        "--labelmix-sampling-max-aspect", "10.0",
-        "--labelmix-sampling-bins", "16",
-        "--labelmix-sampling-pool-size", "256",
-        "--labelmix-sampling-low-watermark", "64",
-        "--labelmix-sampling-max-attempts", "200",
+        # "--labelmix-sampling",
+        # "--labelmix-sampling-min-side-px", "8",
+        # "--labelmix-sampling-max-aspect", "10.0",
+        # "--labelmix-sampling-bins", "16",
+        # "--labelmix-sampling-pool-size", "256",
+        # "--labelmix-sampling-low-watermark", "64",
+        # "--labelmix-sampling-max-attempts", "200",
+
+        "--mixup", "0",
+        "--cutmix", "0",
+        "--mixup-prob", "0.0",
     ]
+
     if args.labelmix_k_reverse:
         labelmix_common_args.append("--labelmix-k-reverse")
     if args.labelmix_k_warmup_epochs > 0:
@@ -183,27 +188,47 @@ def main() -> None:
         labelmix_common_args.extend(["--labelmix-k-total-epochs", str(args.labelmix_k_total_epochs)])
 
     model_to_config: Dict[str, str] = {
-        "vit_wee": "ablation/configs/vit_wee.yaml",
-        "mnv4_conv_medium": "ablation/configs/mnv4_conv_medium.yaml",
+        "mobilenetv4_hybrid_medium": "ablation/configs/mnv4_conv_medium.yaml",
+        "mobilenetv4_conv_large": "ablation/configs/mnv4_conv_medium.yaml",
+        "resnetv2_50": "ablation/configs/mnv4_conv_medium.yaml",
+        "mobilenetv4_hybrid_large": "ablation/configs/mnv4_conv_medium.yaml",
+        "resnetv2_152": "ablation/configs/mnv4_conv_medium.yaml",
     }
 
+    labelmix_alpha = [0.3, 1.0, 3.0]
+    labelmix_loss = ["soft_ce", "pl_loss"]
     experiments: List[Dict[str, Any]] = []
-    lr = [1e-1, 5e-2, 1e-2, 5e-3, 1e-3, 5e-4, 1e-4]
     for model, model_config in model_to_config.items():
         model_kwargs_args: List[str] = []
         if model.startswith("vit_"):
             model_kwargs_args = ["--model-kwargs", "fix_init=True", "img_size=64"]
-
-        for lr_value in lr:
-            lr_tag = str(lr_value).replace(".", "p")
-            experiments.append({
-                "name": f"baseline_imagenet1k-64_{model}_lr{lr_tag}",
+        
+        exp_name = f"baseline_imagenet1k-64_{model}"
+        experiments.append({
+            "name": exp_name,
+            "config": model_config,
+            "extra": [
+                "--pin-mem",
+                *model_kwargs_args,
+                *imagenet_64_args,
+                "--model", model,
+            ],
+        })
+        for alpha in labelmix_alpha:
+            for loss in labelmix_loss:
+                exp_name = f"labelmix_alpha{alpha}_loss_{loss}_imagenet1k-64_{model}"
+                experiments.append({
+                "name": exp_name,
                 "config": model_config,
                 "extra": [
                     "--pin-mem",
                     *model_kwargs_args,
-                    "--lr", str(lr_value),
                     *imagenet_64_args,
+                    *labelmix_common_args,
+                    "--labelmix-alpha-min", str(alpha),
+                    "--labelmix-alpha-max", str(alpha),
+                    "--labelmix-loss", loss,
+                    "--model", model,
                 ],
             })
 
@@ -275,7 +300,7 @@ def main() -> None:
         runner_extra = list(job.get("runner_extra", []))
         expected_output_dir = os.path.join(args.output_root, exp_name)
 
-        if not args.disable_train_check_resume and os.path.exists(status_file_path):
+        if not args.disable_train_check_resume and not os.path.exists(status_file_path):
             _upsert_flag(exp_extra, "--check-resume")
             _upsert_flag(exp_extra, "--check-resume-log-dir", args.log_dir)
 

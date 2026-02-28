@@ -40,6 +40,25 @@ def _resolve_data_dir(data_dir: str, cwd: str) -> str:
     return os.path.abspath(os.path.join(cwd, data_dir))
 
 
+def _configure_hf_cache(cache_root: str) -> dict[str, str]:
+    cache_root = os.path.abspath(cache_root)
+    hub_cache = os.path.join(cache_root, "hf_hub")
+    datasets_cache = os.path.join(cache_root, "hf_datasets")
+    xet_cache = os.path.join(cache_root, "hf_xet")
+    for path in (hub_cache, datasets_cache, xet_cache):
+        os.makedirs(path, exist_ok=True)
+    os.environ["HF_HOME"] = cache_root
+    os.environ["HF_DATASETS_CACHE"] = datasets_cache
+    os.environ["HUGGINGFACE_HUB_CACHE"] = hub_cache
+    os.environ["HF_HUB_CACHE"] = hub_cache
+    os.environ["HF_XET_CACHE"] = xet_cache
+    return {
+        "HF_HOME": cache_root,
+        "HF_DATASETS_CACHE": datasets_cache,
+        "HUGGINGFACE_HUB_CACHE": hub_cache,
+        "HF_XET_CACHE": xet_cache,
+    }
+
 def _resolve_token(token_arg: str | None) -> str | None:
     if token_arg:
         return token_arg
@@ -139,12 +158,16 @@ def main() -> int:
     dataset_name = _normalize_dataset(dataset)
     resolved_data_dir = _resolve_data_dir(data_dir, os.getcwd())
     os.makedirs(resolved_data_dir, exist_ok=True)
+    cache_env = _configure_hf_cache(resolved_data_dir)
 
     token = _resolve_token(args.token)
     splits = _iter_splits(args.split or [])
 
     print(f"Dataset: {dataset_name}")
-    print(f"Cache dir: {resolved_data_dir}")
+    print(f"Cache root: {resolved_data_dir}")
+    print(f"HF_DATASETS_CACHE: {cache_env['HF_DATASETS_CACHE']}")
+    print(f"HF_HUB_CACHE: {cache_env['HUGGINGFACE_HUB_CACHE']}")
+    print(f"HF_XET_CACHE: {cache_env['HF_XET_CACHE']}")
     print(f"Splits: {', '.join(splits)}")
 
     for split in splits:
