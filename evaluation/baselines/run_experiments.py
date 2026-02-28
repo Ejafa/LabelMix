@@ -14,12 +14,14 @@ import yaml
 
 STORAGE_ROOT = "/apdcephfs/ethangys_test_qy4/konstantin-garbers"
 IMAGENET1K_DATA_DIR = os.path.join(STORAGE_ROOT, "data", "imagenet-1k")
+GPU_COUNT = 32
+DEFAULT_CUDA_VISIBLE_DEVICES = ", ".join(str(i) for i in range(GPU_COUNT))
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
     parser.add_argument("--nproc", type=int, default=1,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=8,
+    parser.add_argument("--max-parallel", type=int, default=GPU_COUNT,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
@@ -29,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
-    parser.add_argument("--cuda-visible-devices", default="0, 1, 2, 3, 4, 5, 6, 7, 8, 9",
+    parser.add_argument("--cuda-visible-devices", default=DEFAULT_CUDA_VISIBLE_DEVICES,
                         help="Comma-separated GPU ids")
     parser.add_argument("--ulimit-nofile", type=int, default=8192,
                         help="Set soft RLIMIT_NOFILE (0 to skip)")
@@ -175,7 +177,6 @@ def main() -> None:
         "--num-classes", "1000",
         "--num-steps", "362500", # 290 epochs. 1280000/1024 = 1250 steps/epoch
         "--warmup-steps", "12500", # 10 epochs
-        "--device", "cpu"
     ]
 
 #    places365_args: List [str] = [
@@ -218,21 +219,24 @@ def main() -> None:
     model_configs = _load_model_configs(args.model_configs_path)
 
     experiments: List[Dict[str, Any]] = []
+    seeds = [42, 43, 44]
     for model_config in model_configs:
-        model = os.path.splitext(os.path.basename(model_config))[0]
-        model_kwargs_args: List[str] = []
-        if model.startswith("vit_"):
-            model_kwargs_args = ["--model-kwargs", "fix_init=True", "img_size=256"]
-        exp_name = f"baseline_imagenet1k_{model}"
-        experiments.append({
-            "name": exp_name,
-            "config": model_config,
-            "extra": [
-                "--pin-mem",
-                *model_kwargs_args,
-                *imagenet_args,
-            ],
-        })
+        for seed in seeds:
+            model = os.path.splitext(os.path.basename(model_config))[0]
+            model_kwargs_args: List[str] = []
+            if model.startswith("vit_"):
+                model_kwargs_args = ["--model-kwargs", "fix_init=True", "img_size=256"]
+            exp_name = f"baseline_imagenet1k_{model}_seed{seed}"
+            experiments.append({
+                "name": exp_name,
+                "config": model_config,
+                "extra": [
+                    "--pin-mem",
+                    *model_kwargs_args,
+                    *imagenet_args,
+                    "--seed", str(seed),
+                ],
+            })
 
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
     if args.nproc <= 0:
