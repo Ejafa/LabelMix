@@ -12,6 +12,9 @@ from typing import Any, Deque, Dict, List, Optional, Set
 
 import yaml
 
+STORAGE_ROOT = "/apdcephfs/ethangys_test_qy4/konstantin-garbers"
+IMAGENET1K_DATA_DIR = os.path.join(STORAGE_ROOT, "data", "imagenet-1k")
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
     parser.add_argument("--nproc", type=int, default=1,
@@ -20,9 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
-    parser.add_argument("--output-root", default="./output_runs/imagenet1k",
+    parser.add_argument("--output-root", default=os.path.join(STORAGE_ROOT, "output_runs", "imagenet1k"),
                         help="Base output directory passed to train.py --output")
-    parser.add_argument("--log-dir", default="./logs/imagenet1k",
+    parser.add_argument("--log-dir", default=os.path.join(STORAGE_ROOT, "logs", "imagenet1k"),
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
@@ -38,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Total epochs for LabelMix K schedule.")
     parser.add_argument("--model-configs-path", default="evaluation/baselines/configs",
                         help="YAML config file or directory of YAML configs to run.")
-    parser.add_argument("--status-file", default="./experiment_status.yaml",
+    parser.add_argument("--status-file", default=os.path.join(STORAGE_ROOT, "experiment_status.yaml"),
                         help="Status YAML used to skip finished experiments.")
     parser.add_argument("--disable-train-check-resume", action="store_true",
                         help="Do not pass --check-resume to train.py.")
@@ -163,7 +166,7 @@ def main() -> None:
 
     imagenet_args: List[str] = [
         "--dataset", "hfds/ILSVRC/imagenet-1k",
-        "--data-dir", "./data/imagenet-1k",
+        "--data-dir", IMAGENET1K_DATA_DIR,
         "--train-split", "train",
         "--val-split", "validation",
         "--input-key", "image",
@@ -172,6 +175,7 @@ def main() -> None:
         "--num-classes", "1000",
         "--num-steps", "362500", # 290 epochs. 1280000/1024 = 1250 steps/epoch
         "--warmup-steps", "12500", # 10 epochs
+        "--device", "cpu"
     ]
 
 #    places365_args: List [str] = [
