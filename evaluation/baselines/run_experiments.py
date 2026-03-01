@@ -14,14 +14,13 @@ import yaml
 
 STORAGE_ROOT = "/apdcephfs/ethangys_test_qy4/konstantin-garbers"
 IMAGENET1K_DATA_DIR = os.path.join(STORAGE_ROOT, "data", "imagenet-1k")
-GPU_COUNT = 32
-DEFAULT_CUDA_VISIBLE_DEVICES = ", ".join(str(i) for i in range(GPU_COUNT))
+DEFAULT_GPU_PER_CLUSTER = 8
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
     parser.add_argument("--nproc", type=int, default=1,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=GPU_COUNT,
+    parser.add_argument("--max-parallel", type=int, default=2,
                         help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
@@ -31,8 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
-    parser.add_argument("--cuda-visible-devices", default=DEFAULT_CUDA_VISIBLE_DEVICES,
+    parser.add_argument("--cuda-visible-devices", default="",
                         help="Comma-separated GPU ids")
+    parser.add_argument("--gpu-per-cluster", type=int, default=DEFAULT_GPU_PER_CLUSTER,
+                        help="Number of GPUs per cluster/node (used to build default CUDA_VISIBLE_DEVICES).")
+    parser.add_argument("--gpu-clusters", type=int, default=1,
+                        help="Total number of GPU clusters/nodes used to shard experiments.")
+    parser.add_argument("--node-index", type=int, default=0,
+                        help="Index of this node in [0, gpu_clusters-1].")
     parser.add_argument("--ulimit-nofile", type=int, default=8192,
                         help="Set soft RLIMIT_NOFILE (0 to skip)")
     parser.add_argument("--labelmix-k-reverse", action="store_true",
@@ -133,6 +138,15 @@ def _load_model_configs(config_path: str) -> List[str]:
 def main() -> None:
     parser = build_parser()
     args, extra = parser.parse_known_args()
+
+    if args.gpu_clusters <= 0:
+        raise ValueError("--gpu-clusters must be >= 1")
+    if args.node_index < 0 or args.node_index >= args.gpu_clusters:
+        raise ValueError("--node-index must be in [0, gpu-clusters - 1]")
+    if args.gpu_per_cluster <= 0:
+        raise ValueError("--gpu-per-cluster must be >= 1")
+    if not args.cuda_visible_devices:
+        args.cuda_visible_devices = ", ".join(str(i) for i in range(args.gpu_per_cluster))
 
     _set_nofile_limit(args.ulimit_nofile)
 
@@ -238,6 +252,8 @@ def main() -> None:
                 ],
             })
 
+    print(f"Experiment sharding: index {args.node_index} of {args.gpu_clusters} clusters")
+
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
     if args.nproc <= 0:
         raise ValueError("--nproc must be >= 1")
@@ -257,7 +273,9 @@ def main() -> None:
     status_file_path = str(args.status_file)
     finished_names = _load_finished_names(status_file_path)
     jobs: List[Dict[str, Any]] = []
-    for exp in experiments:
+    for exp_idx, exp in enumerate(experiments):
+        if exp_idx % args.gpu_clusters != args.node_index:
+            continue
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         exp_name = str(exp["name"])
         if exp_name in finished_names:
