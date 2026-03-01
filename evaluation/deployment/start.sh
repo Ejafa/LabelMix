@@ -27,8 +27,8 @@ if [[ -z "$NODE_RANK" ]]; then
 fi
 
 python evaluation/baselines/run_experiments.py \
-  --gpu-clusters "${TAIJI_HOST_NUM}" \
-  --max-parallel 2 \
-  --gpu-per-cluster "${HOST_GPU_NUM}" \
+  --gpu-nodes "${TAIJI_HOST_NUM}" \
+  --experiments-per-gpu 2 \
+  --gpu-per-node "${HOST_GPU_NUM}" \
   --nproc 1 \
   --node-index "${NODE_RANK}"

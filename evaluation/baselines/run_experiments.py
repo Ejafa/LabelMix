@@ -14,14 +14,10 @@ import yaml
 
 STORAGE_ROOT = "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
 IMAGENET1K_DATA_DIR = os.path.join(STORAGE_ROOT, "data", "imagenet-1k")
-DEFAULT_GPU_PER_CLUSTER = 8
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
     parser.add_argument("--nproc", type=int, default=1,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=2,
-                        help="Max number of experiments to run concurrently")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
     parser.add_argument("--output-root", default=os.path.join(STORAGE_ROOT, "output_runs", "imagenet1k"),
@@ -32,12 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Starting port to search for free torchrun master ports")
     parser.add_argument("--cuda-visible-devices", default="",
                         help="Comma-separated GPU ids")
-    parser.add_argument("--gpu-per-cluster", type=int, default=DEFAULT_GPU_PER_CLUSTER,
-                        help="Number of GPUs per cluster/node (used to build default CUDA_VISIBLE_DEVICES).")
-    parser.add_argument("--gpu-clusters", type=int, default=1,
-                        help="Total number of GPU clusters/nodes used to shard experiments.")
+    parser.add_argument("--gpu-per-node", type=int, required=True,
+                        help="Number of GPUs per node (used to build default CUDA_VISIBLE_DEVICES).")
+    parser.add_argument("--gpu-nodes", type=int, default=1,
+                        help="Total number of GPU nodes used to shard experiments.")
+    parser.add_argument("--experiments-per-gpu", type=int, required=True,
+                        help="Number of concurrent experiments per GPU (used for CUDA_VISIBLE_DEVICES and max parallel).")
     parser.add_argument("--node-index", type=int, default=0,
-                        help="Index of this node in [0, gpu_clusters-1].")
+                        help="Index of this node in [0, gpu-nodes - 1].")
     parser.add_argument("--ulimit-nofile", type=int, default=8192,
                         help="Set soft RLIMIT_NOFILE (0 to skip)")
     parser.add_argument("--labelmix-k-reverse", action="store_true",
@@ -139,14 +137,18 @@ def main() -> None:
     parser = build_parser()
     args, extra = parser.parse_known_args()
 
-    if args.gpu_clusters <= 0:
-        raise ValueError("--gpu-clusters must be >= 1")
-    if args.node_index < 0 or args.node_index >= args.gpu_clusters:
-        raise ValueError("--node-index must be in [0, gpu-clusters - 1]")
-    if args.gpu_per_cluster <= 0:
-        raise ValueError("--gpu-per-cluster must be >= 1")
+    if args.gpu_nodes <= 0:
+        raise ValueError("--gpu-nodes must be >= 1")
+    if args.node_index < 0 or args.node_index >= args.gpu_nodes:
+        raise ValueError("--node-index must be in [0, gpu-nodes - 1]")
+    if args.gpu_per_node <= 0:
+        raise ValueError("--gpu-per-node must be >= 1")
+    if args.experiments_per_gpu <= 0:
+        raise ValueError("--experiments-per-gpu must be >= 1")
     if not args.cuda_visible_devices:
-        args.cuda_visible_devices = ", ".join(str(i) for i in range(args.gpu_per_cluster))
+        args.cuda_visible_devices = ",".join(
+            str(i) for i in range(args.gpu_per_node) for _ in range(args.experiments_per_gpu)
+        )
 
     _set_nofile_limit(args.ulimit_nofile)
 
@@ -157,9 +159,6 @@ def main() -> None:
         "torchrun",
         f"--nproc_per_node={args.nproc}",
     ]
-
-    balanced_buffer_steps = 5
-    balanced_cache_threshold_steps = 4
 
     base_train_common: List[str] = [
         "--amp-dtype", "bfloat16",
@@ -176,8 +175,8 @@ def main() -> None:
         "--log-wandb",
         "--workers", "8",
         "--loader-prefetch-factor", "4",
-        "--balanced-buffer-steps", str(balanced_buffer_steps),
-        "--balanced-cache-threshold-steps", str(balanced_cache_threshold_steps),
+        "--balanced-buffer-steps", "1",
+        "--balanced-cache-threshold-steps", "1", 
     ]
 
     imagenet_args: List[str] = [
@@ -252,7 +251,7 @@ def main() -> None:
                 ],
             })
 
-    print(f"Experiment sharding: index {args.node_index} of {args.gpu_clusters} clusters")
+    print(f"Experiment sharding: index {args.node_index} of {args.gpu_nodes} nodes")
 
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
     if args.nproc <= 0:
@@ -265,7 +264,8 @@ def main() -> None:
     if not groups:
         raise ValueError(f"Not enough GPUs ({len(gpu_pool)}) for requested --nproc ({args.nproc}).")
 
-    max_parallel = min(args.max_parallel if args.max_parallel else len(groups), len(groups))
+    target_parallel = args.gpu_per_node * args.experiments_per_gpu
+    max_parallel = min(target_parallel, len(groups))
     print(f"Detected GPU Pool: {gpu_pool}")
     print(f"Formed GPU Groups: {groups}")
     print(f"Max Parallel Jobs: {max_parallel}")
@@ -274,7 +274,7 @@ def main() -> None:
     finished_names = _load_finished_names(status_file_path)
     jobs: List[Dict[str, Any]] = []
     for exp_idx, exp in enumerate(experiments):
-        if exp_idx % args.gpu_clusters != args.node_index:
+        if exp_idx % args.gpu_nodes != args.node_index:
             continue
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         exp_name = str(exp["name"])
