@@ -12,7 +12,7 @@ fi
 
 IFS=',' read -ra ITEMS <<< "$NODE_IP_LIST"
 
-NODE_RANK=""
+NODE_RANK=0
 for i in "${!ITEMS[@]}"; do
   ip="${ITEMS[$i]%%:*}"     # strip ":8"
   if [[ "$ip" == "$NODE_IP" ]]; then
@@ -26,9 +26,19 @@ if [[ -z "$NODE_RANK" ]]; then
   exit 1
 fi
 
+if [[ -z "${TAIJI_HOST_NUM:-}" ]]; then
+  echo "ERROR: TAIJI_HOST_NUM is not set" >&2
+  exit 1
+fi
+if [[ -z "${HOST_GPU_NUM:-}" ]]; then
+  echo "ERROR: HOST_GPU_NUM is not set" >&2
+  exit 1
+fi
+
+NPROC="${NPROC:-$HOST_GPU_NUM}"
+
 python evaluation/baselines/run_experiments.py \
   --gpu-nodes "${TAIJI_HOST_NUM}" \
-  --experiments-per-gpu 2 \
   --gpu-per-node "${HOST_GPU_NUM}" \
-  --nproc 1 \
+  --nproc "${NPROC}" \
   --node-index "${NODE_RANK}"

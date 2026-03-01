@@ -26,14 +26,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Directory for stdout/stderr logs")
     parser.add_argument("--master-port-base", type=int, default=29500,
                         help="Starting port to search for free torchrun master ports")
-    parser.add_argument("--cuda-visible-devices", default="",
+    parser.add_argument("--cuda-visible-devices", default=None,
                         help="Comma-separated GPU ids")
     parser.add_argument("--gpu-per-node", type=int, required=True,
                         help="Number of GPUs per node (used to build default CUDA_VISIBLE_DEVICES).")
     parser.add_argument("--gpu-nodes", type=int, default=1,
                         help="Total number of GPU nodes used to shard experiments.")
-    parser.add_argument("--experiments-per-gpu", type=int, required=True,
-                        help="Number of concurrent experiments per GPU (used for CUDA_VISIBLE_DEVICES and max parallel).")
     parser.add_argument("--node-index", type=int, default=0,
                         help="Index of this node in [0, gpu-nodes - 1].")
     parser.add_argument("--ulimit-nofile", type=int, default=8192,
@@ -143,12 +141,13 @@ def main() -> None:
         raise ValueError("--node-index must be in [0, gpu-nodes - 1]")
     if args.gpu_per_node <= 0:
         raise ValueError("--gpu-per-node must be >= 1")
-    if args.experiments_per_gpu <= 0:
-        raise ValueError("--experiments-per-gpu must be >= 1")
+    if args.nproc <= 0:
+        raise ValueError("--nproc must be >= 1")
     if not args.cuda_visible_devices:
         args.cuda_visible_devices = ",".join(
-            str(i) for i in range(args.gpu_per_node) for _ in range(args.experiments_per_gpu)
+            str(i) for _ in range(args.gpu_per_node) for i in range(args.gpu_per_node)
         )
+        print(f"Auto-configured --cuda-visible-devices: {args.cuda_visible_devices}")
 
     _set_nofile_limit(args.ulimit_nofile)
 
@@ -160,9 +159,16 @@ def main() -> None:
         f"--nproc_per_node={args.nproc}",
     ]
 
+    base_batch_size = 1024
+    if base_batch_size % args.nproc != 0:
+        raise ValueError(
+            f"Base batch size {base_batch_size} must be divisible by --nproc ({args.nproc})."
+        )
+    per_gpu_batch_size = base_batch_size // args.nproc
+
     base_train_common: List[str] = [
         "--amp-dtype", "bfloat16",
-        "--batch-size", "1024", # 1 GPU
+        "--batch-size", str(per_gpu_batch_size), # 1024 / nproc
         "--warmup-prefix",
         "--aug-repeats", "0",
         "--img-size", "256",
@@ -253,6 +259,7 @@ def main() -> None:
 
     print(f"Experiment sharding: index {args.node_index} of {args.gpu_nodes} nodes")
 
+    print(args.cuda_visible_devices)
     gpu_pool = _resolve_gpu_pool(args.cuda_visible_devices)
     if args.nproc <= 0:
         raise ValueError("--nproc must be >= 1")
@@ -264,8 +271,7 @@ def main() -> None:
     if not groups:
         raise ValueError(f"Not enough GPUs ({len(gpu_pool)}) for requested --nproc ({args.nproc}).")
 
-    target_parallel = args.gpu_per_node * args.experiments_per_gpu
-    max_parallel = min(target_parallel, len(groups))
+    max_parallel = len(groups)
     print(f"Detected GPU Pool: {gpu_pool}")
     print(f"Formed GPU Groups: {groups}")
     print(f"Max Parallel Jobs: {max_parallel}")
