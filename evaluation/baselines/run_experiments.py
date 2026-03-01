@@ -12,7 +12,7 @@ from typing import Any, Deque, Dict, List, Optional, Set
 
 import yaml
 
-STORAGE_ROOT = "/apdcephfs/ethangys_test_qy4/konstantin-garbers"
+STORAGE_ROOT = "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
 IMAGENET1K_DATA_DIR = os.path.join(STORAGE_ROOT, "data", "imagenet-1k")
 DEFAULT_GPU_PER_CLUSTER = 8
 
