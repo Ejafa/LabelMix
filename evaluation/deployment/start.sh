@@ -41,4 +41,5 @@ python evaluation/baselines/run_experiments.py \
   --gpu-nodes "${TAIJI_HOST_NUM}" \
   --gpu-per-node "${HOST_GPU_NUM}" \
   --nproc "${NPROC}" \
-  --node-index "${NODE_RANK}"
+  --node-index "${NODE_RANK}" \
+  --multi-node-stagger

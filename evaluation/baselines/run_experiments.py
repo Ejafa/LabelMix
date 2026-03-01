@@ -20,6 +20,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
+    parser.add_argument("--multi-node-stagger", action="store_true",
+                        help="Apply a one-time node-index-based stagger before launching any jobs.")
     parser.add_argument("--output-root", default=os.path.join(STORAGE_ROOT, "output_runs", "imagenet1k"),
                         help="Base output directory passed to train.py --output")
     parser.add_argument("--log-dir", default=os.path.join(STORAGE_ROOT, "logs", "imagenet1k"),
@@ -299,6 +301,11 @@ def main() -> None:
     running: List[Dict[str, Any]] = []
     available_groups: Deque[List[str]] = deque(groups)
     used_ports: Set[int] = set()
+
+    if args.multi_node_stagger and args.stagger_seconds > 0 and args.node_index > 0:
+        initial_delay = (args.stagger_seconds / 4.0) * args.node_index
+        print(f"Multi-node stagger: sleeping {initial_delay:.1f}s before starting jobs.")
+        time.sleep(initial_delay)
 
     def _is_port_free(port: int) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
