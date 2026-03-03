@@ -153,6 +153,29 @@ def _load_finished_names(status_path: str) -> Set[str]:
     return finished
 
 
+def _is_finished_in_status_file(status_path: str, exp_name: str) -> bool:
+    if not status_path or not os.path.exists(status_path):
+        return False
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    exp_name = str(exp_name or "").strip()
+    if not exp_name:
+        return False
+    for entry in data.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("name") or "").strip() != exp_name:
+            continue
+        if entry.get("finished") is True:
+            return True
+    return False
+
+
 def _load_model_configs(config_path: str) -> List[str]:
     if not config_path:
         return []
@@ -303,7 +326,9 @@ def _build_jobs(
         exp_name = str(exp["name"])
         exp_config = str(exp["config"])
         exp_extra = list(exp.get("extra", []))
-        if exp_name in finished_names:
+
+        exp_status_file = os.path.join(args.output_root, exp_name, "run_status.yaml")
+        if exp_name in finished_names or _is_finished_in_status_file(exp_status_file, exp_name):
             print(f"Skipping finished experiment: {exp_name}")
             continue
 
@@ -325,6 +350,7 @@ def _build_jobs(
             "log_path": os.path.join(args.log_dir, f"{exp_name}_{ts}.txt"),
             "estimated_vram_gb": float(estimate["estimated_vram_gb"]),
             "vram_factors": dict(estimate["vram_factors"]),
+            "status_file": exp_status_file,
         })
     return jobs
 
@@ -390,6 +416,7 @@ def main() -> None:
         "--warmup-steps", "12500",  # 10 epochs
     ]
 
+    # TODO: For testing purposes'
     cifar100_args: List[str] = [
         "--dataset", "hfds/uoft-cs/cifar100",
         "--data-dir", os.path.join(project_root, "data", "cifar100"),

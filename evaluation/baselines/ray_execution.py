@@ -159,10 +159,14 @@ def run_ray_jobs(
             estimated_vram_gb = float(job.get("estimated_vram_gb", 0.0))
             requested_vram_units = _vram_resource_units(estimated_vram_gb)
             vram_factors = dict(job.get("vram_factors", {}))
+            exp_status_file = str(job.get("status_file") or os.path.join(expected_output_dir, "run_status.yaml"))
 
-            if not args.disable_train_check_resume and not os.path.exists(status_file_path):
+            if not args.disable_train_check_resume:
                 _upsert_flag(exp_extra, "--check-resume")
                 _upsert_flag(exp_extra, "--check-resume-log-dir", args.log_dir)
+                _upsert_flag(exp_extra, "--check-resume-status-file", exp_status_file)
+
+
 
             cmd = [
                 "torchrun",

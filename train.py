@@ -508,8 +508,9 @@ group.add_argument('--wandb-resume-id', default='', type=str, metavar='ID',
                    help='If resuming a run, the id of the run in wandb')
 group.add_argument('--check-resume', action='store_true', default=False,
                    help='Auto-detect --resume checkpoint and wandb resume id from local metadata.')
-group.add_argument('--check-resume-status-file', default='./experiment_status.yaml', type=str, metavar='PATH',
-                   help='Status YAML used to recover wandb id when --check-resume is enabled.')
+group.add_argument('--check-resume-status-file', default='', type=str, metavar='PATH',
+                   help='Status YAML used to recover wandb id when --check-resume is enabled '
+                        '(default: <output>/<experiment>/run_status.yaml).')
 group.add_argument('--check-resume-log-dir', default='./logs', type=str, metavar='DIR',
                    help='Log root scanned for wandb id fallback when --check-resume is enabled.')
 group.add_argument('--check-resume-search-limit', default=30, type=int, metavar='N',
@@ -662,9 +663,30 @@ def _find_wandb_id_in_logs(log_root: str, experiment: Optional[str], search_limi
     return None
 
 
+def _resolve_check_resume_status_file(args) -> str:
+    status_file = str(getattr(args, "check_resume_status_file", "") or "").strip()
+    if status_file:
+        return status_file
+
+    exp_name = str(getattr(args, "experiment", "") or "").strip()
+    out_root = str(getattr(args, "output", "") or "./output/train")
+    if exp_name:
+        return os.path.join(out_root, exp_name, "run_status.yaml")
+
+    resume_path = str(getattr(args, "resume", "") or "").strip()
+    if resume_path:
+        resume_dir = os.path.dirname(resume_path)
+        if resume_dir:
+            return os.path.join(resume_dir, "run_status.yaml")
+
+    return os.path.join(out_root, "run_status.yaml")
+
+
 def _auto_configure_resume(args) -> bool:
     if not args.check_resume:
         return False
+
+    args.check_resume_status_file = _resolve_check_resume_status_file(args)
 
     changed = False
     if not args.resume:
@@ -772,7 +794,8 @@ def _update_training_status(
         return
 
     now = datetime.now().strftime("%Y%m%d-%H%M%S")
-    status_file = str(getattr(args, "check_resume_status_file", "") or "")
+    status_file = _resolve_check_resume_status_file(args)
+    args.check_resume_status_file = status_file
     data = _load_status_yaml(status_file)
     key = _status_key_for_experiment(exp_name)
 
@@ -1036,6 +1059,7 @@ class LabelMixBroadcastLoader:
 def main():
     utils.setup_default_logging()
     args, args_text = _parse_args()
+    initial_status_file = str(getattr(args, "check_resume_status_file", "") or "").strip()
 
     def _parse_step_setting(value: str, name: str) -> tuple[int, bool]:
         raw = str(value).strip().lower()
@@ -1051,7 +1075,11 @@ def main():
     if args.check_resume_search_limit < 1:
         parser.error('--check-resume-search-limit must be >= 1')
 
-    if _auto_configure_resume(args):
+    auto_resume_changed = _auto_configure_resume(args)
+    status_file_changed = (
+        str(getattr(args, "check_resume_status_file", "") or "").strip() != initial_status_file
+    )
+    if auto_resume_changed or status_file_changed:
         # Keep saved args.yaml aligned with any auto-resume updates.
         args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
 
