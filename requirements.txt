@@ -6,3 +6,4 @@ safetensors>=0.2
 numpy
 datasets
 wandb
+ray>=2.9
