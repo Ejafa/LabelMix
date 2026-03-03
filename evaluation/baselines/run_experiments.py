@@ -12,8 +12,7 @@ try:
 except ImportError:
     from ray_execution import run_ray_jobs
 
-STORAGE_ROOT = "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
-IMAGENET1K_DATA_DIR = os.path.join(STORAGE_ROOT, "data", "imagenet-1k")
+DEFAULT_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # Per-model parameter counts (in millions). Update these values with your
 # manually verified counts for accurate VRAM scheduling.
@@ -63,12 +62,21 @@ def _env_int(name: str, default: int) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Step-Based Experiments")
+    parser.add_argument(
+        "--project-root",
+        "--storage-root",
+        dest="project_root",
+        default=DEFAULT_PROJECT_ROOT,
+        help="Base path used for default output/log/status/data paths.",
+    )
     parser.add_argument("--stagger-seconds", type=int, default=120,
                         help="Delay between launching experiments")
-    parser.add_argument("--output-root", default=os.path.join(STORAGE_ROOT, "output_runs", "imagenet1k"),
-                        help="Base output directory passed to train.py --output")
-    parser.add_argument("--log-dir", default=os.path.join(STORAGE_ROOT, "logs", "imagenet1k"),
-                        help="Directory for stdout/stderr logs")
+    parser.add_argument("--output-root", default=None,
+                        help="Base output directory passed to train.py --output. "
+                             "Default: <project-root>/output_runs/imagenet1k")
+    parser.add_argument("--log-dir", default=None,
+                        help="Directory for stdout/stderr logs. "
+                             "Default: <project-root>/logs/imagenet1k")
     parser.add_argument("--ulimit-nofile", type=int, default=8192,
                         help="Set soft RLIMIT_NOFILE (0 to skip)")
     parser.add_argument("--labelmix-k-reverse", action="store_true",
@@ -79,8 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Total epochs for LabelMix K schedule.")
     parser.add_argument("--model-configs-path", default="evaluation/baselines/configs",
                         help="YAML config file or directory of YAML configs to run.")
-    parser.add_argument("--status-file", default=os.path.join(STORAGE_ROOT, "experiment_status.yaml"),
-                        help="Status YAML used to skip finished experiments.")
+    parser.add_argument("--status-file", default=None,
+                        help="Status YAML used to skip finished experiments. "
+                             "Default: <project-root>/experiment_status.yaml")
     parser.add_argument("--disable-train-check-resume", action="store_true",
                         help="Do not pass --check-resume to train.py.")
 
@@ -323,6 +332,15 @@ def main() -> None:
     parser = build_parser()
     args, extra = parser.parse_known_args()
 
+    project_root = os.path.abspath(os.path.expanduser(str(args.project_root)))
+    if not args.output_root:
+        args.output_root = os.path.join(project_root, "output_runs", "imagenet1k")
+    if not args.log_dir:
+        args.log_dir = os.path.join(project_root, "logs", "imagenet1k")
+    if not args.status_file:
+        args.status_file = os.path.join(project_root, "experiment_status.yaml")
+    imagenet1k_data_dir = os.path.join(project_root, "data", "imagenet-1k")
+
     _set_nofile_limit(args.ulimit_nofile)
 
     os.makedirs(args.output_root, exist_ok=True)
@@ -361,7 +379,7 @@ def main() -> None:
 
     imagenet_args: List[str] = [
         "--dataset", "hfds/ILSVRC/imagenet-1k",
-        "--data-dir", IMAGENET1K_DATA_DIR,
+        "--data-dir", imagenet1k_data_dir,
         "--train-split", "train",
         "--val-split", "validation",
         "--input-key", "image",
@@ -370,6 +388,20 @@ def main() -> None:
         "--num-classes", "1000",
         "--num-steps", "362500",  # 290 epochs. 1280000/1024 = 1250 steps/epoch
         "--warmup-steps", "12500",  # 10 epochs
+    ]
+
+    cifar100_args: List[str] = [
+        "--dataset", "hfds/uoft-cs/cifar100",
+        "--data-dir", os.path.join(project_root, "data", "cifar100"),
+        "--train-split", "train",
+        "--val-split", "test",
+        "--input-key", "img",
+        "--target-key", "fine_label",
+        "--balanced-mode", "500",
+        "--num-classes", "100",
+        "--num-steps", "10000", 
+        "--warmup-steps", "500",
+        "--img-size", "32",
     ]
 
     model_configs = _load_model_configs(args.model_configs_path)
@@ -389,7 +421,8 @@ def main() -> None:
                 "extra": [
                     "--pin-mem",
                     *model_kwargs_args,
-                    *imagenet_args,
+                    # *imagenet_args,
+                    *cifar100_args,
                     "--lr", str(lr),
                 ],
             })

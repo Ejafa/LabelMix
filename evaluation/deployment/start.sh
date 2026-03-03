@@ -5,8 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-# Required environment variables (must be provided by Taiji runtime or caller):
-# NODE_IP_LIST, NODE_IP, TAIJI_HOST_NUM, HOST_GPU_NUM
+# Required environment variables (typically provided by Taiji runtime):
+# NODE_IP_LIST, NODE_IP, HOST_GPU_NUM
+# If NODE_IP_LIST or NODE_IP is missing, we fall back to single-node mode.
 #
 # User-configurable knobs (optional overrides; defaults are provided):
 INITIAL_NODE_STAGGER_SECONDS="${INITIAL_NODE_STAGGER_SECONDS:-30}"
@@ -16,20 +17,28 @@ EXPERIMENT_STAGGER_SECONDS="${EXPERIMENT_STAGGER_SECONDS:-15}"
 # - NODE_CPU_COUNT: local logical CPU count
 # - RAY_VRAM_GB_PER_NODE: auto-detected from nvidia-smi
 NODE_CPU_COUNT="$(nproc)"
-CPU_PER_EXPERIMENT="${CPU_PER_EXPERIMENT:-${RAY_CPUS_PER_NODE:-8}}"
-RAY_VRAM_RESERVE_GB="${RAY_VRAM_RESERVE_GB:-3}"
+CPU_PER_EXPERIMENT="${CPU_PER_EXPERIMENT:-6}"
+RAY_VRAM_RESERVE_GB="${RAY_VRAM_RESERVE_GB:-0}"
+# TODO: Should be automatic
+HOST_GPU_NUM="${HOST_GPU_NUM:-4}"
 
 # Ray execution knobs (manual defaults):
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_STRATEGY="${RAY_STRATEGY:-STRICT_SPREAD}"
 
-if [[ -z "${NODE_IP_LIST:-}" ]]; then
-  echo "ERROR: NODE_IP_LIST is not set" >&2
-  exit 1
-fi
-if [[ -z "${NODE_IP:-}" ]]; then
-  echo "ERROR: NODE_IP is not set" >&2
-  exit 1
+if [[ -z "${NODE_IP_LIST:-}" || -z "${NODE_IP:-}" ]]; then
+  single_node_ip="${NODE_IP:-}"
+  if [[ -z "${single_node_ip}" && -n "${NODE_IP_LIST:-}" ]]; then
+    first_item="${NODE_IP_LIST%%,*}"
+    single_node_ip="${first_item%%:*}"
+  fi
+  if [[ -z "${single_node_ip}" ]]; then
+    single_node_ip="${CHIEF_IP:-127.0.0.1}"
+  fi
+
+  NODE_IP="${single_node_ip}"
+  NODE_IP_LIST="${single_node_ip}"
+  echo "NODE_IP_LIST or NODE_IP missing; assuming single-node deployment: NODE_IP=${NODE_IP}, NODE_IP_LIST=${NODE_IP_LIST}"
 fi
 
 IFS=',' read -ra ITEMS <<< "$NODE_IP_LIST"
@@ -48,10 +57,6 @@ if [[ -z "$NODE_RANK" ]]; then
   exit 1
 fi
 
-if [[ -z "${TAIJI_HOST_NUM:-}" ]]; then
-  echo "ERROR: TAIJI_HOST_NUM is not set" >&2
-  exit 1
-fi
 if [[ -z "${HOST_GPU_NUM:-}" ]]; then
   echo "ERROR: HOST_GPU_NUM is not set" >&2
   exit 1
@@ -59,6 +64,7 @@ fi
 
 RAY_HEAD_IP="${CHIEF_IP:-${ITEMS[0]%%:*}}"
 RAY_ADDRESS="${RAY_HEAD_IP}:${RAY_PORT}"
+RUN_PROJECT_ROOT="${RUN_PROJECT_ROOT:-${RUN_STORAGE_ROOT:-${PROJECT_ROOT}}}"
 
 if command -v python >/dev/null 2>&1; then
   PYTHON_BIN="python"
@@ -88,8 +94,14 @@ fi
 RAY_RESOURCES_JSON=""
 if [[ -n "${RAY_VRAM_GB_PER_NODE}" ]]; then
   if awk "BEGIN {exit !(${RAY_VRAM_GB_PER_NODE} > 0)}"; then
-    RAY_RESOURCES_JSON="{\"VRAM_GB\":${RAY_VRAM_GB_PER_NODE}}"
-    echo "Ray custom resource budget: ${RAY_RESOURCES_JSON}"
+    RAY_VRAM_GB_PER_NODE_INT="$(awk "BEGIN {print int(${RAY_VRAM_GB_PER_NODE})}")"
+    if awk "BEGIN {exit !(${RAY_VRAM_GB_PER_NODE_INT} > 0)}"; then
+      RAY_RESOURCES_JSON="{\"VRAM_GB\":${RAY_VRAM_GB_PER_NODE_INT}}"
+      echo "Ray custom resource budget: ${RAY_RESOURCES_JSON} (raw_detected=${RAY_VRAM_GB_PER_NODE}GB)"
+    else
+      echo "Warning: rounded VRAM budget is <= 0 (raw='${RAY_VRAM_GB_PER_NODE}'), ignoring VRAM resource."
+      RAY_VRAM_GB_PER_NODE=""
+    fi
   else
     echo "Warning: invalid RAY_VRAM_GB_PER_NODE='${RAY_VRAM_GB_PER_NODE}', ignoring VRAM resource."
     RAY_VRAM_GB_PER_NODE=""
@@ -129,6 +141,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
 
   cmd=(
     "${PYTHON_BIN}" evaluation/baselines/run_experiments.py
+    --project-root "${RUN_PROJECT_ROOT}"
     --ray-address "${RAY_ADDRESS}"
     --ray-gpus-per-node "${HOST_GPU_NUM}"
     --cpu-per-experiment "${CPU_PER_EXPERIMENT}"
