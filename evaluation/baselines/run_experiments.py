@@ -47,7 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-configs-path", default="evaluation/baselines/configs",
                         help="YAML config file or directory of YAML configs to run.")
     parser.add_argument("--status-file", default=os.path.join(STORAGE_ROOT, "experiment_status.yaml"),
-                        help="Status YAML used to skip finished experiments.")
+                        help="Legacy global status YAML used to skip finished experiments "
+                             "(per-run run_status.yaml is also checked).")
     parser.add_argument("--disable-train-check-resume", action="store_true",
                         help="Do not pass --check-resume to train.py.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
@@ -115,6 +116,29 @@ def _load_finished_names(status_path: str) -> Set[str]:
                 if name:
                     finished.add(name)
     return finished
+
+
+def _is_finished_in_status_file(status_path: str, exp_name: str) -> bool:
+    if not status_path or not os.path.exists(status_path):
+        return False
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    exp_name = str(exp_name or "").strip()
+    if not exp_name:
+        return False
+    for entry in data.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("name") or "").strip() != exp_name:
+            continue
+        if entry.get("finished") is True:
+            return True
+    return False
 
 
 def _load_model_configs(config_path: str) -> List[str]:
@@ -286,7 +310,8 @@ def main() -> None:
             continue
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         exp_name = str(exp["name"])
-        if exp_name in finished_names:
+        exp_status_file = os.path.join(args.output_root, exp_name, "run_status.yaml")
+        if exp_name in finished_names or _is_finished_in_status_file(exp_status_file, exp_name):
             print(f"Skipping finished experiment: {exp_name}")
             continue
         jobs.append({
@@ -295,6 +320,7 @@ def main() -> None:
             "extra": list(exp.get("extra", [])),
             "runner_extra": list(extra),
             "log_path": os.path.join(args.log_dir, f"{exp_name}_{ts}.txt"),
+            "status_file": exp_status_file,
         })
 
     exp_queue = deque(jobs)
@@ -336,10 +362,12 @@ def main() -> None:
         exp_extra = list(job.get("extra", []))
         runner_extra = list(job.get("runner_extra", []))
         expected_output_dir = os.path.join(args.output_root, exp_name)
+        exp_status_file = str(job.get("status_file") or os.path.join(expected_output_dir, "run_status.yaml"))
 
-        if not args.disable_train_check_resume and not os.path.exists(status_file_path):
+        if not args.disable_train_check_resume:
             _upsert_flag(exp_extra, "--check-resume")
             _upsert_flag(exp_extra, "--check-resume-log-dir", args.log_dir)
+            _upsert_flag(exp_extra, "--check-resume-status-file", exp_status_file)
 
         gpu_group = available_groups.popleft()
         master_port = _pick_port()
