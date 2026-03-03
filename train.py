@@ -139,7 +139,9 @@ group.add_argument('--balanced-cache-threshold-steps', default='0', type=str,
                    help='If > 0, set balanced cache threshold to steps * batch_size '
                         '(or global batch size when centralized LabelMix is enabled).')
 group.add_argument('--balanced-cache-path', default='', type=str,
-                   help='Cache path for balanced class buckets (default: <data-dir>/class_buckets.pkl)')
+                   help='Cache path for balanced class buckets '
+                        '(default: <output>/<experiment>/class_buckets.pkl if --experiment is set, '
+                        'else <data-dir>/class_buckets.pkl)')
 group.add_argument('--balanced-cache-threshold', default=256, type=int,
                    help='Cache classes with <= N samples in RAM for balanced loading (default: 256)')
 group.add_argument('--balanced-input-key', default=None, type=str,
@@ -704,6 +706,20 @@ def _auto_configure_resume(args) -> bool:
             )
 
     return changed
+
+
+def _resolve_balanced_cache_path(args) -> str:
+    balanced_cache_path = str(getattr(args, "balanced_cache_path", "") or "").strip()
+    if balanced_cache_path:
+        return balanced_cache_path
+
+    exp_name = str(getattr(args, "experiment", "") or "").strip()
+    if exp_name:
+        out_root = str(getattr(args, "output", "") or "./output/train")
+        return os.path.join(out_root, exp_name, "class_buckets.pkl")
+
+    base_dir = getattr(args, "data_dir", None) or getattr(args, "data", None) or "."
+    return os.path.join(base_dir, "class_buckets.pkl")
 
 
 def _status_key_for_experiment(exp_name: str) -> str:
@@ -1566,10 +1582,10 @@ def main():
             balanced_target_key = args.balanced_target_key
             if balanced_target_key is None:
                 balanced_target_key = args.target_key if args.target_key is not None else 'label'
-            balanced_cache_path = args.balanced_cache_path
-            if not balanced_cache_path:
-                base_dir = args.data_dir or args.data or '.'
-                balanced_cache_path = os.path.join(base_dir, 'class_buckets.pkl')
+            balanced_cache_path = _resolve_balanced_cache_path(args)
+            balanced_cache_dir = os.path.dirname(balanced_cache_path)
+            if balanced_cache_dir:
+                os.makedirs(balanced_cache_dir, exist_ok=True)
 
             labelmix_batch_size = args.batch_size * args.world_size if central_labelmix else args.batch_size
             # Some step-based configs do not define --epochs; keep K scheduling robust.

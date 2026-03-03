@@ -335,10 +335,13 @@ def main() -> None:
     if label_names is None and hasattr(dataset_train, "ds"):
         label_names = _resolve_label_names(getattr(dataset_train, "ds"), balanced_target_key)
 
+    output_dir = str(getattr(args, "output_dir", "output_test") or "output_test")
     balanced_cache_path = getattr(args, "balanced_cache_path", "")
     if not balanced_cache_path:
-        base_dir = args.data_dir or getattr(args, "data", None) or "."
-        balanced_cache_path = os.path.join(base_dir, "class_buckets.pkl")
+        balanced_cache_path = os.path.join(output_dir, "class_buckets.pkl")
+    balanced_cache_dir = os.path.dirname(balanced_cache_path)
+    if balanced_cache_dir:
+        os.makedirs(balanced_cache_dir, exist_ok=True)
 
     sampling_enabled = _ensure_bool(getattr(args, "labelmix_sampling", False))
     labelmix_mix_k = int(getattr(args, "labelmix_mix_k", 5))
@@ -416,7 +419,6 @@ def main() -> None:
         drop_last=True,
     )
 
-    output_dir = getattr(args, "output_dir", "output_test")
     os.makedirs(output_dir, exist_ok=True)
 
     steps = int(args.steps)

@@ -18,9 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Base config file")
     parser.add_argument("--nproc", type=int, default=4,
                         help="Number of GPUs per experiment (torchrun --nproc_per_node)")
-    parser.add_argument("--max-parallel", type=int, default=1,
+    parser.add_argument("--max-parallel", type=int, default=2,
                         help="Max number of experiments to run concurrently")
-    parser.add_argument("--stagger-seconds", type=int, default=120,
+    parser.add_argument("--stagger-seconds", type=int, default=0,
                         help="Delay between launching experiments")
     parser.add_argument("--output-root", default="./output_runs/imagenet1k",
                         help="Base output directory passed to train.py --output")
@@ -205,7 +205,7 @@ def main() -> None:
         experiments.extend([
             
             {
-                "name": f"labelmix_imagenet1k_{model}_aug_k_sched_pl_loss",
+                "name": f"labelmix_imagenet1k_{model}_aug_k_sched_pl_loss_ggez",
                 "config": args.config,
                 "extra": [
                     "--model", model,
@@ -216,7 +216,7 @@ def main() -> None:
                 ],
             },
             {
-                "name": f"labelmix_imagenet1k_{model}_aug_k_sched_soft_ce",
+                "name": f"labelmix_imagenet1k_{model}_aug_k_sched_soft_ce_ggez",
                 "config": args.config,
                 "extra": [
                     "--model", model,
