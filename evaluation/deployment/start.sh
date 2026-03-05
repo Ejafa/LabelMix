@@ -25,46 +25,62 @@ MAX_EXPERIMENTS_PER_GROUP="${MAX_EXPERIMENTS_PER_GROUP:-2}"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_STRATEGY="${RAY_STRATEGY:-STRICT_SPREAD}"
 
-if [[ -z "${NODE_IP_LIST:-}" || -z "${NODE_IP:-}" ]]; then
-  single_node_ip=""
-  if [[ -n "${NODE_IP_LIST:-}" ]]; then
-    first_item="${NODE_IP_LIST%%,*}"
-    single_node_ip="${first_item%%:*}"
-  fi
-  if [[ -z "${single_node_ip}" ]]; then
-    single_node_ip="${NODE_IP:-}"
-  fi
-  if [[ -z "${single_node_ip}" ]]; then
-    single_node_ip="${CHIEF_IP:-127.0.0.1}"
-  fi
-
+if [[ -z "${NODE_IP_LIST:-}" ]]; then
+  single_node_ip="${CHIEF_IP:-${NODE_IP:-127.0.0.1}}"
   NODE_IP="${single_node_ip}"
   NODE_IP_LIST="${single_node_ip}"
-  echo "NODE_IP_LIST or NODE_IP missing; assuming single-node deployment: NODE_IP=${NODE_IP}, NODE_IP_LIST=${NODE_IP_LIST}"
+  echo "NODE_IP_LIST missing; assuming single-node deployment: NODE_IP=${NODE_IP}, NODE_IP_LIST=${NODE_IP_LIST}"
 fi
 
 IFS=',' read -ra ITEMS <<< "$NODE_IP_LIST"
-normalized_node_ip="${NODE_IP%%:*}"
+if [[ "${#ITEMS[@]}" -eq 0 ]]; then
+  echo "ERROR: NODE_IP_LIST is empty." >&2
+  exit 1
+fi
+
+rank_for_ip() {
+  local target_ip="${1%%:*}"
+  local i ip
+  for i in "${!ITEMS[@]}"; do
+    ip="${ITEMS[$i]%%:*}" # strip ":<slots>"
+    if [[ "$ip" == "$target_ip" ]]; then
+      printf '%s\n' "$i"
+      return 0
+    fi
+  done
+  return 1
+}
+
+RAY_HEAD_IP="${CHIEF_IP:-${ITEMS[0]%%:*}}"
+RAY_HEAD_IP="${RAY_HEAD_IP%%:*}"
+RAY_ADDRESS="${RAY_HEAD_IP}:${RAY_PORT}"
+if ! rank_for_ip "${RAY_HEAD_IP}" >/dev/null; then
+  echo "ERROR: head IP ${RAY_HEAD_IP} is not present in NODE_IP_LIST=${NODE_IP_LIST}" >&2
+  exit 1
+fi
 
 NODE_RANK=""
-for i in "${!ITEMS[@]}"; do
-  ip="${ITEMS[$i]%%:*}" # strip ":8"
-  if [[ "$ip" == "$normalized_node_ip" ]]; then
-    NODE_RANK="$i"
-    break
-  fi
-done
+if [[ "${INDEX:-}" =~ ^[0-9]+$ ]] && (( INDEX < ${#ITEMS[@]} )); then
+  NODE_RANK="${INDEX}"
+fi
 
-if [[ -z "$NODE_RANK" ]]; then
-  echo "ERROR: NODE_IP=$NODE_IP not found in NODE_IP_LIST=$NODE_IP_LIST" >&2
+if [[ -z "${NODE_RANK}" ]]; then
+  for candidate_ip in "${LOCAL_IP:-}" "${NODE_IP:-}"; do
+    [[ -z "${candidate_ip}" ]] && continue
+    if NODE_RANK="$(rank_for_ip "${candidate_ip}")"; then
+      break
+    fi
+  done
+fi
+
+if [[ -z "${NODE_RANK}" ]]; then
+  echo "ERROR: could not resolve this node rank from INDEX/LOCAL_IP/NODE_IP against NODE_IP_LIST=${NODE_IP_LIST}" >&2
   exit 1
 fi
 
 # Always use the canonical IP from NODE_IP_LIST for this node.
 NODE_IP="${ITEMS[$NODE_RANK]%%:*}"
 
-RAY_HEAD_IP="${CHIEF_IP:-${ITEMS[0]%%:*}}"
-RAY_ADDRESS="${RAY_HEAD_IP}:${RAY_PORT}"
 RUN_PROJECT_ROOT="${RUN_PROJECT_ROOT:-${RUN_STORAGE_ROOT:-${PROJECT_ROOT}}}"
 
 if command -v python >/dev/null 2>&1; then
@@ -125,8 +141,8 @@ fi
 echo "Node rank ${NODE_RANK}: restarting Ray runtime."
 ray stop --force >/dev/null 2>&1 || true
 
-if [[ "$NODE_RANK" == "0" ]]; then
-  echo "Node rank 0: starting Ray head at ${NODE_IP}:${RAY_PORT}"
+if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
+  echo "Head node (rank ${NODE_RANK}): starting Ray head at ${NODE_IP}:${RAY_PORT}"
   ray_head_cmd=(ray start --head \
     --node-ip-address "${NODE_IP}" \
     --port "${RAY_PORT}" \
@@ -137,7 +153,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
   fi
   "${ray_head_cmd[@]}"
 
-  echo "Node rank 0: waiting for Ray cluster readiness at ${RAY_ADDRESS}"
+  echo "Head node (rank ${NODE_RANK}): waiting for Ray cluster readiness at ${RAY_ADDRESS}"
   "${PYTHON_BIN}" "${HELPER_PY}" wait-ray \
     --address "${RAY_ADDRESS}" \
     --timeout-seconds 120

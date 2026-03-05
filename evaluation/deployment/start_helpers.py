@@ -22,7 +22,9 @@ def wait_ray(args: argparse.Namespace) -> int:
     while time.time() < deadline:
         try:
             ray.init(address=args.address, ignore_reinit_error=True)
-            print("Ray connected:", ray.cluster_resources())
+            # Connection success is enough for readiness here. Some Ray builds
+            # can stall on immediate resource RPCs right after init.
+            print(f"Ray connected: {args.address}")
             ray.shutdown()
             return 0
         except Exception as exc:
