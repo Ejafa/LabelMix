@@ -58,9 +58,9 @@ local_rank: 0
 log_interval: 50
 log_wandb: false
 lr: null
-lr_base: 0.0008
+lr_base: 1e-3
 lr_base_scale: ''
-lr_base_size: 512
+lr_base_size: 1024
 lr_cycle_decay: 0.5
 lr_cycle_limit: 1
 lr_cycle_mul: 1.0
