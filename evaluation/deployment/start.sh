@@ -10,8 +10,8 @@ cd "${PROJECT_ROOT}"
 # If NODE_IP_LIST or NODE_IP is missing, we fall back to single-node mode.
 #
 # User-configurable knobs (optional overrides; defaults are provided):
-INITIAL_NODE_STAGGER_SECONDS="${INITIAL_NODE_STAGGER_SECONDS:-0}"
-EXPERIMENT_STAGGER_SECONDS="${EXPERIMENT_STAGGER_SECONDS:-0}"
+INITIAL_NODE_STAGGER_SECONDS="${INITIAL_NODE_STAGGER_SECONDS:-30}"
+EXPERIMENT_STAGGER_SECONDS="${EXPERIMENT_STAGGER_SECONDS:-15}"
 
 # Auto-detected capacity knobs (leave empty/default to auto-detect):
 # - NODE_CPU_COUNT: local logical CPU count

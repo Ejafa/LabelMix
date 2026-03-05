@@ -342,49 +342,82 @@ def main() -> None:
         "--num-classes", "100",
         "--num-steps", "10000",
         "--warmup-steps", "500",
-        "--img-size", "32",
+        "--img-size", "256",
     ]
 
-    model_configs = _load_model_configs(args.model_configs_path)
+    labelmix_common_args: List[str] = [
+        "--labelmix",
+        # "--labelmix-mix-k", "4",
+        # "--labelmix-k-min", "1",
+        # "--labelmix-k-max", "5",
+        # "--labelmix-k-schedule", "linear",
+        # "--labelmix-alpha-min", "1.0",
+        # "--labelmix-alpha-max", "1.0",
+        "--labelmix-schedule", "fixed",
+        "--labelmix-step-mode", "total",
+        # "--labelmix-sampling",
+        # "--labelmix-sampling-min-side-px", "8",
+        # "--labelmix-sampling-max-aspect", "10.0",
+        # "--labelmix-sampling-bins", "16",
+        # "--labelmix-sampling-pool-size", "256",
+        # "--labelmix-sampling-low-watermark", "64",
+        # "--labelmix-sampling-max-attempts", "200",
+
+        "--mixup", "0",
+        "--cutmix", "0",
+        "--mixup-prob", "0.0",
+    ]
+
+    # model_configs = _load_model_configs(args.model_configs_path)
+    model_configs = [
+        "evaluation/baselines/configs/mnv4-conv-medium.yaml",
+        "evaluation/baselines/configs/vit-wee.yaml",
+    ]
 
     experiments: List[Dict[str, Any]] = []
-    learning_rates = [0.0005, 0.001, 0.0015]
+    ks = [3, 4, 5, 6]
+    alpha = [0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0]
+    loss = ["pl_loss", "soft_ce"]
     for model_config in model_configs:
         config_data = _load_yaml_dict(model_config)
         config_img_size = _resolve_config_img_size(config_data)
+        for k in ks:
+            for a in alpha:
+                for l in loss:
+                    total_args = [*imagenet_args, *extra, *labelmix_common_args,]
+                    model = os.path.splitext(os.path.basename(model_config))[0]
+                    model_kwargs_args: List[str] = []
+                    config_model_name = str(config_data.get("model") or "")
+                    is_vit_model = _is_vit_model(total_args, config_model_name, model)
+                    if is_vit_model:
+                        model_img_size = _resolve_final_img_size(total_args, config_img_size)
+                        if model_img_size is None:
+                            raise ValueError(
+                                f"Config '{model_config}' is missing 'img_size' required for ViT model kwargs."
+                            )
+                        model_kwargs_args = [
+                            "--model-kwargs",
+                            f"img_size={model_img_size}",
+                        ]
+                        if not config_model_name.lower().startswith("vit_base"):
+                            model_kwargs_args.append("fix_init=True")
+                        total_args = total_args + model_kwargs_args
 
-
-        for lr in learning_rates:
-            total_args = [*imagenet_args, *extra]
-            model = os.path.splitext(os.path.basename(model_config))[0]
-            model_kwargs_args: List[str] = []
-            config_model_name = str(config_data.get("model") or "")
-            is_vit_model = _is_vit_model(total_args, config_model_name, model)
-            if is_vit_model:
-                model_img_size = _resolve_final_img_size(total_args, config_img_size)
-                if model_img_size is None:
-                    raise ValueError(
-                        f"Config '{model_config}' is missing 'img_size' required for ViT model kwargs."
-                    )
-                model_kwargs_args = [
-                    "--model-kwargs",
-                    f"img_size={model_img_size}",
-                ]
-                if not config_model_name.lower().startswith("vit_base"):
-                    model_kwargs_args.append("fix_init=True")
-                total_args = total_args + model_kwargs_args
-
-            exp_name = f"baseline_imagenet1k_{model}_lr{lr}"
-            experiments.append({
-                "name": exp_name,
-                "config": model_config,
-                "extra": [
-                    "--pin-mem",
-                    # *imagenet_args,
-                    *total_args,
-                    "--lr", str(lr),
-                ],
-            })
+                    exp_name = f"baseline_imagenet1k_{model}_labelmix_k{k}_a{str(a).replace('.', 'p')}_loss{l}"
+                    experiments.append({
+                        "name": exp_name,
+                        "config": model_config,
+                        "extra": [
+                            "--pin-mem",
+                            *total_args,
+                            "--labelmix-mix-k", str(k),
+                            "--labelmix-k-min", str(k),
+                            "--labelmix-k-max", str(k),
+                            "--labelmix-alpha-min", str(a),
+                            "--labelmix-alpha-max", str(a),
+                            "--labelmix-loss", l,
+                        ],
+                    })
 
     status_file_path = str(args.status_file)
     jobs = _build_jobs(
