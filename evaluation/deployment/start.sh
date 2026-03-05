@@ -26,10 +26,13 @@ RAY_PORT="${RAY_PORT:-6379}"
 RAY_STRATEGY="${RAY_STRATEGY:-STRICT_SPREAD}"
 
 if [[ -z "${NODE_IP_LIST:-}" || -z "${NODE_IP:-}" ]]; then
-  single_node_ip="${NODE_IP:-}"
-  if [[ -z "${single_node_ip}" && -n "${NODE_IP_LIST:-}" ]]; then
+  single_node_ip=""
+  if [[ -n "${NODE_IP_LIST:-}" ]]; then
     first_item="${NODE_IP_LIST%%,*}"
     single_node_ip="${first_item%%:*}"
+  fi
+  if [[ -z "${single_node_ip}" ]]; then
+    single_node_ip="${NODE_IP:-}"
   fi
   if [[ -z "${single_node_ip}" ]]; then
     single_node_ip="${CHIEF_IP:-127.0.0.1}"
@@ -41,11 +44,12 @@ if [[ -z "${NODE_IP_LIST:-}" || -z "${NODE_IP:-}" ]]; then
 fi
 
 IFS=',' read -ra ITEMS <<< "$NODE_IP_LIST"
+normalized_node_ip="${NODE_IP%%:*}"
 
 NODE_RANK=""
 for i in "${!ITEMS[@]}"; do
   ip="${ITEMS[$i]%%:*}" # strip ":8"
-  if [[ "$ip" == "$NODE_IP" ]]; then
+  if [[ "$ip" == "$normalized_node_ip" ]]; then
     NODE_RANK="$i"
     break
   fi
@@ -55,6 +59,9 @@ if [[ -z "$NODE_RANK" ]]; then
   echo "ERROR: NODE_IP=$NODE_IP not found in NODE_IP_LIST=$NODE_IP_LIST" >&2
   exit 1
 fi
+
+# Always use the canonical IP from NODE_IP_LIST for this node.
+NODE_IP="${ITEMS[$NODE_RANK]%%:*}"
 
 RAY_HEAD_IP="${CHIEF_IP:-${ITEMS[0]%%:*}}"
 RAY_ADDRESS="${RAY_HEAD_IP}:${RAY_PORT}"
