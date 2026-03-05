@@ -11,10 +11,6 @@ try:
     from .ray_execution import run_ray_jobs
 except ImportError:
     from ray_execution import run_ray_jobs
-try:
-    from .vram_estimation import estimate_job_vram_gb
-except ImportError:
-    from vram_estimation import estimate_job_vram_gb
 
 DEFAULT_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -234,12 +230,10 @@ def _is_vit_model(total_args: List[str], config_model_name: str, fallback_model_
 def _build_jobs(
     args: argparse.Namespace,
     experiments: List[Dict[str, Any]],
-    base_train_common: List[str],
     runner_extra: List[str],
     status_file_path: str,
 ) -> List[Dict[str, Any]]:
     finished_names = _load_finished_names(status_file_path)
-    config_cache: Dict[str, Dict[str, Any]] = {}
     jobs: List[Dict[str, Any]] = []
     for exp in experiments:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -252,24 +246,12 @@ def _build_jobs(
             print(f"Skipping finished experiment: {exp_name}")
             continue
 
-        if exp_config not in config_cache:
-            config_cache[exp_config] = _load_yaml_dict(exp_config)
-        estimate = estimate_job_vram_gb(
-            ray_gpus_per_node=max(1, int(args.ray_gpus_per_group)),
-            config_data=config_cache[exp_config],
-            base_train_common=base_train_common,
-            exp_extra=exp_extra,
-            runner_extra=runner_extra,
-        )
-
         jobs.append({
             "name": exp_name,
             "config": exp_config,
             "extra": exp_extra,
             "runner_extra": list(runner_extra),
             "log_path": os.path.join(args.log_dir, f"{exp_name}_{ts}.txt"),
-            "estimated_vram_gb": float(estimate["estimated_vram_gb"]),
-            "vram_factors": dict(estimate["vram_factors"]),
             "status_file": exp_status_file,
         })
     return jobs
@@ -358,7 +340,7 @@ def main() -> None:
         "--target-key", "fine_label",
         "--balanced-mode", "500",
         "--num-classes", "100",
-        "--num-steps", "10000", 
+        "--num-steps", "10000",
         "--warmup-steps", "500",
         "--img-size", "32",
     ]
@@ -373,7 +355,7 @@ def main() -> None:
 
 
         for lr in learning_rates:
-            total_args = [*cifar100_args, *extra]
+            total_args = [*imagenet_args, *extra]
             model = os.path.splitext(os.path.basename(model_config))[0]
             model_kwargs_args: List[str] = []
             config_model_name = str(config_data.get("model") or "")
@@ -389,7 +371,7 @@ def main() -> None:
                     f"img_size={model_img_size}",
                 ]
                 if not config_model_name.lower().startswith("vit_base"):
-                    model_kwargs_args.append("fix_init=True") 
+                    model_kwargs_args.append("fix_init=True")
                 total_args = total_args + model_kwargs_args
 
             exp_name = f"baseline_imagenet1k_{model}_lr{lr}"
@@ -408,7 +390,6 @@ def main() -> None:
     jobs = _build_jobs(
         args=args,
         experiments=experiments,
-        base_train_common=base_train_common,
         runner_extra=list(extra),
         status_file_path=status_file_path,
     )

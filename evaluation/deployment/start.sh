@@ -10,15 +10,13 @@ cd "${PROJECT_ROOT}"
 # If NODE_IP_LIST or NODE_IP is missing, we fall back to single-node mode.
 #
 # User-configurable knobs (optional overrides; defaults are provided):
-INITIAL_NODE_STAGGER_SECONDS="${INITIAL_NODE_STAGGER_SECONDS:-30}"
-EXPERIMENT_STAGGER_SECONDS="${EXPERIMENT_STAGGER_SECONDS:-15}"
+INITIAL_NODE_STAGGER_SECONDS="${INITIAL_NODE_STAGGER_SECONDS:-0}"
+EXPERIMENT_STAGGER_SECONDS="${EXPERIMENT_STAGGER_SECONDS:-0}"
 
 # Auto-detected capacity knobs (leave empty/default to auto-detect):
 # - NODE_CPU_COUNT: local logical CPU count
-# - Per-group VRAM budget is auto-detected from nvidia-smi
 NODE_CPU_COUNT="$(nproc)"
 CPU_PER_EXPERIMENT="${CPU_PER_EXPERIMENT:-6}"
-RAY_VRAM_RESERVE_GB="${RAY_VRAM_RESERVE_GB:-0}"
 # HOST_GPU_NUM=""
 RAY_GPUS_PER_GROUP="${RAY_GPUS_PER_GROUP:-2}"
 MAX_EXPERIMENTS_PER_GROUP="${MAX_EXPERIMENTS_PER_GROUP:-2}"
@@ -98,11 +96,7 @@ echo "GPU group config: ${GROUPS_PER_NODE} groups/node, ${RAY_GPUS_PER_GROUP} GP
 RAY_RESOURCES_JSON=""
 if group_resources="$("${PYTHON_BIN}" "${HELPER_PY}" build-group-resources \
   --gpus-per-group "${RAY_GPUS_PER_GROUP}" \
-  --max-experiments-per-group "${MAX_EXPERIMENTS_PER_GROUP}" \
-  --mode "free" \
-  --aggregate "min" \
-  --reserve-gb "${RAY_VRAM_RESERVE_GB}" \
-  --require-vram)"; then
+  --max-experiments-per-group "${MAX_EXPERIMENTS_PER_GROUP}")"; then
   RAY_RESOURCES_JSON="${group_resources}"
   echo "Ray custom group resources: ${RAY_RESOURCES_JSON}"
 else
