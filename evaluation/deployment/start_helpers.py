@@ -11,29 +11,6 @@ from typing import Dict
 GROUP_RESOURCE_PREFIX = "GPU_GROUP"
 
 
-def wait_ray(args: argparse.Namespace) -> int:
-    try:
-        import ray
-    except Exception as exc:
-        raise RuntimeError("Failed to import ray while waiting for Ray readiness.") from exc
-
-    deadline = time.time() + max(1, int(args.timeout_seconds))
-    last_err = None
-    while time.time() < deadline:
-        try:
-            ray.init(address=args.address, ignore_reinit_error=True)
-            # Connection success is enough for readiness here. Some Ray builds
-            # can stall on immediate resource RPCs right after init.
-            print(f"Ray connected: {args.address}")
-            ray.shutdown()
-            return 0
-        except Exception as exc:
-            last_err = exc
-            time.sleep(2)
-
-    raise RuntimeError(f"Ray not ready at {args.address}: {last_err}")
-
-
 def wait_tcp(args: argparse.Namespace) -> int:
     deadline = time.time() + max(1, int(args.timeout_seconds))
     last_err = None
@@ -113,11 +90,6 @@ def build_group_resources(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Helpers for deployment/start.sh")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    p_wait_ray = sub.add_parser("wait-ray", help="Wait until Ray cluster is connectable.")
-    p_wait_ray.add_argument("--address", required=True)
-    p_wait_ray.add_argument("--timeout-seconds", type=int, default=120)
-    p_wait_ray.set_defaults(func=wait_ray)
 
     p_wait_tcp = sub.add_parser("wait-tcp", help="Wait until TCP endpoint is reachable.")
     p_wait_tcp.add_argument("--host", required=True)

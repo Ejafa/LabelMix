@@ -153,11 +153,6 @@ if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
   fi
   "${ray_head_cmd[@]}"
 
-  echo "Head node (rank ${NODE_RANK}): waiting for Ray cluster readiness at ${RAY_ADDRESS}"
-  "${PYTHON_BIN}" "${HELPER_PY}" wait-ray \
-    --address "${RAY_ADDRESS}" \
-    --timeout-seconds 120
-
   for arg in "$@"; do
     if [[ "${arg}" == "--ray-gpus-per-node" || "${arg}" == --ray-gpus-per-node=* ]]; then
       echo "ERROR: --ray-gpus-per-node cannot be passed explicitly; it is auto-detected from node GPUs." >&2
