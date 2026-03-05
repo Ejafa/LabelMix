@@ -15,12 +15,16 @@ This directory contains the baseline experiment launcher and Ray scheduler used 
 1. Parse CLI args and set defaults (`output-root`, `log-dir`, `status-file`) relative to `project-root`.
 2. Build experiments from `configs/` and learning-rate sweep values.
 3. Call `vram_estimation.estimate_job_vram_gb(...)` and attach VRAM metadata (`estimated_vram_gb`, factors, log path, status path).
-4. In Ray mode, sort jobs by estimated VRAM (largest first), reserve a placement group, then launch `torchrun`.
+4. In Ray mode, sort jobs by estimated VRAM (largest first), reserve a placement group on one eligible GPU group, then launch `torchrun`.
 5. Emit launch/termination scheduler events and release placement groups when jobs finish.
 
 ## Key properties
 
-- VRAM scheduling is based on a **custom Ray resource** (`VRAM_GB`) and currently uses **integer units** (estimates are rounded up).
+- Group scheduling is based on per-group custom Ray resources:
+  - `<prefix>_<group_idx>_SLOTS` (group concurrency cap)
+  - `<prefix>_<group_idx>_VRAM_GB` (group VRAM budget, integer units)
+- Resource prefix is fixed to `GPU_GROUP`; group size is controlled by `--ray-gpus-per-group`.
+- `--max-experiments-per-group` limits concurrent jobs per group independently of VRAM.
 - VRAM estimation logic is intentionally isolated in `vram_estimation.py` so scheduling heuristics can be tuned without changing launcher/scheduler flow.
 - Placement groups are **single-bundle per experiment** in this setup (single-node experiments).
 - Finished jobs are skipped using:

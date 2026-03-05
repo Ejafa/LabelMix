@@ -9,11 +9,13 @@ import subprocess
 import time
 from collections import deque
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 try:
     from .ray_scheduler_logging import RaySchedulerLogger
 except ImportError:
     from ray_scheduler_logging import RaySchedulerLogger
+
+GROUP_RESOURCE_PREFIX = "GPU_GROUP"
 
 
 def _upsert_flag(args_list: List[str], flag: str, value: Optional[str] = None) -> None:
@@ -37,14 +39,103 @@ def _vram_resource_units(estimated_vram_gb: float) -> int:
     return int(math.ceil(value))
 
 
+def _discover_gpu_group_resources(cluster_resources: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract group slot/VRAM resources from Ray cluster resources.
+
+    Simple mapping:
+        {"GPU_GROUP_0_SLOTS": 2.0}
+        -> [{"index": 0, "slots_resource": "GPU_GROUP_0_SLOTS", "slots_total": 2.0}]
+
+    Example input:
+        cluster_resources = {
+            "CPU": 64.0,
+            "GPU_GROUP_0_SLOTS": 1.0,
+            "GPU_GROUP_0_VRAM_GB": 72.0,
+            "GPU_GROUP_1_SLOTS": 1.0,
+        }
+        resource_prefix = GROUP_RESOURCE_PREFIX
+
+    Example output:
+        [
+            {
+                "index": 0,
+                "slots_resource": "GPU_GROUP_0_SLOTS",
+                "slots_total": 1.0,
+                "vram_resource": "GPU_GROUP_0_VRAM_GB",
+                "vram_total": 72.0,
+            },
+            {
+                "index": 1,
+                "slots_resource": "GPU_GROUP_1_SLOTS",
+                "slots_total": 1.0,
+            },
+        ]
+    """
+    prefix = f"{GROUP_RESOURCE_PREFIX}_"
+    slot_suffix = "_SLOTS"
+    vram_suffix = "_VRAM_GB"
+    grouped: Dict[int, Dict[str, Any]] = {}
+
+    for resource_name, raw_capacity in cluster_resources.items():
+        if not resource_name.startswith(prefix):
+            continue
+        try:
+            capacity = float(raw_capacity)
+        except (TypeError, ValueError):
+            continue
+        if capacity <= 0:
+            continue
+
+        if resource_name.endswith(slot_suffix):
+            idx_text = resource_name[len(prefix):-len(slot_suffix)]
+            if idx_text.isdigit():
+                idx = int(idx_text)
+                item = grouped.setdefault(idx, {"index": idx})
+                item["slots_resource"] = resource_name
+                item["slots_total"] = capacity
+        elif resource_name.endswith(vram_suffix):
+            idx_text = resource_name[len(prefix):-len(vram_suffix)]
+            if idx_text.isdigit():
+                idx = int(idx_text)
+                item = grouped.setdefault(idx, {"index": idx})
+                item["vram_resource"] = resource_name
+                item["vram_total"] = capacity
+
+    discovered: List[Dict[str, Any]] = []
+    for idx in sorted(grouped):
+        item = grouped[idx]
+        if "slots_resource" not in item:
+            continue
+        discovered.append(item)
+    return discovered
+
+
+def _group_gpu_ids(group_index: int, gpus_per_group: int) -> List[str]:
+    start = int(group_index) * int(gpus_per_group)
+    return [str(start + offset) for offset in range(int(gpus_per_group))]
+
+
 def run_ray_jobs(
     args: argparse.Namespace,
     jobs: List[Dict[str, Any]],
     base_train_common: List[str],
-    status_file_path: str,
 ) -> None:
-    if args.ray_gpus_per_node <= 0:
+    ray_gpus_per_node = int(args.ray_gpus_per_node)
+    ray_gpus_per_group = int(getattr(args, "ray_gpus_per_group", ray_gpus_per_node))
+    max_experiments_per_group = int(getattr(args, "max_experiments_per_group", 1))
+    group_resource_prefix = GROUP_RESOURCE_PREFIX
+
+    if ray_gpus_per_node <= 0:
         raise ValueError("--ray-gpus-per-node must be >= 1")
+    if ray_gpus_per_group <= 0:
+        raise ValueError("--ray-gpus-per-group must be >= 1")
+    if ray_gpus_per_node % ray_gpus_per_group != 0:
+        raise ValueError(
+            f"--ray-gpus-per-node ({ray_gpus_per_node}) must be divisible by "
+            f"--ray-gpus-per-group ({ray_gpus_per_group})"
+        )
+    if max_experiments_per_group <= 0:
+        raise ValueError("--max-experiments-per-group must be >= 1")
     if args.cpu_per_experiment <= 0:
         raise ValueError("--cpu-per-experiment must be >= 1")
 
@@ -75,26 +166,70 @@ def run_ray_jobs(
         cluster = ray.cluster_resources()
         logger.info(f"Connected to Ray cluster. Resources: {cluster}")
 
-        vram_resource_name = "VRAM_GB"
-        total_cluster_vram_units = int(float(cluster.get(vram_resource_name, 0.0)))
+        legacy_vram_resource_name = "VRAM_GB"
         all_requested_vram_units = [_vram_resource_units(float(job.get("estimated_vram_gb", 0.0))) for job in jobs]
         all_requested_vram_units = [v for v in all_requested_vram_units if v > 0]
-        if all_requested_vram_units and total_cluster_vram_units <= 0:
+
+        gpu_group_resources = _discover_gpu_group_resources(cluster)
+        use_group_scheduling = bool(gpu_group_resources)
+        gpu_group_cycle: Deque[Dict[str, Any]] = deque(gpu_group_resources)
+
+        if not use_group_scheduling and ray_gpus_per_group != ray_gpus_per_node:
+            raise ValueError(
+                "Group-aware scheduling requested, but no group resources were discovered. "
+                f"Expected resources named like '{group_resource_prefix}_<group_idx>_SLOTS'."
+            )
+        if not use_group_scheduling and max_experiments_per_group != 1:
+            logger.info(
+                "Warning: --max-experiments-per-group is ignored without discovered group resources."
+            )
+
+        total_cluster_vram_units = int(float(cluster.get(legacy_vram_resource_name, 0.0)))
+        if not use_group_scheduling and all_requested_vram_units and total_cluster_vram_units <= 0:
             raise ValueError(
                 "VRAM scheduling enabled by per-experiment estimation, "
-                f"but cluster resource '{vram_resource_name}' is unavailable."
+                f"but cluster resource '{legacy_vram_resource_name}' is unavailable and "
+                f"no '{group_resource_prefix}_*_VRAM_GB' group resources were found."
             )
+        if use_group_scheduling and all_requested_vram_units:
+            groups_with_vram = [
+                item for item in gpu_group_resources if item.get("vram_resource")
+            ]
+            if not groups_with_vram:
+                raise ValueError(
+                    "VRAM scheduling enabled by per-experiment estimation, but no per-group VRAM resources were found. "
+                    f"Expected resources named like '{group_resource_prefix}_<group_idx>_VRAM_GB'."
+                )
 
         logger.info(
             "Ray scheduling config: "
-            f"nodes/exp={ray_nodes_per_exp}, gpus/node={args.ray_gpus_per_node}, "
+            f"nodes/exp={ray_nodes_per_exp}, gpus/node={ray_gpus_per_node}, "
+            f"gpus/group={ray_gpus_per_group}, max_exp/group={max_experiments_per_group}, "
             f"cpu/exp={args.cpu_per_experiment}, strategy={args.ray_strategy}, "
             "parallelism=dynamic"
         )
-        if all_requested_vram_units:
+        if use_group_scheduling:
+            logger.info(
+                f"Ray group scheduling enabled: prefix={group_resource_prefix}, discovered_groups={len(gpu_group_resources)}"
+            )
+            if all_requested_vram_units:
+                group_vram_totals = [
+                    int(float(item.get("vram_total", 0.0)))
+                    for item in gpu_group_resources
+                    if item.get("vram_resource")
+                ]
+                if group_vram_totals:
+                    logger.info(
+                        "Ray group VRAM scheduling: "
+                        f"groups_with_vram={len(group_vram_totals)}, "
+                        f"min_group_total={min(group_vram_totals)}, max_group_total={max(group_vram_totals)}, "
+                        f"min_per_exp={min(all_requested_vram_units)}, max_per_exp={max(all_requested_vram_units)} "
+                        "(integer units)"
+                    )
+        elif all_requested_vram_units:
             logger.info(
                 "Ray VRAM scheduling: "
-                f"resource={vram_resource_name}, total={total_cluster_vram_units}, "
+                f"resource={legacy_vram_resource_name}, total={total_cluster_vram_units}, "
                 f"min_per_exp={min(all_requested_vram_units)}, max_per_exp={max(all_requested_vram_units)} "
                 "(integer units)"
             )
@@ -171,7 +306,7 @@ def run_ray_jobs(
             cmd = [
                 "torchrun",
                 "--nnodes=1",
-                f"--nproc_per_node={args.ray_gpus_per_node}",
+                f"--nproc_per_node={ray_gpus_per_group}",
                 "train.py",
                 "-c", exp_config,
                 *base_train_common,
@@ -189,50 +324,118 @@ def run_ray_jobs(
                     logger.info(
                         "VRAM budget per experiment: "
                         f"estimated={estimated_vram_gb:.3f}GB, requested={requested_vram_units} "
-                        f"({vram_resource_name})"
+                        "(integer units)"
                     )
                     logger.info(f"VRAM factors: {vram_factors}")
+                if use_group_scheduling:
+                    logger.info(
+                        f"GPU group placement: prefix={group_resource_prefix}, "
+                        f"group_size={ray_gpus_per_group}, candidate_groups={len(gpu_group_resources)}"
+                    )
                 logger.info(f"Expected output: {expected_output_dir}")
                 logger.info(f"Log: {log_path}")
                 return "scheduled"
 
-            bundle: Dict[str, float] = {"CPU": float(args.cpu_per_experiment)}
-            if requested_vram_units > 0:
-                bundle[vram_resource_name] = requested_vram_units
+            selected_pg = None
+            selected_group_index: Optional[int] = None
+            selected_group_slots_resource = ""
+            selected_group_vram_resource = ""
+            selected_group_gpu_ids = [str(i) for i in range(ray_gpus_per_group)]
+            task_resources: Dict[str, float] = {}
 
-            pg = placement_group(bundles=[bundle], strategy=args.ray_strategy)
-            try:
-                ray.get(pg.ready(), timeout=pg_probe_timeout_seconds)
-            except RayGetTimeoutError:
-                remove_placement_group(pg)
-                return "pending_capacity"
-            except Exception as exc:
-                logger.info(f"!!! Experiment {exp_name} FAILED: unable to reserve placement group: {exc}")
-                remove_placement_group(pg)
-                failures.append(exp_name)
-                return "failed"
+            if use_group_scheduling:
+                if not gpu_group_cycle:
+                    logger.info(
+                        f"!!! Experiment {exp_name} FAILED: no GPU group resources found for prefix '{group_resource_prefix}'."
+                    )
+                    failures.append(exp_name)
+                    return "failed"
+
+                attempts = len(gpu_group_cycle)
+                for _ in range(attempts):
+                    group = gpu_group_cycle[0]
+                    gpu_group_cycle.rotate(-1)
+
+                    group_index = int(group.get("index", -1))
+                    slot_resource = str(group["slots_resource"])
+                    vram_resource = str(group.get("vram_resource") or "")
+                    if requested_vram_units > 0 and not vram_resource:
+                        continue
+
+                    bundle: Dict[str, float] = {
+                        "CPU": float(args.cpu_per_experiment),
+                        slot_resource: 1.0,
+                    }
+                    candidate_task_resources: Dict[str, float] = {slot_resource: 1.0}
+                    if requested_vram_units > 0 and vram_resource:
+                        bundle[vram_resource] = float(requested_vram_units)
+                        candidate_task_resources[vram_resource] = float(requested_vram_units)
+
+                    pg = placement_group(bundles=[bundle], strategy=args.ray_strategy)
+                    try:
+                        ray.get(pg.ready(), timeout=pg_probe_timeout_seconds)
+                    except RayGetTimeoutError:
+                        remove_placement_group(pg)
+                        continue
+                    except Exception as exc:
+                        logger.info(
+                            f"!!! Experiment {exp_name} FAILED: unable to reserve placement group for "
+                            f"group {group_index}: {exc}"
+                        )
+                        remove_placement_group(pg)
+                        failures.append(exp_name)
+                        return "failed"
+
+                    selected_pg = pg
+                    selected_group_index = group_index
+                    selected_group_slots_resource = slot_resource
+                    selected_group_vram_resource = vram_resource
+                    selected_group_gpu_ids = _group_gpu_ids(group_index, ray_gpus_per_group)
+                    task_resources = candidate_task_resources
+                    break
+
+                if selected_pg is None:
+                    return "pending_capacity"
+            else:
+                bundle = {"CPU": float(args.cpu_per_experiment)}
+                if requested_vram_units > 0:
+                    bundle[legacy_vram_resource_name] = float(requested_vram_units)
+                    task_resources[legacy_vram_resource_name] = float(requested_vram_units)
+
+                pg = placement_group(bundles=[bundle], strategy=args.ray_strategy)
+                try:
+                    ray.get(pg.ready(), timeout=pg_probe_timeout_seconds)
+                except RayGetTimeoutError:
+                    remove_placement_group(pg)
+                    return "pending_capacity"
+                except Exception as exc:
+                    logger.info(f"!!! Experiment {exp_name} FAILED: unable to reserve placement group: {exc}")
+                    remove_placement_group(pg)
+                    failures.append(exp_name)
+                    return "failed"
+                selected_pg = pg
 
             scheduling = PlacementGroupSchedulingStrategy(
-                placement_group=pg,
+                placement_group=selected_pg,
                 placement_group_bundle_index=0,
                 placement_group_capture_child_tasks=True,
             )
             env_updates = {
                 "OMP_NUM_THREADS": "1",
-                "CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in range(args.ray_gpus_per_node)),
+                "CUDA_VISIBLE_DEVICES": ",".join(selected_group_gpu_ids),
             }
             task_options: Dict[str, Any] = dict(
                 num_gpus=0,
                 num_cpus=args.cpu_per_experiment,
                 scheduling_strategy=scheduling,
             )
-            if requested_vram_units > 0:
-                task_options["resources"] = {vram_resource_name: requested_vram_units}
+            if task_resources:
+                task_options["resources"] = dict(task_resources)
 
             ref = _run_torchrun.options(**task_options).remote(cmd, env_updates, log_path)
             running[ref] = {
                 "name": exp_name,
-                "pg": pg,
+                "pg": selected_pg,
                 "requested_vram_units": int(requested_vram_units),
                 "estimated_vram_gb": float(estimated_vram_gb),
                 "start_time": time.time(),
@@ -241,6 +444,10 @@ def run_ray_jobs(
                 "config": exp_config,
                 "task_ref": str(ref),
                 "command": cmd_str,
+                "group_index": selected_group_index,
+                "group_slots_resource": selected_group_slots_resource,
+                "group_vram_resource": selected_group_vram_resource,
+                "cuda_visible_devices": env_updates["CUDA_VISIBLE_DEVICES"],
             }
 
             logger.event(
@@ -254,6 +461,10 @@ def run_ray_jobs(
                     "command": cmd_str,
                     "log_path": log_path,
                     "output_dir": expected_output_dir,
+                    "group_index": selected_group_index,
+                    "group_slots_resource": selected_group_slots_resource,
+                    "group_vram_resource": selected_group_vram_resource,
+                    "cuda_visible_devices": env_updates["CUDA_VISIBLE_DEVICES"],
                 },
             )
             return "scheduled"
@@ -324,6 +535,10 @@ def run_ray_jobs(
                             "command": str(info.get("command", "")),
                             "log_path": str(info.get("log_path", "")),
                             "output_dir": str(info.get("output_dir", "")),
+                            "group_index": info.get("group_index"),
+                            "group_slots_resource": str(info.get("group_slots_resource", "")),
+                            "group_vram_resource": str(info.get("group_vram_resource", "")),
+                            "cuda_visible_devices": str(info.get("cuda_visible_devices", "")),
                         },
                     )
 
@@ -352,6 +567,10 @@ def run_ray_jobs(
                         "command": str(info.get("command", "")),
                         "log_path": str(info.get("log_path", "")),
                         "output_dir": str(info.get("output_dir", "")),
+                        "group_index": info.get("group_index"),
+                        "group_slots_resource": str(info.get("group_slots_resource", "")),
+                        "group_vram_resource": str(info.get("group_vram_resource", "")),
+                        "cuda_visible_devices": str(info.get("cuda_visible_devices", "")),
                     },
                 )
             running.clear()
