@@ -59,6 +59,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--ray-address", default="auto",
                         help="Ray cluster address. Use 'auto' for auto-discovery.")
+    parser.add_argument(
+        "--ray-init-timeout-seconds",
+        type=float,
+        default=float(os.environ.get("RAY_INIT_TIMEOUT_SECONDS", "90")),
+        help="Timeout for one ray.init() attempt.",
+    )
+    parser.add_argument(
+        "--ray-init-retries",
+        type=int,
+        default=int(os.environ.get("RAY_INIT_RETRIES", "3")),
+        help="How many times to retry ray.init() before failing.",
+    )
     parser.add_argument("--ray-nodes-per-exp", type=int, default=1,
                         help="Compatibility flag. Ray experiments are single-node and this is forced to 1.")
     parser.add_argument("--ray-gpus-per-node", type=int, default=_env_int("HOST_GPU_NUM", 1),
