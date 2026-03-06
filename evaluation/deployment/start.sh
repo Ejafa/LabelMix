@@ -5,6 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
+# Prefer env-local C++ runtime symbols (GLIBCXX) over base image libs.
+SHARED_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+DEPLOY_ENV_PATH="${DEPLOY_ENV_PATH:-${SHARED_ROOT}/labelmix_env}"
+if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
+  export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+elif [[ -d "${DEPLOY_ENV_PATH}/lib" ]]; then
+  export LD_LIBRARY_PATH="${DEPLOY_ENV_PATH}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 # Required environment variables (typically provided by Taiji runtime):
 # NODE_IP_LIST, NODE_IP
 # If NODE_IP_LIST or NODE_IP is missing, we fall back to single-node mode.
@@ -59,7 +68,7 @@ if ! rank_for_ip "${RAY_HEAD_IP}" >/dev/null; then
   exit 1
 fi
 
-NODE_RANK=""
+NODE_RANK="0"
 if [[ "${INDEX:-}" =~ ^[0-9]+$ ]] && (( INDEX < ${#ITEMS[@]} )); then
   NODE_RANK="${INDEX}"
 fi

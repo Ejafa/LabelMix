@@ -141,7 +141,7 @@ def run_ray_jobs(
 
         ray_nodes_per_exp = 1
 
-        ray.init(address=args.ray_address, ignore_reinit_error=True)
+        ray.init(address=args.ray_address)
         cluster = ray.cluster_resources()
         logger.info(f"Connected to Ray cluster. Resources: {cluster}")
 
