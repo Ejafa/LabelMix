@@ -5,19 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-# Prefer env-local C++ runtime symbols (GLIBCXX) over base image libs.
-SHARED_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
-DEPLOY_ENV_PATH="${DEPLOY_ENV_PATH:-${SHARED_ROOT}/labelmix_env}"
-DEPLOY_ENV_BIN="${DEPLOY_ENV_PATH}/bin"
-if [[ -d "${DEPLOY_ENV_BIN}" ]]; then
-  export PATH="${DEPLOY_ENV_BIN}:${PATH}"
-fi
-if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
-  export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-elif [[ -d "${DEPLOY_ENV_PATH}/lib" ]]; then
-  export LD_LIBRARY_PATH="${DEPLOY_ENV_PATH}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-fi
-
 # Required environment variables (typically provided by Taiji runtime):
 # NODE_IP_LIST, NODE_IP
 # If NODE_IP_LIST or NODE_IP is missing, we fall back to single-node mode.
@@ -26,9 +13,7 @@ fi
 INITIAL_NODE_STAGGER_SECONDS="${INITIAL_NODE_STAGGER_SECONDS:-30}"
 EXPERIMENT_STAGGER_SECONDS="${EXPERIMENT_STAGGER_SECONDS:-15}"
 
-# Auto-detected capacity knobs (leave empty/default to auto-detect):
-# - NODE_CPU_COUNT: local logical CPU count
-NODE_CPU_COUNT="$(nproc)"
+# Capacity knobs:
 CPU_PER_EXPERIMENT="${CPU_PER_EXPERIMENT:-6}"
 # HOST_GPU_NUM=""
 RAY_GPUS_PER_GROUP="${RAY_GPUS_PER_GROUP:-2}"
@@ -96,30 +81,20 @@ NODE_IP="${ITEMS[$NODE_RANK]%%:*}"
 
 RUN_PROJECT_ROOT="${RUN_PROJECT_ROOT:-${RUN_STORAGE_ROOT:-${PROJECT_ROOT}}}"
 
-if [[ -x "${DEPLOY_ENV_BIN}/python" ]]; then
-  PYTHON_BIN="${DEPLOY_ENV_BIN}/python"
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="$(command -v python)"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="$(command -v python3)"
-else
-  echo "ERROR: neither python nor python3 is available in PATH." >&2
+if ! command -v python >/dev/null 2>&1; then
+  echo "ERROR: python command not found in PATH." >&2
   exit 1
 fi
 
-if [[ -x "${DEPLOY_ENV_BIN}/ray" ]]; then
-  RAY_BIN="${DEPLOY_ENV_BIN}/ray"
-elif command -v ray >/dev/null 2>&1; then
-  RAY_BIN="$(command -v ray)"
-else
+if ! command -v ray >/dev/null 2>&1; then
   echo "ERROR: ray command not found. Install Ray in the environment first." >&2
   exit 1
 fi
 
-PYTHON_VERSION="$("${PYTHON_BIN}" -V 2>&1 | head -n1 || true)"
-RAY_VERSION="$("${RAY_BIN}" --version 2>&1 | head -n1 || true)"
-echo "Runtime binaries: python=${PYTHON_BIN} (${PYTHON_VERSION})"
-echo "Runtime binaries: ray=${RAY_BIN} (${RAY_VERSION})"
+PYTHON_VERSION="$(python -V 2>&1 | head -n1 || true)"
+RAY_VERSION="$(ray --version 2>&1 | head -n1 || true)"
+echo "Runtime binaries: python (${PYTHON_VERSION})"
+echo "Runtime binaries: ray (${RAY_VERSION})"
 
 HELPER_PY="${SCRIPT_DIR}/start_helpers.py"
 if [[ ! -f "${HELPER_PY}" ]]; then
@@ -127,7 +102,7 @@ if [[ ! -f "${HELPER_PY}" ]]; then
   exit 1
 fi
 
-if detected_gpu_num="$("${PYTHON_BIN}" "${HELPER_PY}" detect-gpu-count)"; then
+if detected_gpu_num="$(python "${HELPER_PY}" detect-gpu-count)"; then
   HOST_GPU_NUM="${detected_gpu_num}"
 else
   echo "ERROR: failed to detect GPU count for this node." >&2
@@ -142,11 +117,17 @@ if [[ "${MAX_EXPERIMENTS_PER_GROUP}" -le 0 ]]; then
   exit 1
 fi
 GROUPS_PER_NODE=$((HOST_GPU_NUM / RAY_GPUS_PER_GROUP))
+NODE_CPU_COUNT=$((GROUPS_PER_NODE * MAX_EXPERIMENTS_PER_GROUP * CPU_PER_EXPERIMENT))
+if [[ "${NODE_CPU_COUNT}" -le 0 ]]; then
+  echo "ERROR: computed NODE_CPU_COUNT must be >= 1 (got ${NODE_CPU_COUNT})" >&2
+  exit 1
+fi
 echo "Detected GPUs/node: ${HOST_GPU_NUM}"
 echo "GPU group config: ${GROUPS_PER_NODE} groups/node, ${RAY_GPUS_PER_GROUP} GPUs/group, max ${MAX_EXPERIMENTS_PER_GROUP} experiments/group"
+echo "CPU config: ray_num_cpus=${NODE_CPU_COUNT} (= ${GROUPS_PER_NODE} * ${MAX_EXPERIMENTS_PER_GROUP} * ${CPU_PER_EXPERIMENT})"
 
 RAY_RESOURCES_JSON=""
-if group_resources="$("${PYTHON_BIN}" "${HELPER_PY}" build-group-resources \
+if group_resources="$(python "${HELPER_PY}" build-group-resources \
   --gpus-per-group "${RAY_GPUS_PER_GROUP}" \
   --max-experiments-per-group "${MAX_EXPERIMENTS_PER_GROUP}")"; then
   RAY_RESOURCES_JSON="${group_resources}"
@@ -163,11 +144,11 @@ if [[ "$INITIAL_NODE_STAGGER_SECONDS" -gt 0 && "$NODE_RANK" -gt 0 ]]; then
 fi
 
 echo "Node rank ${NODE_RANK}: restarting Ray runtime."
-"${RAY_BIN}" stop --force >/dev/null 2>&1 || true
+ray stop --force >/dev/null 2>&1 || true
 
 if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
   echo "Head node (rank ${NODE_RANK}): starting Ray head at ${NODE_IP}:${RAY_PORT}"
-  ray_head_cmd=("${RAY_BIN}" start --head \
+  ray_head_cmd=(ray start --head \
     --node-ip-address "${NODE_IP}" \
     --port "${RAY_PORT}" \
     --num-gpus "${HOST_GPU_NUM}" \
@@ -185,7 +166,7 @@ if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
   done
 
   cmd=(
-    "${PYTHON_BIN}" evaluation/baselines/run_experiments.py
+    python evaluation/baselines/run_experiments.py
     --project-root "${RUN_PROJECT_ROOT}"
     --ray-address "${RAY_ADDRESS}"
     --ray-gpus-per-node "${HOST_GPU_NUM}"
@@ -200,13 +181,13 @@ if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
   "${cmd[@]}"
 else
   echo "Node rank ${NODE_RANK}: waiting for Ray head ${RAY_HEAD_IP}:${RAY_PORT}."
-  "${PYTHON_BIN}" "${HELPER_PY}" wait-tcp \
+  python "${HELPER_PY}" wait-tcp \
     --host "${RAY_HEAD_IP}" \
     --port "${RAY_PORT}" \
     --timeout-seconds 180
 
   echo "Node rank ${NODE_RANK}: starting Ray worker to ${RAY_ADDRESS} (blocking)."
-  ray_worker_cmd=("${RAY_BIN}" start \
+  ray_worker_cmd=(ray start \
     --address "${RAY_ADDRESS}" \
     --node-ip-address "${NODE_IP}" \
     --num-gpus "${HOST_GPU_NUM}" \
