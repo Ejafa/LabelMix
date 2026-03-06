@@ -1289,9 +1289,11 @@ def main():
     # Create training task (classification or distillation)
     task = None
 
+    param_counts = sum(m.numel() for m in model.parameters())
+
     if utils.is_primary(args):
         _logger.info(
-            f'Model {safe_model_name(args.model)} created, param count:{sum([m.numel() for m in model.parameters()])}')
+            f'Model {safe_model_name(args.model)} created, param count:{param_counts}')
 
     data_config = resolve_data_config(vars(args), model=model, verbose=utils.is_primary(args))
 
@@ -1956,7 +1958,10 @@ def main():
                     resume="must" if args.wandb_resume_id else None,
                     id=args.wandb_resume_id if args.wandb_resume_id else None,
                 )
+                wandb.config.update({'param_counts': param_counts}, allow_val_change=True)
                 run = getattr(wandb, "run", None)
+                if run is not None:
+                    run.summary['param_counts'] = param_counts
                 run_id = getattr(run, "id", None) if run is not None else None
                 if run_id:
                     _update_training_status(
