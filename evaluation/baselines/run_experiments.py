@@ -4,17 +4,13 @@ import argparse
 import os
 import resource
 from datetime import datetime
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 import yaml
 try:
     from .ray_execution import run_ray_jobs
 except ImportError:
     from ray_execution import run_ray_jobs
-try:
-    from .vram_estimation import estimate_job_vram_gb
-except ImportError:
-    from vram_estimation import estimate_job_vram_gb
 
 DEFAULT_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -66,7 +62,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ray-nodes-per-exp", type=int, default=1,
                         help="Compatibility flag. Ray experiments are single-node and this is forced to 1.")
     parser.add_argument("--ray-gpus-per-node", type=int, default=_env_int("HOST_GPU_NUM", 1),
-                        help="GPUs allocated per Ray node for one experiment.")
+                        help="Total GPUs on each Ray node.")
+    parser.add_argument(
+        "--ray-gpus-per-group",
+        type=int,
+        default=_env_int("RAY_GPUS_PER_GROUP", _env_int("HOST_GPU_NUM", 1)),
+        help="GPUs used by one experiment (group size). Must divide --ray-gpus-per-node.",
+    )
+    parser.add_argument(
+        "--max-experiments-per-group",
+        type=int,
+        default=_env_int("MAX_EXPERIMENTS_PER_GROUP", 1),
+        help="Maximum concurrent experiments allowed on each GPU group.",
+    )
     parser.add_argument(
         "--cpu-per-experiment",
         "--ray-cpus-per-node",
@@ -169,15 +177,63 @@ def _load_yaml_dict(path: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _resolve_config_img_size(config_data: Dict[str, Any]) -> Optional[Any]:
+    config_model_kwargs = config_data.get("model_kwargs")
+    if isinstance(config_model_kwargs, dict) and config_model_kwargs.get("img_size") is not None:
+        return config_model_kwargs.get("img_size")
+    if config_data.get("img_size") is not None:
+        return config_data.get("img_size")
+    return None
+
+
+def _find_img_size_in_args(total_args: List[str]) -> Optional[str]:
+    # "Last write wins": later args in total_args override earlier ones.
+    img_size_value: Optional[str] = None
+    idx = 0
+    while idx < len(total_args):
+        token = total_args[idx]
+        if token == "--img-size" and idx + 1 < len(total_args):
+            img_size_value = str(total_args[idx + 1])
+            idx += 2
+            continue
+        idx += 1
+    return img_size_value
+
+
+def _resolve_final_img_size(total_args: List[str], config_img_size: Optional[Any]) -> Optional[Any]:
+    arg_img_size = _find_img_size_in_args(total_args)
+    return arg_img_size if arg_img_size is not None else config_img_size
+
+
+def _find_model_in_args(total_args: List[str]) -> Optional[str]:
+    # "Last write wins": later args in total_args override earlier ones.
+    model_value: Optional[str] = None
+    idx = 0
+    while idx < len(total_args):
+        token = total_args[idx]
+        if token == "--model" and idx + 1 < len(total_args):
+            model_value = str(total_args[idx + 1])
+            idx += 2
+            continue
+        if token.startswith("--model="):
+            model_value = token.split("=", 1)[1]
+        idx += 1
+    return model_value
+
+
+def _is_vit_model(total_args: List[str], config_model_name: str, fallback_model_name: str) -> bool:
+    arg_model_name = _find_model_in_args(total_args)
+    final_model_name = str(arg_model_name or config_model_name or fallback_model_name).strip().lower()
+    return final_model_name.startswith("vit")
+
+
 def _build_jobs(
     args: argparse.Namespace,
     experiments: List[Dict[str, Any]],
-    base_train_common: List[str],
     runner_extra: List[str],
     status_file_path: str,
 ) -> List[Dict[str, Any]]:
     finished_names = _load_finished_names(status_file_path)
-    config_cache: Dict[str, Dict[str, Any]] = {}
     jobs: List[Dict[str, Any]] = []
     for exp in experiments:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -190,24 +246,12 @@ def _build_jobs(
             print(f"Skipping finished experiment: {exp_name}")
             continue
 
-        if exp_config not in config_cache:
-            config_cache[exp_config] = _load_yaml_dict(exp_config)
-        estimate = estimate_job_vram_gb(
-            ray_gpus_per_node=max(1, int(args.ray_gpus_per_node)),
-            config_data=config_cache[exp_config],
-            base_train_common=base_train_common,
-            exp_extra=exp_extra,
-            runner_extra=runner_extra,
-        )
-
         jobs.append({
             "name": exp_name,
             "config": exp_config,
             "extra": exp_extra,
             "runner_extra": list(runner_extra),
             "log_path": os.path.join(args.log_dir, f"{exp_name}_{ts}.txt"),
-            "estimated_vram_gb": float(estimate["estimated_vram_gb"]),
-            "vram_factors": dict(estimate["vram_factors"]),
             "status_file": exp_status_file,
         })
     return jobs
@@ -230,9 +274,21 @@ def main() -> None:
     os.makedirs(args.output_root, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
 
-    nproc_per_experiment = int(args.ray_gpus_per_node)
+    total_gpus_per_node = int(args.ray_gpus_per_node)
+    nproc_per_experiment = int(args.ray_gpus_per_group)
+    max_experiments_per_group = int(args.max_experiments_per_group)
+
+    if total_gpus_per_node <= 0:
+        raise ValueError("--ray-gpus-per-node must be >= 1.")
     if nproc_per_experiment <= 0:
-        raise ValueError("Per-experiment GPU count must be >= 1.")
+        raise ValueError("--ray-gpus-per-group must be >= 1.")
+    if total_gpus_per_node % nproc_per_experiment != 0:
+        raise ValueError(
+            f"--ray-gpus-per-node ({total_gpus_per_node}) must be divisible by "
+            f"--ray-gpus-per-group ({nproc_per_experiment})."
+        )
+    if max_experiments_per_group <= 0:
+        raise ValueError("--max-experiments-per-group must be >= 1.")
 
     base_batch_size = 1024
     if base_batch_size % nproc_per_experiment != 0:
@@ -284,39 +340,89 @@ def main() -> None:
         "--target-key", "fine_label",
         "--balanced-mode", "500",
         "--num-classes", "100",
-        "--num-steps", "10000", 
+        "--num-steps", "10000",
         "--warmup-steps", "500",
-        "--img-size", "32",
+        "--img-size", "256",
     ]
 
-    model_configs = _load_model_configs(args.model_configs_path)
+    labelmix_common_args: List[str] = [
+        "--labelmix",
+        # "--labelmix-mix-k", "4",
+        # "--labelmix-k-min", "1",
+        # "--labelmix-k-max", "5",
+        # "--labelmix-k-schedule", "linear",
+        # "--labelmix-alpha-min", "1.0",
+        # "--labelmix-alpha-max", "1.0",
+        "--labelmix-schedule", "fixed",
+        "--labelmix-step-mode", "total",
+        # "--labelmix-sampling",
+        # "--labelmix-sampling-min-side-px", "8",
+        # "--labelmix-sampling-max-aspect", "10.0",
+        # "--labelmix-sampling-bins", "16",
+        # "--labelmix-sampling-pool-size", "256",
+        # "--labelmix-sampling-low-watermark", "64",
+        # "--labelmix-sampling-max-attempts", "200",
+
+        "--mixup", "0",
+        "--cutmix", "0",
+        "--mixup-prob", "0.0",
+    ]
+
+    # model_configs = _load_model_configs(args.model_configs_path)
+    model_configs = [
+        "evaluation/baselines/configs/mnv4-conv-medium.yaml",
+        "evaluation/baselines/configs/vit-wee.yaml",
+    ]
 
     experiments: List[Dict[str, Any]] = []
-    learning_rates = [0.0005, 0.001, 0.0015]
+    ks = [3, 4, 5, 6]
+    alpha = [0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0]
+    loss = ["pl_loss", "soft_ce"]
     for model_config in model_configs:
-        for lr in learning_rates:
-            model = os.path.splitext(os.path.basename(model_config))[0]
-            model_kwargs_args: List[str] = []
-            if model.startswith("vit_"):
-                model_kwargs_args = ["--model-kwargs", "fix_init=True", "img_size=256"]
-            exp_name = f"baseline_imagenet1k_{model}_lr{lr}"
-            experiments.append({
-                "name": exp_name,
-                "config": model_config,
-                "extra": [
-                    "--pin-mem",
-                    *model_kwargs_args,
-                    # *imagenet_args,
-                    *cifar100_args,
-                    "--lr", str(lr),
-                ],
-            })
+        config_data = _load_yaml_dict(model_config)
+        config_img_size = _resolve_config_img_size(config_data)
+        for k in ks:
+            for a in alpha:
+                for l in loss:
+                    total_args = [*imagenet_args, *extra, *labelmix_common_args,]
+                    model = os.path.splitext(os.path.basename(model_config))[0]
+                    model_kwargs_args: List[str] = []
+                    config_model_name = str(config_data.get("model") or "")
+                    is_vit_model = _is_vit_model(total_args, config_model_name, model)
+                    if is_vit_model:
+                        model_img_size = _resolve_final_img_size(total_args, config_img_size)
+                        if model_img_size is None:
+                            raise ValueError(
+                                f"Config '{model_config}' is missing 'img_size' required for ViT model kwargs."
+                            )
+                        model_kwargs_args = [
+                            "--model-kwargs",
+                            f"img_size={model_img_size}",
+                        ]
+                        if not config_model_name.lower().startswith("vit_base"):
+                            model_kwargs_args.append("fix_init=True")
+                        total_args = total_args + model_kwargs_args
+
+                    exp_name = f"baseline_imagenet1k_{model}_labelmix_k{k}_a{str(a).replace('.', 'p')}_loss{l}"
+                    experiments.append({
+                        "name": exp_name,
+                        "config": model_config,
+                        "extra": [
+                            "--pin-mem",
+                            *total_args,
+                            "--labelmix-mix-k", str(k),
+                            "--labelmix-k-min", str(k),
+                            "--labelmix-k-max", str(k),
+                            "--labelmix-alpha-min", str(a),
+                            "--labelmix-alpha-max", str(a),
+                            "--labelmix-loss", l,
+                        ],
+                    })
 
     status_file_path = str(args.status_file)
     jobs = _build_jobs(
         args=args,
         experiments=experiments,
-        base_train_common=base_train_common,
         runner_extra=list(extra),
         status_file_path=status_file_path,
     )
@@ -325,7 +431,6 @@ def main() -> None:
         args=args,
         jobs=jobs,
         base_train_common=base_train_common,
-        status_file_path=status_file_path,
     )
 
     print("\nAll experiments complete.")

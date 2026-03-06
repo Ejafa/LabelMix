@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # Required environment variables (typically provided by Taiji runtime):
-# NODE_IP_LIST, NODE_IP, HOST_GPU_NUM
+# NODE_IP_LIST, NODE_IP
 # If NODE_IP_LIST or NODE_IP is missing, we fall back to single-node mode.
 #
 # User-configurable knobs (optional overrides; defaults are provided):
@@ -15,55 +15,72 @@ EXPERIMENT_STAGGER_SECONDS="${EXPERIMENT_STAGGER_SECONDS:-15}"
 
 # Auto-detected capacity knobs (leave empty/default to auto-detect):
 # - NODE_CPU_COUNT: local logical CPU count
-# - RAY_VRAM_GB_PER_NODE: auto-detected from nvidia-smi
 NODE_CPU_COUNT="$(nproc)"
 CPU_PER_EXPERIMENT="${CPU_PER_EXPERIMENT:-6}"
-RAY_VRAM_RESERVE_GB="${RAY_VRAM_RESERVE_GB:-0}"
-# TODO: Should be automatic
-HOST_GPU_NUM="${HOST_GPU_NUM:-4}"
+# HOST_GPU_NUM=""
+RAY_GPUS_PER_GROUP="${RAY_GPUS_PER_GROUP:-2}"
+MAX_EXPERIMENTS_PER_GROUP="${MAX_EXPERIMENTS_PER_GROUP:-2}"
 
 # Ray execution knobs (manual defaults):
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_STRATEGY="${RAY_STRATEGY:-STRICT_SPREAD}"
 
-if [[ -z "${NODE_IP_LIST:-}" || -z "${NODE_IP:-}" ]]; then
-  single_node_ip="${NODE_IP:-}"
-  if [[ -z "${single_node_ip}" && -n "${NODE_IP_LIST:-}" ]]; then
-    first_item="${NODE_IP_LIST%%,*}"
-    single_node_ip="${first_item%%:*}"
-  fi
-  if [[ -z "${single_node_ip}" ]]; then
-    single_node_ip="${CHIEF_IP:-127.0.0.1}"
-  fi
-
+if [[ -z "${NODE_IP_LIST:-}" ]]; then
+  single_node_ip="${CHIEF_IP:-${NODE_IP:-127.0.0.1}}"
   NODE_IP="${single_node_ip}"
   NODE_IP_LIST="${single_node_ip}"
-  echo "NODE_IP_LIST or NODE_IP missing; assuming single-node deployment: NODE_IP=${NODE_IP}, NODE_IP_LIST=${NODE_IP_LIST}"
+  echo "NODE_IP_LIST missing; assuming single-node deployment: NODE_IP=${NODE_IP}, NODE_IP_LIST=${NODE_IP_LIST}"
 fi
 
 IFS=',' read -ra ITEMS <<< "$NODE_IP_LIST"
-
-NODE_RANK=""
-for i in "${!ITEMS[@]}"; do
-  ip="${ITEMS[$i]%%:*}" # strip ":8"
-  if [[ "$ip" == "$NODE_IP" ]]; then
-    NODE_RANK="$i"
-    break
-  fi
-done
-
-if [[ -z "$NODE_RANK" ]]; then
-  echo "ERROR: NODE_IP=$NODE_IP not found in NODE_IP_LIST=$NODE_IP_LIST" >&2
+if [[ "${#ITEMS[@]}" -eq 0 ]]; then
+  echo "ERROR: NODE_IP_LIST is empty." >&2
   exit 1
 fi
 
-if [[ -z "${HOST_GPU_NUM:-}" ]]; then
-  echo "ERROR: HOST_GPU_NUM is not set" >&2
-  exit 1
-fi
+rank_for_ip() {
+  local target_ip="${1%%:*}"
+  local i ip
+  for i in "${!ITEMS[@]}"; do
+    ip="${ITEMS[$i]%%:*}" # strip ":<slots>"
+    if [[ "$ip" == "$target_ip" ]]; then
+      printf '%s\n' "$i"
+      return 0
+    fi
+  done
+  return 1
+}
 
 RAY_HEAD_IP="${CHIEF_IP:-${ITEMS[0]%%:*}}"
+RAY_HEAD_IP="${RAY_HEAD_IP%%:*}"
 RAY_ADDRESS="${RAY_HEAD_IP}:${RAY_PORT}"
+if ! rank_for_ip "${RAY_HEAD_IP}" >/dev/null; then
+  echo "ERROR: head IP ${RAY_HEAD_IP} is not present in NODE_IP_LIST=${NODE_IP_LIST}" >&2
+  exit 1
+fi
+
+NODE_RANK=""
+if [[ "${INDEX:-}" =~ ^[0-9]+$ ]] && (( INDEX < ${#ITEMS[@]} )); then
+  NODE_RANK="${INDEX}"
+fi
+
+if [[ -z "${NODE_RANK}" ]]; then
+  for candidate_ip in "${LOCAL_IP:-}" "${NODE_IP:-}"; do
+    [[ -z "${candidate_ip}" ]] && continue
+    if NODE_RANK="$(rank_for_ip "${candidate_ip}")"; then
+      break
+    fi
+  done
+fi
+
+if [[ -z "${NODE_RANK}" ]]; then
+  echo "ERROR: could not resolve this node rank from INDEX/LOCAL_IP/NODE_IP against NODE_IP_LIST=${NODE_IP_LIST}" >&2
+  exit 1
+fi
+
+# Always use the canonical IP from NODE_IP_LIST for this node.
+NODE_IP="${ITEMS[$NODE_RANK]%%:*}"
+
 RUN_PROJECT_ROOT="${RUN_PROJECT_ROOT:-${RUN_STORAGE_ROOT:-${PROJECT_ROOT}}}"
 
 if command -v python >/dev/null 2>&1; then
@@ -81,31 +98,33 @@ if [[ ! -f "${HELPER_PY}" ]]; then
   exit 1
 fi
 
-RAY_VRAM_GB_PER_NODE=""
-if detected_vram="$("${PYTHON_BIN}" "${HELPER_PY}" detect-vram-gb \
-  --mode "free" \
-  --aggregate "min" \
-  --reserve-gb "${RAY_VRAM_RESERVE_GB}" 2>/dev/null)"; then
-  RAY_VRAM_GB_PER_NODE="${detected_vram}"
+if detected_gpu_num="$("${PYTHON_BIN}" "${HELPER_PY}" detect-gpu-count)"; then
+  HOST_GPU_NUM="${detected_gpu_num}"
 else
-  echo "Warning: could not auto-detect node VRAM budget; VRAM resource scheduling disabled."
+  echo "ERROR: failed to detect GPU count for this node." >&2
+  exit 1
 fi
+if (( HOST_GPU_NUM % RAY_GPUS_PER_GROUP != 0 )); then
+  echo "ERROR: detected GPU count (${HOST_GPU_NUM}) must be divisible by RAY_GPUS_PER_GROUP (${RAY_GPUS_PER_GROUP})" >&2
+  exit 1
+fi
+if [[ "${MAX_EXPERIMENTS_PER_GROUP}" -le 0 ]]; then
+  echo "ERROR: MAX_EXPERIMENTS_PER_GROUP must be >= 1 (got ${MAX_EXPERIMENTS_PER_GROUP})" >&2
+  exit 1
+fi
+GROUPS_PER_NODE=$((HOST_GPU_NUM / RAY_GPUS_PER_GROUP))
+echo "Detected GPUs/node: ${HOST_GPU_NUM}"
+echo "GPU group config: ${GROUPS_PER_NODE} groups/node, ${RAY_GPUS_PER_GROUP} GPUs/group, max ${MAX_EXPERIMENTS_PER_GROUP} experiments/group"
 
 RAY_RESOURCES_JSON=""
-if [[ -n "${RAY_VRAM_GB_PER_NODE}" ]]; then
-  if awk "BEGIN {exit !(${RAY_VRAM_GB_PER_NODE} > 0)}"; then
-    RAY_VRAM_GB_PER_NODE_INT="$(awk "BEGIN {print int(${RAY_VRAM_GB_PER_NODE})}")"
-    if awk "BEGIN {exit !(${RAY_VRAM_GB_PER_NODE_INT} > 0)}"; then
-      RAY_RESOURCES_JSON="{\"VRAM_GB\":${RAY_VRAM_GB_PER_NODE_INT}}"
-      echo "Ray custom resource budget: ${RAY_RESOURCES_JSON} (raw_detected=${RAY_VRAM_GB_PER_NODE}GB)"
-    else
-      echo "Warning: rounded VRAM budget is <= 0 (raw='${RAY_VRAM_GB_PER_NODE}'), ignoring VRAM resource."
-      RAY_VRAM_GB_PER_NODE=""
-    fi
-  else
-    echo "Warning: invalid RAY_VRAM_GB_PER_NODE='${RAY_VRAM_GB_PER_NODE}', ignoring VRAM resource."
-    RAY_VRAM_GB_PER_NODE=""
-  fi
+if group_resources="$("${PYTHON_BIN}" "${HELPER_PY}" build-group-resources \
+  --gpus-per-group "${RAY_GPUS_PER_GROUP}" \
+  --max-experiments-per-group "${MAX_EXPERIMENTS_PER_GROUP}")"; then
+  RAY_RESOURCES_JSON="${group_resources}"
+  echo "Ray custom group resources: ${RAY_RESOURCES_JSON}"
+else
+  echo "ERROR: failed to build Ray custom group resources." >&2
+  exit 1
 fi
 
 if [[ "$INITIAL_NODE_STAGGER_SECONDS" -gt 0 && "$NODE_RANK" -gt 0 ]]; then
@@ -122,8 +141,8 @@ fi
 echo "Node rank ${NODE_RANK}: restarting Ray runtime."
 ray stop --force >/dev/null 2>&1 || true
 
-if [[ "$NODE_RANK" == "0" ]]; then
-  echo "Node rank 0: starting Ray head at ${NODE_IP}:${RAY_PORT}"
+if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
+  echo "Head node (rank ${NODE_RANK}): starting Ray head at ${NODE_IP}:${RAY_PORT}"
   ray_head_cmd=(ray start --head \
     --node-ip-address "${NODE_IP}" \
     --port "${RAY_PORT}" \
@@ -134,16 +153,20 @@ if [[ "$NODE_RANK" == "0" ]]; then
   fi
   "${ray_head_cmd[@]}"
 
-  echo "Node rank 0: waiting for Ray cluster readiness at ${RAY_ADDRESS}"
-  "${PYTHON_BIN}" "${HELPER_PY}" wait-ray \
-    --address "${RAY_ADDRESS}" \
-    --timeout-seconds 120
+  for arg in "$@"; do
+    if [[ "${arg}" == "--ray-gpus-per-node" || "${arg}" == --ray-gpus-per-node=* ]]; then
+      echo "ERROR: --ray-gpus-per-node cannot be passed explicitly; it is auto-detected from node GPUs." >&2
+      exit 1
+    fi
+  done
 
   cmd=(
     "${PYTHON_BIN}" evaluation/baselines/run_experiments.py
     --project-root "${RUN_PROJECT_ROOT}"
     --ray-address "${RAY_ADDRESS}"
     --ray-gpus-per-node "${HOST_GPU_NUM}"
+    --ray-gpus-per-group "${RAY_GPUS_PER_GROUP}"
+    --max-experiments-per-group "${MAX_EXPERIMENTS_PER_GROUP}"
     --cpu-per-experiment "${CPU_PER_EXPERIMENT}"
     --ray-strategy "${RAY_STRATEGY}"
     --stagger-seconds "${EXPERIMENT_STAGGER_SECONDS}"
