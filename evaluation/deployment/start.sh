@@ -8,6 +8,10 @@ cd "${PROJECT_ROOT}"
 # Prefer env-local C++ runtime symbols (GLIBCXX) over base image libs.
 SHARED_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 DEPLOY_ENV_PATH="${DEPLOY_ENV_PATH:-${SHARED_ROOT}/labelmix_env}"
+DEPLOY_ENV_BIN="${DEPLOY_ENV_PATH}/bin"
+if [[ -d "${DEPLOY_ENV_BIN}" ]]; then
+  export PATH="${DEPLOY_ENV_BIN}:${PATH}"
+fi
 if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 elif [[ -d "${DEPLOY_ENV_PATH}/lib" ]]; then
@@ -92,14 +96,30 @@ NODE_IP="${ITEMS[$NODE_RANK]%%:*}"
 
 RUN_PROJECT_ROOT="${RUN_PROJECT_ROOT:-${RUN_STORAGE_ROOT:-${PROJECT_ROOT}}}"
 
-if command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="python"
+if [[ -x "${DEPLOY_ENV_BIN}/python" ]]; then
+  PYTHON_BIN="${DEPLOY_ENV_BIN}/python"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="$(command -v python)"
 elif command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
+  PYTHON_BIN="$(command -v python3)"
 else
   echo "ERROR: neither python nor python3 is available in PATH." >&2
   exit 1
 fi
+
+if [[ -x "${DEPLOY_ENV_BIN}/ray" ]]; then
+  RAY_BIN="${DEPLOY_ENV_BIN}/ray"
+elif command -v ray >/dev/null 2>&1; then
+  RAY_BIN="$(command -v ray)"
+else
+  echo "ERROR: ray command not found. Install Ray in the environment first." >&2
+  exit 1
+fi
+
+PYTHON_VERSION="$("${PYTHON_BIN}" -V 2>&1 | head -n1 || true)"
+RAY_VERSION="$("${RAY_BIN}" --version 2>&1 | head -n1 || true)"
+echo "Runtime binaries: python=${PYTHON_BIN} (${PYTHON_VERSION})"
+echo "Runtime binaries: ray=${RAY_BIN} (${RAY_VERSION})"
 
 HELPER_PY="${SCRIPT_DIR}/start_helpers.py"
 if [[ ! -f "${HELPER_PY}" ]]; then
@@ -142,17 +162,12 @@ if [[ "$INITIAL_NODE_STAGGER_SECONDS" -gt 0 && "$NODE_RANK" -gt 0 ]]; then
   sleep "$delay"
 fi
 
-if ! command -v ray >/dev/null 2>&1; then
-  echo "ERROR: ray command not found. Install Ray in the environment first." >&2
-  exit 1
-fi
-
 echo "Node rank ${NODE_RANK}: restarting Ray runtime."
-ray stop --force >/dev/null 2>&1 || true
+"${RAY_BIN}" stop --force >/dev/null 2>&1 || true
 
 if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
   echo "Head node (rank ${NODE_RANK}): starting Ray head at ${NODE_IP}:${RAY_PORT}"
-  ray_head_cmd=(ray start --head \
+  ray_head_cmd=("${RAY_BIN}" start --head \
     --node-ip-address "${NODE_IP}" \
     --port "${RAY_PORT}" \
     --num-gpus "${HOST_GPU_NUM}" \
@@ -191,7 +206,7 @@ else
     --timeout-seconds 180
 
   echo "Node rank ${NODE_RANK}: starting Ray worker to ${RAY_ADDRESS} (blocking)."
-  ray_worker_cmd=(ray start \
+  ray_worker_cmd=("${RAY_BIN}" start \
     --address "${RAY_ADDRESS}" \
     --node-ip-address "${NODE_IP}" \
     --num-gpus "${HOST_GPU_NUM}" \

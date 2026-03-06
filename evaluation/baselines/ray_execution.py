@@ -3,90 +3,18 @@ from __future__ import annotations
 import argparse
 import os
 import resource
-import signal
 import socket
 import subprocess
-import threading
 import time
 from collections import deque
 from datetime import datetime
-from contextlib import contextmanager
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional
 try:
     from .ray_scheduler_logging import RaySchedulerLogger
 except ImportError:
     from ray_scheduler_logging import RaySchedulerLogger
 
 GROUP_RESOURCE_PREFIX = "GPU_GROUP"
-
-
-def _parse_ray_address_host_port(ray_address: str) -> Optional[Tuple[str, int]]:
-    value = str(ray_address or "").strip()
-    if not value or value == "auto":
-        return None
-    if value.startswith("ray://"):
-        value = value[len("ray://"):]
-    if "/" in value:
-        value = value.split("/", 1)[0]
-    if ":" not in value:
-        return None
-    host, port_text = value.rsplit(":", 1)
-    host = host.strip()
-    if not host:
-        return None
-    try:
-        port = int(port_text)
-    except ValueError:
-        return None
-    if port <= 0:
-        return None
-    return host, port
-
-
-def _wait_for_tcp_ready(host: str, port: int, timeout_seconds: float) -> None:
-    deadline = time.time() + max(1.0, float(timeout_seconds))
-    last_error: Optional[Exception] = None
-    while time.time() < deadline:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2.0)
-        try:
-            sock.connect((host, int(port)))
-            return
-        except Exception as exc:
-            last_error = exc
-            time.sleep(1.5)
-        finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
-    raise TimeoutError(f"TCP endpoint {host}:{port} not reachable within {timeout_seconds}s ({last_error})")
-
-
-@contextmanager
-def _ray_init_timeout_guard(timeout_seconds: float):
-    if timeout_seconds <= 0:
-        yield
-        return
-    if not hasattr(signal, "SIGALRM"):
-        yield
-        return
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-
-    def _handler(signum: int, frame: Any) -> None:
-        del signum, frame
-        raise TimeoutError(f"ray.init() timed out after {timeout_seconds:.1f}s")
-
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    signal.signal(signal.SIGALRM, _handler)
-    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _upsert_flag(args_list: List[str], flag: str, value: Optional[str] = None) -> None:
@@ -212,38 +140,13 @@ def run_ray_jobs(
             )
 
         ray_nodes_per_exp = 1
-
-        ray_init_timeout_seconds = max(5.0, float(getattr(args, "ray_init_timeout_seconds", 90.0)))
-        ray_init_retries = max(1, int(getattr(args, "ray_init_retries", 3)))
-        parsed_address = _parse_ray_address_host_port(str(args.ray_address))
-
-        init_exc: Optional[Exception] = None
-        for attempt in range(1, ray_init_retries + 1):
-            try:
-                if parsed_address is not None:
-                    host, port = parsed_address
-                    _wait_for_tcp_ready(host, port, timeout_seconds=min(ray_init_timeout_seconds, 30.0))
-                logger.info(
-                    f"ray.init attempt {attempt}/{ray_init_retries} "
-                    f"(address={args.ray_address}, timeout={ray_init_timeout_seconds:.1f}s)"
-                )
-                with _ray_init_timeout_guard(ray_init_timeout_seconds):
-                    ray.init(address=args.ray_address)
-                init_exc = None
-                break
-            except Exception as exc:
-                init_exc = exc
-                logger.info(f"ray.init attempt {attempt}/{ray_init_retries} failed: {exc}")
-                try:
-                    ray.shutdown()
-                except Exception:
-                    pass
-                if attempt < ray_init_retries:
-                    time.sleep(min(8.0, 1.5 * attempt))
-        if init_exc is not None:
+        logger.info(f"Initializing Ray (address={args.ray_address})")
+        try:
+            ray.init(address=args.ray_address)
+        except Exception as init_exc:
             raise RuntimeError(
                 "Unable to connect to Ray cluster via ray.init() "
-                f"after {ray_init_retries} attempts to address={args.ray_address}."
+                f"to address={args.ray_address}."
             ) from init_exc
 
         cluster = ray.cluster_resources()
