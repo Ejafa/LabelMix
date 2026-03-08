@@ -140,8 +140,15 @@ def run_ray_jobs(
             )
 
         ray_nodes_per_exp = 1
+        logger.info(f"Initializing Ray (address={args.ray_address})")
+        try:
+            ray.init(address=args.ray_address)
+        except Exception as init_exc:
+            raise RuntimeError(
+                "Unable to connect to Ray cluster via ray.init() "
+                f"to address={args.ray_address}."
+            ) from init_exc
 
-        ray.init(address=args.ray_address, ignore_reinit_error=True)
         cluster = ray.cluster_resources()
         logger.info(f"Connected to Ray cluster. Resources: {cluster}")
 

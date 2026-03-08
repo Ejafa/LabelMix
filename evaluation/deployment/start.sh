@@ -13,10 +13,8 @@ cd "${PROJECT_ROOT}"
 INITIAL_NODE_STAGGER_SECONDS="${INITIAL_NODE_STAGGER_SECONDS:-30}"
 EXPERIMENT_STAGGER_SECONDS="${EXPERIMENT_STAGGER_SECONDS:-15}"
 
-# Auto-detected capacity knobs (leave empty/default to auto-detect):
-# - NODE_CPU_COUNT: local logical CPU count
-NODE_CPU_COUNT="$(nproc)"
-CPU_PER_EXPERIMENT="${CPU_PER_EXPERIMENT:-6}"
+# Capacity knobs:
+CPU_PER_EXPERIMENT="${CPU_PER_EXPERIMENT:-16}"
 # HOST_GPU_NUM=""
 RAY_GPUS_PER_GROUP="${RAY_GPUS_PER_GROUP:-2}"
 MAX_EXPERIMENTS_PER_GROUP="${MAX_EXPERIMENTS_PER_GROUP:-2}"
@@ -59,7 +57,7 @@ if ! rank_for_ip "${RAY_HEAD_IP}" >/dev/null; then
   exit 1
 fi
 
-NODE_RANK=""
+NODE_RANK="0"
 if [[ "${INDEX:-}" =~ ^[0-9]+$ ]] && (( INDEX < ${#ITEMS[@]} )); then
   NODE_RANK="${INDEX}"
 fi
@@ -83,14 +81,20 @@ NODE_IP="${ITEMS[$NODE_RANK]%%:*}"
 
 RUN_PROJECT_ROOT="${RUN_PROJECT_ROOT:-${RUN_STORAGE_ROOT:-${PROJECT_ROOT}}}"
 
-if command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
-else
-  echo "ERROR: neither python nor python3 is available in PATH." >&2
+if ! command -v python >/dev/null 2>&1; then
+  echo "ERROR: python command not found in PATH." >&2
   exit 1
 fi
+
+if ! command -v ray >/dev/null 2>&1; then
+  echo "ERROR: ray command not found. Install Ray in the environment first." >&2
+  exit 1
+fi
+
+PYTHON_VERSION="$(python -V 2>&1 | head -n1 || true)"
+RAY_VERSION="$(ray --version 2>&1 | head -n1 || true)"
+echo "Runtime binaries: python (${PYTHON_VERSION})"
+echo "Runtime binaries: ray (${RAY_VERSION})"
 
 HELPER_PY="${SCRIPT_DIR}/start_helpers.py"
 if [[ ! -f "${HELPER_PY}" ]]; then
@@ -98,7 +102,7 @@ if [[ ! -f "${HELPER_PY}" ]]; then
   exit 1
 fi
 
-if detected_gpu_num="$("${PYTHON_BIN}" "${HELPER_PY}" detect-gpu-count)"; then
+if detected_gpu_num="$(python "${HELPER_PY}" detect-gpu-count)"; then
   HOST_GPU_NUM="${detected_gpu_num}"
 else
   echo "ERROR: failed to detect GPU count for this node." >&2
@@ -113,11 +117,17 @@ if [[ "${MAX_EXPERIMENTS_PER_GROUP}" -le 0 ]]; then
   exit 1
 fi
 GROUPS_PER_NODE=$((HOST_GPU_NUM / RAY_GPUS_PER_GROUP))
+NODE_CPU_COUNT=$((GROUPS_PER_NODE * MAX_EXPERIMENTS_PER_GROUP * CPU_PER_EXPERIMENT))
+if [[ "${NODE_CPU_COUNT}" -le 0 ]]; then
+  echo "ERROR: computed NODE_CPU_COUNT must be >= 1 (got ${NODE_CPU_COUNT})" >&2
+  exit 1
+fi
 echo "Detected GPUs/node: ${HOST_GPU_NUM}"
 echo "GPU group config: ${GROUPS_PER_NODE} groups/node, ${RAY_GPUS_PER_GROUP} GPUs/group, max ${MAX_EXPERIMENTS_PER_GROUP} experiments/group"
+echo "CPU config: ray_num_cpus=${NODE_CPU_COUNT} (= ${GROUPS_PER_NODE} * ${MAX_EXPERIMENTS_PER_GROUP} * ${CPU_PER_EXPERIMENT})"
 
 RAY_RESOURCES_JSON=""
-if group_resources="$("${PYTHON_BIN}" "${HELPER_PY}" build-group-resources \
+if group_resources="$(python "${HELPER_PY}" build-group-resources \
   --gpus-per-group "${RAY_GPUS_PER_GROUP}" \
   --max-experiments-per-group "${MAX_EXPERIMENTS_PER_GROUP}")"; then
   RAY_RESOURCES_JSON="${group_resources}"
@@ -131,11 +141,6 @@ if [[ "$INITIAL_NODE_STAGGER_SECONDS" -gt 0 && "$NODE_RANK" -gt 0 ]]; then
   delay=$((INITIAL_NODE_STAGGER_SECONDS * NODE_RANK))
   echo "Node rank ${NODE_RANK}: initial one-time sleep ${delay}s to smooth shared cache access."
   sleep "$delay"
-fi
-
-if ! command -v ray >/dev/null 2>&1; then
-  echo "ERROR: ray command not found. Install Ray in the environment first." >&2
-  exit 1
 fi
 
 echo "Node rank ${NODE_RANK}: restarting Ray runtime."
@@ -161,7 +166,7 @@ if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
   done
 
   cmd=(
-    "${PYTHON_BIN}" evaluation/baselines/run_experiments.py
+    python evaluation/baselines/run_experiments.py
     --project-root "${RUN_PROJECT_ROOT}"
     --ray-address "${RAY_ADDRESS}"
     --ray-gpus-per-node "${HOST_GPU_NUM}"
@@ -176,7 +181,7 @@ if [[ "$NODE_IP" == "$RAY_HEAD_IP" ]]; then
   "${cmd[@]}"
 else
   echo "Node rank ${NODE_RANK}: waiting for Ray head ${RAY_HEAD_IP}:${RAY_PORT}."
-  "${PYTHON_BIN}" "${HELPER_PY}" wait-tcp \
+  python "${HELPER_PY}" wait-tcp \
     --host "${RAY_HEAD_IP}" \
     --port "${RAY_PORT}" \
     --timeout-seconds 180
