@@ -2,37 +2,67 @@
 set -euo pipefail
 
 PROJECT_ROOT="/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
+CONDA_ROOT="$PROJECT_ROOT/miniconda3"
+CONDA_BIN="$CONDA_ROOT/bin/conda"
+CONDA_SH="$CONDA_ROOT/etc/profile.d/conda.sh"
+BASHRC="$HOME/.bashrc"
+PROXY_URL="http://star-proxy.oa.com:3128"
+
 cd "$PROJECT_ROOT"
 
-export http_proxy="http://star-proxy.oa.com:3128"
-export https_proxy="http://star-proxy.oa.com:3128"
-export ftp_proxy="http://star-proxy.oa.com:3128"
+export http_proxy="$PROXY_URL"
+export https_proxy="$PROXY_URL"
+export ftp_proxy="$PROXY_URL"
 
-# Load/create the conda env from the shared drive at PROJECT_ROOT/..
-SHARED_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
-ENV_PATH="${ENV_PATH:-$SHARED_ROOT/labelmix_env}"
-ENV_FILE="${ENV_FILE:-$PROJECT_ROOT/env.yaml}"
+touch "$BASHRC"
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "ERROR: conda env file not found at ${ENV_FILE}." >&2
-  echo "Set ENV_FILE to your env yaml path (e.g. export ENV_FILE=/path/to/environment.yml)." >&2
-  exit 1
+if ! grep -q '# >>> labelmix proxy >>>' "$BASHRC"; then
+  cat >> "$BASHRC" <<EOF
+
+# >>> labelmix proxy >>>
+export http_proxy="$PROXY_URL"
+export https_proxy="$PROXY_URL"
+export ftp_proxy="$PROXY_URL"
+# <<< labelmix proxy <<<
+EOF
 fi
 
-if [[ ! -d "$ENV_PATH" ]]; then
-  conda env create -f "$ENV_FILE" -p "$ENV_PATH"
+if ! grep -q '# >>> labelmix conda init >>>' "$BASHRC"; then
+  cat >> "$BASHRC" <<EOF
+
+# >>> labelmix conda init >>>
+__conda_setup="\$("$CONDA_BIN" shell.bash hook 2> /dev/null)"
+if [ \$? -eq 0 ]; then
+    eval "\$__conda_setup"
 else
-  conda env update -f "$ENV_FILE" -p "$ENV_PATH" --prune
+    if [ -f "$CONDA_SH" ]; then
+        . "$CONDA_SH"
+    else
+        export PATH="$CONDA_ROOT/bin:\$PATH"
+    fi
+fi
+unset __conda_setup
+# <<< labelmix conda init <<<
+EOF
 fi
 
-add_bashrc_line() {
-  local line="$1"
-  grep -Fqx "$line" ~/.bashrc || echo "$line" >> ~/.bashrc
-}
+if ! grep -q '^conda activate labelmix$' "$BASHRC"; then
+  echo 'conda activate labelmix' >> "$BASHRC"
+fi
 
-echo ""
-add_bashrc_line "conda activate $ENV_PATH"
-add_bashrc_line "cd $PROJECT_ROOT"
-add_bashrc_line "export http_proxy=http://star-proxy.oa.com:3128"
-add_bashrc_line "export https_proxy=http://star-proxy.oa.com:3128"
-add_bashrc_line "export ftp_proxy=http://star-proxy.oa.com:3128"
+# Activate labelmix in the current script too
+__conda_setup="$("$CONDA_BIN" shell.bash hook 2> /dev/null)"
+if [ $? -eq 0 ]; then
+    eval "$__conda_setup"
+else
+    if [ -f "$CONDA_SH" ]; then
+        . "$CONDA_SH"
+    else
+        export PATH="$CONDA_ROOT/bin:$PATH"
+    fi
+fi
+unset __conda_setup
+
+conda activate labelmix
+
+echo "Done. Current env: ${CONDA_DEFAULT_ENV:-<none>}"
