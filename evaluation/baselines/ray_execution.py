@@ -117,6 +117,12 @@ def run_ray_jobs(
         raise ValueError("--max-experiments-per-group must be >= 1")
     if args.cpu_per_experiment <= 0:
         raise ValueError("--cpu-per-experiment must be >= 1")
+    ray_job_max_retries = int(getattr(args, "ray_job_max_retries", 0))
+    ray_retry_backoff_seconds = int(getattr(args, "ray_retry_backoff_seconds", 0))
+    if ray_job_max_retries < 0:
+        raise ValueError("--ray-job-max-retries must be >= 0")
+    if ray_retry_backoff_seconds < 0:
+        raise ValueError("--ray-retry-backoff-seconds must be >= 0")
 
     logger = RaySchedulerLogger(args.log_dir)
 
@@ -124,6 +130,7 @@ def run_ray_jobs(
         try:
             import ray
             from ray.util.placement_group import placement_group, remove_placement_group
+            from ray.util import placement_group_table
             from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
         except Exception as exc:
             raise RuntimeError(
@@ -166,6 +173,7 @@ def run_ray_jobs(
             f"nodes/exp={ray_nodes_per_exp}, gpus/node={ray_gpus_per_node}, "
             f"gpus/group={ray_gpus_per_group}, max_exp/group={max_experiments_per_group}, "
             f"cpu/exp={args.cpu_per_experiment}, strategy={args.ray_strategy}, "
+            f"max_retries={ray_job_max_retries}, retry_backoff={ray_retry_backoff_seconds}s, "
             "parallelism=dynamic"
         )
         logger.info(
@@ -211,16 +219,93 @@ def run_ray_jobs(
                 )
                 return int(proc.wait())
 
-        exp_queue = deque(jobs)
+        exp_queue: Deque[Dict[str, Any]] = deque()
+        for job in jobs:
+            first_attempt_job = dict(job)
+            first_attempt_job["attempt"] = 1
+            first_attempt_job["not_before"] = 0.0
+            exp_queue.append(first_attempt_job)
         running: Dict[Any, Dict[str, Any]] = {}
         failures: List[str] = []
         pg_probe_timeout_seconds = max(0.1, min(float(args.ray_pg_timeout_seconds), 5.0))
+        pg_remove_wait_seconds = max(0.1, min(30.0, float(args.ray_pg_timeout_seconds)))
+
+        def _max_attempts() -> int:
+            return ray_job_max_retries + 1
+
+        def _wait_pg_removed(pg: Any, timeout_seconds: float) -> bool:
+            deadline = time.time() + max(0.1, float(timeout_seconds))
+            while time.time() < deadline:
+                try:
+                    table = placement_group_table(pg)
+                except Exception:
+                    table = {}
+                if not table:
+                    return True
+                state = str(table.get("state") or "").strip().upper()
+                if state == "REMOVED":
+                    return True
+                time.sleep(5.0)
+            return False
+
+        def _requeue_failed_job(
+            job: Dict[str, Any],
+            *,
+            failure_status: str,
+            exit_code: Optional[int] = None,
+            error_text: str = "",
+            log_path: str = "",
+        ) -> bool:
+            exp_name = str(job.get("name", "<unknown>"))
+            attempt = int(job.get("attempt", 1))
+            max_attempts = _max_attempts()
+
+            if attempt < max_attempts:
+                retry_job = dict(job)
+                retry_job["attempt"] = attempt + 1
+                if ray_retry_backoff_seconds > 0:
+                    retry_job["not_before"] = time.time() + float(ray_retry_backoff_seconds)
+                else:
+                    retry_job["not_before"] = 0.0
+                exp_queue.append(retry_job)
+                logger.event(
+                    "RAY_RETRY",
+                    {
+                        "experiment": exp_name,
+                        "attempt": attempt,
+                        "next_attempt": int(retry_job["attempt"]),
+                        "max_attempts": max_attempts,
+                        "failure_status": failure_status,
+                        "exit_code": exit_code,
+                        "error": error_text,
+                        "log_path": log_path,
+                        "backoff_seconds": ray_retry_backoff_seconds,
+                    },
+                )
+                return True
+
+            failures.append(exp_name)
+            logger.event(
+                "RAY_RETRY_EXHAUSTED",
+                {
+                    "experiment": exp_name,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "failure_status": failure_status,
+                    "exit_code": exit_code,
+                    "error": error_text,
+                    "log_path": log_path,
+                },
+            )
+            return False
 
         def _schedule_one(job: Dict[str, Any]) -> str:
             exp_name = str(job["name"])
             exp_config = str(job["config"])
             exp_extra = list(job.get("extra", []))
             runner_extra = list(job.get("runner_extra", []))
+            attempt = int(job.get("attempt", 1))
+            max_attempts = _max_attempts()
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             expected_output_dir = os.path.join(args.output_root, exp_name)
             log_path = os.path.join(args.log_dir, f"{exp_name}_{ts}.txt")
@@ -245,7 +330,7 @@ def run_ray_jobs(
             cmd_str = " ".join(cmd)
 
             if args.dry_run:
-                logger.info(f"=== Dry run [{exp_name}] (Ray single-node):")
+                logger.info(f"=== Dry run [{exp_name}] attempt={attempt}/{max_attempts} (Ray single-node):")
                 logger.info(cmd_str)
                 logger.info(
                     f"GPU group placement: prefix={group_resource_prefix}, "
@@ -265,7 +350,6 @@ def run_ray_jobs(
                 logger.info(
                     f"!!! Experiment {exp_name} FAILED: no GPU group resources found for prefix '{group_resource_prefix}'."
                 )
-                failures.append(exp_name)
                 return "failed"
 
             attempts = len(gpu_group_cycle)
@@ -294,7 +378,6 @@ def run_ray_jobs(
                         f"group {group_index}: {exc}"
                     )
                     remove_placement_group(pg)
-                    failures.append(exp_name)
                     return "failed"
 
                 selected_pg = pg
@@ -329,6 +412,8 @@ def run_ray_jobs(
                 "name": exp_name,
                 "pg": selected_pg,
                 "start_time": time.time(),
+                "attempt": attempt,
+                "max_attempts": max_attempts,
                 "log_path": log_path,
                 "output_dir": expected_output_dir,
                 "config": exp_config,
@@ -337,12 +422,15 @@ def run_ray_jobs(
                 "group_index": selected_group_index,
                 "group_slots_resource": selected_group_slots_resource,
                 "cuda_visible_devices": env_updates["CUDA_VISIBLE_DEVICES"],
+                "job": dict(job),
             }
 
             logger.event(
                 "RAY_LAUNCH",
                 {
                     "experiment": exp_name,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
                     "task_ref": str(ref),
                     "config": exp_config,
                     "command": cmd_str,
@@ -362,6 +450,10 @@ def run_ray_jobs(
                     pending_count = len(exp_queue)
                     for _ in range(pending_count):
                         job = exp_queue.popleft()
+                        not_before = float(job.get("not_before", 0.0))
+                        if not_before > time.time():
+                            exp_queue.append(job)
+                            continue
                         status = _schedule_one(job)
                         if status == "scheduled":
                             scheduled_any = True
@@ -369,8 +461,18 @@ def run_ray_jobs(
                                 time.sleep(args.stagger_seconds)
                         elif status == "pending_capacity":
                             exp_queue.append(job)
+                        elif status == "failed":
+                            _requeue_failed_job(job, failure_status="scheduling_failed")
+                        else:
+                            raise RuntimeError(f"Unexpected scheduler status '{status}' for job {job.get('name')}")
 
                 if exp_queue and not running and not scheduled_any:
+                    earliest_not_before = min(float(job.get("not_before", 0.0)) for job in exp_queue)
+                    if earliest_not_before > time.time():
+                        sleep_for = max(0.0, min(1.0, earliest_not_before - time.time()))
+                        if sleep_for > 0:
+                            time.sleep(sleep_for)
+                        continue
                     pending_names = [str(job.get("name", "<unknown>")) for job in exp_queue]
                     raise RuntimeError(
                         "No pending experiment can be scheduled with current Ray resources. "
@@ -393,6 +495,7 @@ def run_ray_jobs(
                 term_status = "unknown"
                 exit_code: Optional[int] = None
                 error_text = ""
+                will_retry = False
                 try:
                     ret = int(ray.get(ref))
                     exit_code = int(ret)
@@ -400,30 +503,47 @@ def run_ray_jobs(
                         term_status = "success"
                     else:
                         term_status = "failed_exit_code"
-                        failures.append(exp_name)
+                        will_retry = _requeue_failed_job(
+                            info.get("job", {"name": exp_name, "attempt": info.get("attempt", 1)}),
+                            failure_status=term_status,
+                            exit_code=exit_code,
+                            log_path=str(info.get("log_path", "")),
+                        )
                 except Exception as exc:
                     term_status = "failed_exception"
                     error_text = str(exc)
-                    failures.append(exp_name)
+                    will_retry = _requeue_failed_job(
+                        info.get("job", {"name": exp_name, "attempt": info.get("attempt", 1)}),
+                        failure_status=term_status,
+                        exit_code=exit_code,
+                        error_text=error_text,
+                        log_path=str(info.get("log_path", "")),
+                    )
                 finally:
                     remove_placement_group(pg)
-                    logger.event(
-                        "RAY_TERMINATE",
-                        {
-                            "experiment": exp_name,
-                            "task_ref": str(info.get("task_ref", ref)),
-                            "status": term_status,
-                            "exit_code": exit_code,
-                            "error": error_text,
-                            "duration_seconds": round(duration_seconds, 2),
-                            "command": str(info.get("command", "")),
-                            "log_path": str(info.get("log_path", "")),
-                            "output_dir": str(info.get("output_dir", "")),
-                            "group_index": info.get("group_index"),
-                            "group_slots_resource": str(info.get("group_slots_resource", "")),
-                            "cuda_visible_devices": str(info.get("cuda_visible_devices", "")),
-                        },
-                    )
+                    terminate_payload = {
+                        "experiment": exp_name,
+                        "attempt": int(info.get("attempt", 1)),
+                        "max_attempts": int(info.get("max_attempts", _max_attempts())),
+                        "task_ref": str(info.get("task_ref", ref)),
+                        "status": term_status,
+                        "exit_code": exit_code,
+                        "error": error_text,
+                        "will_retry": will_retry,
+                        "duration_seconds": round(duration_seconds, 2),
+                        "command": str(info.get("command", "")),
+                        "log_path": str(info.get("log_path", "")),
+                        "output_dir": str(info.get("output_dir", "")),
+                        "group_index": info.get("group_index"),
+                        "group_slots_resource": str(info.get("group_slots_resource", "")),
+                        "cuda_visible_devices": str(info.get("cuda_visible_devices", "")),
+                    }
+                    if _wait_pg_removed(pg, pg_remove_wait_seconds):
+                        logger.event("RAY_TERMINATE", terminate_payload)
+                    else:
+                        pending_payload = dict(terminate_payload)
+                        pending_payload["pg_remove_wait_seconds"] = pg_remove_wait_seconds
+                        logger.event("RAY_TERMINATE_PENDING", pending_payload)
 
         except KeyboardInterrupt:
             logger.info("Interrupted! Cancelling running Ray jobs...")
@@ -436,23 +556,26 @@ def run_ray_jobs(
                 except Exception:
                     pass
                 remove_placement_group(info["pg"])
-                logger.event(
-                    "RAY_TERMINATE",
-                    {
-                        "experiment": exp_name,
-                        "task_ref": str(info.get("task_ref", ref)),
-                        "status": "cancelled",
-                        "exit_code": None,
-                        "error": "cancelled by KeyboardInterrupt",
-                        "duration_seconds": round(max(0.0, time.time() - float(info.get("start_time", time.time()))), 2),
-                        "command": str(info.get("command", "")),
-                        "log_path": str(info.get("log_path", "")),
-                        "output_dir": str(info.get("output_dir", "")),
-                        "group_index": info.get("group_index"),
-                        "group_slots_resource": str(info.get("group_slots_resource", "")),
-                        "cuda_visible_devices": str(info.get("cuda_visible_devices", "")),
-                    },
-                )
+                terminate_payload = {
+                    "experiment": exp_name,
+                    "task_ref": str(info.get("task_ref", ref)),
+                    "status": "cancelled",
+                    "exit_code": None,
+                    "error": "cancelled by KeyboardInterrupt",
+                    "duration_seconds": round(max(0.0, time.time() - float(info.get("start_time", time.time()))), 2),
+                    "command": str(info.get("command", "")),
+                    "log_path": str(info.get("log_path", "")),
+                    "output_dir": str(info.get("output_dir", "")),
+                    "group_index": info.get("group_index"),
+                    "group_slots_resource": str(info.get("group_slots_resource", "")),
+                    "cuda_visible_devices": str(info.get("cuda_visible_devices", "")),
+                }
+                if _wait_pg_removed(info["pg"], pg_remove_wait_seconds):
+                    logger.event("RAY_TERMINATE", terminate_payload)
+                else:
+                    pending_payload = dict(terminate_payload)
+                    pending_payload["pg_remove_wait_seconds"] = pg_remove_wait_seconds
+                    logger.event("RAY_TERMINATE_PENDING", pending_payload)
             running.clear()
             logger.info("Done.")
         finally:
