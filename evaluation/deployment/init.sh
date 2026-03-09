@@ -1,51 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
-CONDA_ROOT="$PROJECT_ROOT/miniconda3"
-CONDA_BIN="$CONDA_ROOT/bin/conda"
-PROXY_URL="http://star-proxy.oa.com:3128"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_PROJECT_ROOT="/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
 
-cd "$PROJECT_ROOT"
+PROJECT_ROOT="${PROJECT_ROOT:-${DEFAULT_PROJECT_ROOT}}"
+if [[ ! -d "${PROJECT_ROOT}" ]]; then
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+fi
+
+CONDA_ROOT="${CONDA_ROOT:-${PROJECT_ROOT}/miniconda3}"
+CONDA_BIN="${CONDA_BIN:-${CONDA_ROOT}/bin/conda}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-labelmix}"
+PROXY_URL="${PROXY_URL:-http://star-proxy.oa.com:3128}"
+
+if [[ ! -x "${CONDA_BIN}" ]]; then
+  echo "ERROR: conda binary not found at ${CONDA_BIN}" >&2
+  exit 1
+fi
+
+cd "${PROJECT_ROOT}"
 
 export http_proxy="$PROXY_URL"
 export https_proxy="$PROXY_URL"
 export ftp_proxy="$PROXY_URL"
 
-# Make sure conda is callable
-if ! command -v conda >/dev/null 2>&1; then
-    export PATH="$CONDA_ROOT/bin:$PATH"
-fi
-
-if ! command -v conda >/dev/null 2>&1; then
-    echo "ERROR: conda is not callable. Expected at $CONDA_BIN" >&2
-    exit 1
-fi
-
-# Persist conda setup for future bash shells
-conda init bash
-
-# Persist proxy for future shells, without duplicating
-if ! grep -q '# >>> labelmix proxy >>>' "$HOME/.bashrc"; then
-    cat >> "$HOME/.bashrc" <<EOF
-
-# >>> labelmix proxy >>>
-export http_proxy="$PROXY_URL"
-export https_proxy="$PROXY_URL"
-export ftp_proxy="$PROXY_URL"
-# <<< labelmix proxy <<<
-EOF
-fi
-
-# Optional: auto-activate labelmix in future interactive bash shells
-if ! grep -q '^conda activate labelmix$' "$HOME/.bashrc"; then
-    printf '\nconda activate labelmix\n' >> "$HOME/.bashrc"
-fi
-
-# Enable conda in this current shell
 eval "$("$CONDA_BIN" shell.bash hook)"
 
-# Activate env now
-conda activate labelmix
+if ! conda activate "${CONDA_ENV_NAME}"; then
+  echo "ERROR: failed to activate conda env '${CONDA_ENV_NAME}'." >&2
+  echo "Hint: set CONDA_ENV_NAME or check environments under ${CONDA_ROOT}/envs." >&2
+  exit 1
+fi
 
-echo "Done. Current env: ${CONDA_DEFAULT_ENV:-<none>}"
+python_bin="$(command -v python || true)"
+ray_bin="$(command -v ray || true)"
+echo "Activated env: ${CONDA_DEFAULT_ENV:-<none>}"
+echo "Python: ${python_bin:-<not found>}"
+echo "Ray: ${ray_bin:-<not found>}"
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  echo "Note: init.sh was executed (not sourced), so activation only applied inside this script process."
+  echo "Use: source evaluation/deployment/init.sh"
+fi
