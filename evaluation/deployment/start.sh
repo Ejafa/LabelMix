@@ -6,11 +6,18 @@ conda activate labelmix
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 START_RUNTIME_SCRIPT="${SCRIPT_DIR}/start_runtime.sh"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+DEFAULT_PROJECT_ROOT="/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
+
+PROJECT_ROOT="${PROJECT_ROOT:-${DEFAULT_PROJECT_ROOT}}"
+if [[ ! -d "${PROJECT_ROOT}" ]]; then
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+fi
 
 CONDA_ROOT="${CONDA_ROOT:-${PROJECT_ROOT}/miniconda3}"
 CONDA_BIN="${CONDA_BIN:-${CONDA_ROOT}/bin/conda}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-labelmix}"
+CONDA_ENV_PATH="${CONDA_ENV_PATH:-}"
+CONDA_ACTIVATE_SCRIPT="${CONDA_ACTIVATE_SCRIPT:-${CONDA_ROOT}/bin/activate}"
 SKIP_CONDA_ACTIVATE="${SKIP_CONDA_ACTIVATE:-0}"
 
 if [[ "${SKIP_CONDA_ACTIVATE}" != "1" ]]; then
@@ -20,12 +27,31 @@ if [[ "${SKIP_CONDA_ACTIVATE}" != "1" ]]; then
     exit 1
   fi
 
-  eval "$("${CONDA_BIN}" shell.bash hook)"
-  if ! conda activate "${CONDA_ENV_NAME}"; then
-    echo "ERROR: failed to activate conda env '${CONDA_ENV_NAME}'." >&2
+  if [[ ! -f "${CONDA_ACTIVATE_SCRIPT}" ]]; then
+    echo "ERROR: conda activate script not found at ${CONDA_ACTIVATE_SCRIPT}" >&2
     exit 1
   fi
-  echo "start.sh: activated conda env '${CONDA_ENV_NAME}'."
+
+  activate_target="${CONDA_ENV_NAME}"
+  if [[ -n "${CONDA_ENV_PATH}" ]]; then
+    activate_target="${CONDA_ENV_PATH}"
+  fi
+
+  if ! source "${CONDA_ACTIVATE_SCRIPT}" "${activate_target}"; then
+    if [[ -z "${CONDA_ENV_PATH}" && -d "${PROJECT_ROOT}/env/${CONDA_ENV_NAME}" ]] && source "${CONDA_ACTIVATE_SCRIPT}" "${PROJECT_ROOT}/env/${CONDA_ENV_NAME}"; then
+      activate_target="${PROJECT_ROOT}/env/${CONDA_ENV_NAME}"
+    elif [[ -z "${CONDA_ENV_PATH}" && -d "${PROJECT_ROOT}/env/labemix" ]] && source "${CONDA_ACTIVATE_SCRIPT}" "${PROJECT_ROOT}/env/labemix"; then
+      activate_target="${PROJECT_ROOT}/env/labemix"
+    elif [[ -z "${CONDA_ENV_PATH}" && -d "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}" ]] && source "${CONDA_ACTIVATE_SCRIPT}" "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}"; then
+      activate_target="${CONDA_ROOT}/envs/${CONDA_ENV_NAME}"
+    else
+      echo "ERROR: failed to activate conda env target '${activate_target}'." >&2
+      echo "Hint: set CONDA_ENV_NAME=<env-name> or CONDA_ENV_PATH=<full-env-path>." >&2
+      exit 1
+    fi
+  fi
+
+  echo "start.sh: activated conda env target '${activate_target}'."
 fi
 
 if [[ ! -x "${START_RUNTIME_SCRIPT}" ]]; then
