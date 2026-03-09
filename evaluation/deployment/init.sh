@@ -4,8 +4,6 @@ set -euo pipefail
 PROJECT_ROOT="/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
 CONDA_ROOT="$PROJECT_ROOT/miniconda3"
 CONDA_BIN="$CONDA_ROOT/bin/conda"
-CONDA_SH="$CONDA_ROOT/etc/profile.d/conda.sh"
-BASHRC="$HOME/.bashrc"
 PROXY_URL="http://star-proxy.oa.com:3128"
 
 cd "$PROJECT_ROOT"
@@ -14,10 +12,22 @@ export http_proxy="$PROXY_URL"
 export https_proxy="$PROXY_URL"
 export ftp_proxy="$PROXY_URL"
 
-touch "$BASHRC"
+# Make sure conda is callable
+if ! command -v conda >/dev/null 2>&1; then
+    export PATH="$CONDA_ROOT/bin:$PATH"
+fi
 
-if ! grep -q '# >>> labelmix proxy >>>' "$BASHRC"; then
-  cat >> "$BASHRC" <<EOF
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ERROR: conda is not callable. Expected at $CONDA_BIN" >&2
+    exit 1
+fi
+
+# Persist conda setup for future bash shells
+conda init bash
+
+# Persist proxy for future shells, without duplicating
+if ! grep -q '# >>> labelmix proxy >>>' "$HOME/.bashrc"; then
+    cat >> "$HOME/.bashrc" <<EOF
 
 # >>> labelmix proxy >>>
 export http_proxy="$PROXY_URL"
@@ -27,42 +37,15 @@ export ftp_proxy="$PROXY_URL"
 EOF
 fi
 
-if ! grep -q '# >>> labelmix conda init >>>' "$BASHRC"; then
-  cat >> "$BASHRC" <<EOF
-
-# >>> labelmix conda init >>>
-__conda_setup="\$("$CONDA_BIN" shell.bash hook 2> /dev/null)"
-if [ \$? -eq 0 ]; then
-    eval "\$__conda_setup"
-else
-    if [ -f "$CONDA_SH" ]; then
-        . "$CONDA_SH"
-    else
-        export PATH="$CONDA_ROOT/bin:\$PATH"
-    fi
-fi
-unset __conda_setup
-# <<< labelmix conda init <<<
-EOF
+# Optional: auto-activate labelmix in future interactive bash shells
+if ! grep -q '^conda activate labelmix$' "$HOME/.bashrc"; then
+    printf '\nconda activate labelmix\n' >> "$HOME/.bashrc"
 fi
 
-if ! grep -q '^conda activate labelmix$' "$BASHRC"; then
-  echo 'conda activate labelmix' >> "$BASHRC"
-fi
+# Enable conda in this current shell
+eval "$("$CONDA_BIN" shell.bash hook)"
 
-# Activate labelmix in the current script too
-__conda_setup="$("$CONDA_BIN" shell.bash hook 2> /dev/null)"
-if [ $? -eq 0 ]; then
-    eval "$__conda_setup"
-else
-    if [ -f "$CONDA_SH" ]; then
-        . "$CONDA_SH"
-    else
-        export PATH="$CONDA_ROOT/bin:$PATH"
-    fi
-fi
-unset __conda_setup
-
+# Activate env now
 conda activate labelmix
 
 echo "Done. Current env: ${CONDA_DEFAULT_ENV:-<none>}"

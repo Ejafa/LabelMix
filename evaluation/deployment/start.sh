@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+conda init
+conda activate labelmix
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 START_RUNTIME_SCRIPT="${SCRIPT_DIR}/start_runtime.sh"
 
