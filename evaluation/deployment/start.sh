@@ -6,6 +6,27 @@ conda activate labelmix
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 START_RUNTIME_SCRIPT="${SCRIPT_DIR}/start_runtime.sh"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+CONDA_ROOT="${CONDA_ROOT:-${PROJECT_ROOT}/miniconda3}"
+CONDA_BIN="${CONDA_BIN:-${CONDA_ROOT}/bin/conda}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-labelmix}"
+SKIP_CONDA_ACTIVATE="${SKIP_CONDA_ACTIVATE:-0}"
+
+if [[ "${SKIP_CONDA_ACTIVATE}" != "1" ]]; then
+  if [[ ! -x "${CONDA_BIN}" ]]; then
+    echo "ERROR: conda binary not found at ${CONDA_BIN}" >&2
+    echo "Hint: set CONDA_ROOT/CONDA_BIN, or run with SKIP_CONDA_ACTIVATE=1 if env is already active." >&2
+    exit 1
+  fi
+
+  eval "$("${CONDA_BIN}" shell.bash hook)"
+  if ! conda activate "${CONDA_ENV_NAME}"; then
+    echo "ERROR: failed to activate conda env '${CONDA_ENV_NAME}'." >&2
+    exit 1
+  fi
+  echo "start.sh: activated conda env '${CONDA_ENV_NAME}'."
+fi
 
 if [[ ! -x "${START_RUNTIME_SCRIPT}" ]]; then
   echo "ERROR: runtime start script is missing or not executable: ${START_RUNTIME_SCRIPT}" >&2
