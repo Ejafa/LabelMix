@@ -90,6 +90,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Placement group strategy for Ray experiments.")
     parser.add_argument("--ray-pg-timeout-seconds", type=int, default=3600,
                         help="Timeout waiting for Ray placement group resources.")
+    parser.add_argument(
+        "--ray-job-max-retries",
+        type=int,
+        default=_env_int("RAY_JOB_MAX_RETRIES", 3),
+        help="Number of retries per failed Ray job (0 disables retries).",
+    )
+    parser.add_argument(
+        "--ray-retry-backoff-seconds",
+        type=int,
+        default=_env_int("RAY_RETRY_BACKOFF_SECONDS", 30),
+        help="Backoff before requeueing a failed Ray job retry attempt.",
+    )
 
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
     return parser
