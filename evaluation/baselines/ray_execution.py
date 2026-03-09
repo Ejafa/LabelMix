@@ -214,7 +214,7 @@ def run_ray_jobs(
         exp_queue = deque(jobs)
         running: Dict[Any, Dict[str, Any]] = {}
         failures: List[str] = []
-        pg_probe_timeout_seconds = max(0.1, min(float(args.ray_pg_timeout_seconds), 5.0))
+        pg_probe_timeout_seconds = max(0.1, min(float(args.ray_pg_timeout_seconds), 30.0))
 
         def _schedule_one(job: Dict[str, Any]) -> str:
             exp_name = str(job["name"])

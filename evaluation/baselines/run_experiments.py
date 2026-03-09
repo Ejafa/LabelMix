@@ -308,13 +308,13 @@ def main() -> None:
         "--sched-on-updates",
         "--num-logs", "1000",
         "--num-evals", "100",
-        "--num-saves", "10",
+        "--num-saves", "30", #save 30 
         "--wandb-project", "labelmix",
         "--log-wandb",
         "--workers", "8",
-        "--loader-prefetch-factor", "4",
-        "--balanced-buffer-steps", "1",
-        "--balanced-cache-threshold-steps", "1",
+        "--loader-prefetch-factor", "1",
+        "--balanced-buffer-steps", str(nproc_per_experiment),
+        "--balanced-cache-threshold-steps", str(max(nproc_per_experiment-1, 1)),
     ]
 
     imagenet_args: List[str] = [
@@ -326,7 +326,7 @@ def main() -> None:
         "--target-key", "label",
         "--balanced-mode", "1280",
         "--num-classes", "1000",
-        "--num-steps", "362500",  # 290 epochs. 1280000/1024 = 1250 steps/epoch
+        "--num-steps", "125000",  # 290 epochs. 1280000/1024 = 1250 steps/epoch
         "--warmup-steps", "12500",  # 10 epochs
     ]
 
@@ -370,14 +370,12 @@ def main() -> None:
 
     # model_configs = _load_model_configs(args.model_configs_path)
     model_configs = [
-        "evaluation/baselines/configs/mnv4-conv-medium.yaml",
         "evaluation/baselines/configs/vit-wee.yaml",
     ]
-
     experiments: List[Dict[str, Any]] = []
-    ks = [3, 4, 5, 6]
+    ks = [2, 3, 4, 5, 6]
     alpha = [0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0]
-    loss = ["pl_loss", "soft_ce"]
+    loss = ["soft_ce", "pl_loss"]
     for model_config in model_configs:
         config_data = _load_yaml_dict(model_config)
         config_img_size = _resolve_config_img_size(config_data)
@@ -403,7 +401,7 @@ def main() -> None:
                             model_kwargs_args.append("fix_init=True")
                         total_args = total_args + model_kwargs_args
 
-                    exp_name = f"baseline_imagenet1k_{model}_labelmix_k{k}_a{str(a).replace('.', 'p')}_loss{l}"
+                    exp_name = f"labelmix_imagenet1k_{model}_k{k}_a{str(a).replace('.', 'p')}_loss{l}"
                     experiments.append({
                         "name": exp_name,
                         "config": model_config,
