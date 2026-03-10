@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ray-strategy", choices=["STRICT_SPREAD", "PACK"], default="STRICT_SPREAD",
                         help="Placement group strategy for Ray experiments.")
-    parser.add_argument("--ray-pg-timeout-seconds", type=int, default=3600,
+    parser.add_argument("--ray-pg-timeout-seconds", type=int, default=20,
                         help="Timeout waiting for Ray placement group resources.")
     parser.add_argument(
         "--ray-job-max-retries",
@@ -99,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ray-retry-backoff-seconds",
         type=int,
-        default=_env_int("RAY_RETRY_BACKOFF_SECONDS", 30),
+        default=_env_int("RAY_RETRY_BACKOFF_SECONDS", 5),
         help="Backoff before requeueing a failed Ray job retry attempt.",
     )
 
@@ -320,10 +320,10 @@ def main() -> None:
         "--sched-on-updates",
         "--num-logs", "1000",
         "--num-evals", "100",
-        "--num-saves", "30", #save 30 
+        "--num-saves", "30",
         "--wandb-project", "labelmix",
         "--log-wandb",
-        "--workers", "8",
+        "--workers", "4",
         "--loader-prefetch-factor", "1",
         "--balanced-buffer-steps", str(nproc_per_experiment),
         "--balanced-cache-threshold-steps", str(max(nproc_per_experiment-1, 1)),

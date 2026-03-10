@@ -228,7 +228,7 @@ def run_ray_jobs(
         running: Dict[Any, Dict[str, Any]] = {}
         failures: List[str] = []
         pg_probe_timeout_seconds = max(0.1, min(float(args.ray_pg_timeout_seconds), 5.0))
-        pg_remove_wait_seconds = max(0.1, min(30.0, float(args.ray_pg_timeout_seconds)))
+        pg_remove_wait_seconds = max(0.1, min(15.0, float(args.ray_pg_timeout_seconds)))
 
         def _max_attempts() -> int:
             return ray_job_max_retries + 1
