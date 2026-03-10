@@ -30,6 +30,38 @@ def _upsert_flag(args_list: List[str], flag: str, value: Optional[str] = None) -
         args_list.append(value)
 
 
+def _get_flag_value(args_list: List[str], flag: str) -> Optional[str]:
+    for i, token in enumerate(args_list):
+        if token == flag:
+            if i + 1 < len(args_list):
+                return args_list[i + 1]
+            return None
+        if token.startswith(f"{flag}="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _set_flag_value(args_list: List[str], flag: str, value: str) -> None:
+    replaced = False
+    i = 0
+    while i < len(args_list):
+        token = args_list[i]
+        if token == flag:
+            if i + 1 < len(args_list):
+                args_list[i + 1] = value
+            else:
+                args_list.append(value)
+            replaced = True
+            i += 2
+            continue
+        if token.startswith(f"{flag}="):
+            args_list[i] = f"{flag}={value}"
+            replaced = True
+        i += 1
+    if not replaced:
+        args_list.extend([flag, value])
+
+
 def _discover_gpu_group_resources(cluster_resources: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract group slot resources from Ray cluster resources.
 
@@ -190,6 +222,10 @@ def run_ray_jobs(
             env = os.environ.copy()
             env.update(env_updates)
             cmd_local = list(cmd)
+            dataset_name = str(_get_flag_value(cmd_local, "--dataset") or "").strip().lower()
+            data_dir_override = str(env.get("LABELMIX_DATA_DIR_OVERRIDE", "")).strip()
+            if data_dir_override and dataset_name == "hfds/ilsvrc/imagenet-1k":
+                _set_flag_value(cmd_local, "--data-dir", data_dir_override)
             if "--master_port" not in cmd_local:
                 try:
                     train_idx = cmd_local.index("train.py")
@@ -205,6 +241,8 @@ def run_ray_jobs(
                 try:
                     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
                     log_f.write(f"RLIMIT_NOFILE: soft={soft}, hard={hard}\n")
+                    if data_dir_override and dataset_name == "hfds/ilsvrc/imagenet-1k":
+                        log_f.write(f"Data dir override: {data_dir_override}\n")
                     log_f.flush()
                 except Exception as exc:
                     log_f.write(f"RLIMIT_NOFILE: unavailable ({exc})\n")

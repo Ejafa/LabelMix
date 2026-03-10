@@ -84,6 +84,57 @@ NODE_IP="${ITEMS[$NODE_RANK]%%:*}"
 
 RUN_PROJECT_ROOT="${RUN_PROJECT_ROOT:-${RUN_STORAGE_ROOT:-${PROJECT_ROOT}}}"
 
+# HF datasets cache overlay (enabled by default):
+# - Reads dataset shards from shared cache (via symlinks)
+# - Writes lock files under node-local path to avoid cross-node lock races
+ENABLE_LOCAL_HFDS_OVERLAY="${ENABLE_LOCAL_HFDS_OVERLAY:-1}"
+HFDS_SHARED_IMAGENET_DIR="${HFDS_SHARED_IMAGENET_DIR:-${RUN_PROJECT_ROOT}/data/imagenet-1k}"
+HFDS_LOCAL_OVERLAY_BASE="${HFDS_LOCAL_OVERLAY_BASE:-/tmp/labelmix-hfds-overlays}"
+# Taiji provides INDEX as node rank. Use it directly when present.
+HFDS_NODE_INDEX="${HFDS_NODE_INDEX:-${INDEX:-${NODE_RANK}}}"
+if ! [[ "${HFDS_NODE_INDEX}" =~ ^[0-9]+$ ]]; then
+  HFDS_NODE_INDEX="${NODE_RANK}"
+fi
+HFDS_LOCAL_OVERLAY_DIR="${HFDS_LOCAL_OVERLAY_DIR:-${HFDS_LOCAL_OVERLAY_BASE}/node_${HFDS_NODE_INDEX}}"
+
+setup_local_hfds_overlay() {
+  if [[ "${ENABLE_LOCAL_HFDS_OVERLAY}" != "1" ]]; then
+    echo "HFDS overlay disabled (ENABLE_LOCAL_HFDS_OVERLAY=${ENABLE_LOCAL_HFDS_OVERLAY})."
+    return 0
+  fi
+
+  local shared_dataset_dir="${HFDS_SHARED_IMAGENET_DIR}/ilsvrc___imagenet-1k"
+  local local_dataset_dir="${HFDS_LOCAL_OVERLAY_DIR}/ilsvrc___imagenet-1k"
+
+  if [[ ! -d "${HFDS_SHARED_IMAGENET_DIR}" ]]; then
+    echo "HFDS overlay disabled: shared cache root missing: ${HFDS_SHARED_IMAGENET_DIR}"
+    return 0
+  fi
+  if [[ ! -d "${shared_dataset_dir}" ]]; then
+    echo "HFDS overlay disabled: expected dataset payload missing: ${shared_dataset_dir}"
+    return 0
+  fi
+
+  mkdir -p "${HFDS_LOCAL_OVERLAY_DIR}"
+  if [[ ! -d "${local_dataset_dir}" ]]; then
+    # Create a lightweight mirror tree with symlinked files.
+    cp -as "${shared_dataset_dir}" "${HFDS_LOCAL_OVERLAY_DIR}/"
+  fi
+
+  # Keep lock files node-local (delete only symlinked lock files).
+  find "${local_dataset_dir}" -type l -name "*.lock" -delete >/dev/null 2>&1 || true
+
+  export LABELMIX_DATA_DIR_OVERRIDE="${HFDS_LOCAL_OVERLAY_DIR}"
+  export HF_DATASETS_CACHE="${HFDS_LOCAL_OVERLAY_DIR}"
+  export HF_HOME="${HFDS_LOCAL_OVERLAY_DIR}"
+
+  echo "HFDS overlay enabled:"
+  echo "  shared cache: ${HFDS_SHARED_IMAGENET_DIR}"
+  echo "  node index:   ${HFDS_NODE_INDEX} (INDEX=${INDEX:-unset})"
+  echo "  node cache:   ${HFDS_LOCAL_OVERLAY_DIR}"
+  echo "  data-dir override env: LABELMIX_DATA_DIR_OVERRIDE=${LABELMIX_DATA_DIR_OVERRIDE}"
+}
+
 if ! command -v python >/dev/null 2>&1; then
   echo "ERROR: python command not found in PATH." >&2
   exit 1
@@ -139,6 +190,8 @@ else
   echo "ERROR: failed to build Ray custom group resources." >&2
   exit 1
 fi
+
+setup_local_hfds_overlay
 
 if [[ "$INITIAL_NODE_STAGGER_SECONDS" -gt 0 && "$NODE_RANK" -gt 0 ]]; then
   delay=$((INITIAL_NODE_STAGGER_SECONDS * NODE_RANK))
