@@ -92,7 +92,7 @@ _WANDB_RUN_PATTERNS: List[re.Pattern[str]] = [
 
 # The first arg parser parses out only the --config argument, this argument is used to
 # load a yaml file containing key-values that override the defaults for the main parser below
-config_parser = parser = argparse.ArgumentParser(description='Training Config', add_help=False)
+parser = argparse.ArgumentParser(description='Training Config', add_help=False)
 parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
                     help='YAML config file specifying default arguments')
 
@@ -835,7 +835,7 @@ def _update_training_status(
 
 def _parse_args():
     # Do we have a config file to parse?
-    args_config, remaining = config_parser.parse_known_args()
+    args_config, remaining = parser.parse_known_args()
     if args_config.config:
         with open(args_config.config, 'r') as f:
             cfg = yaml.safe_load(f)
