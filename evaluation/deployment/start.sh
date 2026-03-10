@@ -3,69 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 START_RUNTIME_SCRIPT="${SCRIPT_DIR}/start_runtime.sh"
-DEFAULT_PROJECT_ROOT="/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix"
-
-PROJECT_ROOT="${PROJECT_ROOT:-${DEFAULT_PROJECT_ROOT}}"
-if [[ ! -d "${PROJECT_ROOT}" ]]; then
-  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-fi
-
-CONDA_ROOT="${CONDA_ROOT:-${PROJECT_ROOT}/miniconda3}"
-CONDA_BIN="${CONDA_BIN:-${CONDA_ROOT}/bin/conda}"
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-labelmix}"
-CONDA_ENV_PATH="${CONDA_ENV_PATH:-}"
-CONDA_ACTIVATE_SCRIPT="${CONDA_ACTIVATE_SCRIPT:-${CONDA_ROOT}/bin/activate}"
-SKIP_CONDA_ACTIVATE="${SKIP_CONDA_ACTIVATE:-0}"
-
-if [[ "${SKIP_CONDA_ACTIVATE}" != "1" ]]; then
-  if [[ ! -x "${CONDA_BIN}" ]]; then
-    echo "ERROR: conda binary not found at ${CONDA_BIN}" >&2
-    echo "Hint: set CONDA_ROOT/CONDA_BIN, or run with SKIP_CONDA_ACTIVATE=1 if env is already active." >&2
-    exit 1
-  fi
-
-  if [[ ! -f "${CONDA_ACTIVATE_SCRIPT}" ]]; then
-    echo "ERROR: conda activate script not found at ${CONDA_ACTIVATE_SCRIPT}" >&2
-    exit 1
-  fi
-
-  source_conda_activate() {
-    local target="$1"
-    local had_nounset="0"
-    if [[ "$-" == *u* ]]; then
-      had_nounset="1"
-      set +u
-    fi
-    # shellcheck disable=SC1090
-    source "${CONDA_ACTIVATE_SCRIPT}" "${target}"
-    local rc=$?
-    if [[ "${had_nounset}" == "1" ]]; then
-      set -u
-    fi
-    return "${rc}"
-  }
-
-  activate_target="${CONDA_ENV_NAME}"
-  if [[ -n "${CONDA_ENV_PATH}" ]]; then
-    activate_target="${CONDA_ENV_PATH}"
-  fi
-
-  if ! source_conda_activate "${activate_target}"; then
-    if [[ -z "${CONDA_ENV_PATH}" && -d "${PROJECT_ROOT}/env/${CONDA_ENV_NAME}" ]] && source_conda_activate "${PROJECT_ROOT}/env/${CONDA_ENV_NAME}"; then
-      activate_target="${PROJECT_ROOT}/env/${CONDA_ENV_NAME}"
-    elif [[ -z "${CONDA_ENV_PATH}" && -d "${PROJECT_ROOT}/env/labemix" ]] && source_conda_activate "${PROJECT_ROOT}/env/labemix"; then
-      activate_target="${PROJECT_ROOT}/env/labemix"
-    elif [[ -z "${CONDA_ENV_PATH}" && -d "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}" ]] && source_conda_activate "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}"; then
-      activate_target="${CONDA_ROOT}/envs/${CONDA_ENV_NAME}"
-    else
-      echo "ERROR: failed to activate conda env target '${activate_target}'." >&2
-      echo "Hint: set CONDA_ENV_NAME=<env-name> or CONDA_ENV_PATH=<full-env-path>." >&2
-      exit 1
-    fi
-  fi
-
-  echo "start.sh: activated conda env target '${activate_target}'."
-fi
 
 if [[ ! -x "${START_RUNTIME_SCRIPT}" ]]; then
   echo "ERROR: runtime start script is missing or not executable: ${START_RUNTIME_SCRIPT}" >&2
