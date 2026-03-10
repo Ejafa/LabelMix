@@ -32,17 +32,33 @@ if [[ "${SKIP_CONDA_ACTIVATE}" != "1" ]]; then
     exit 1
   fi
 
+  source_conda_activate() {
+    local target="$1"
+    local had_nounset="0"
+    if [[ "$-" == *u* ]]; then
+      had_nounset="1"
+      set +u
+    fi
+    # shellcheck disable=SC1090
+    source "${CONDA_ACTIVATE_SCRIPT}" "${target}"
+    local rc=$?
+    if [[ "${had_nounset}" == "1" ]]; then
+      set -u
+    fi
+    return "${rc}"
+  }
+
   activate_target="${CONDA_ENV_NAME}"
   if [[ -n "${CONDA_ENV_PATH}" ]]; then
     activate_target="${CONDA_ENV_PATH}"
   fi
 
-  if ! source "${CONDA_ACTIVATE_SCRIPT}" "${activate_target}"; then
-    if [[ -z "${CONDA_ENV_PATH}" && -d "${PROJECT_ROOT}/env/${CONDA_ENV_NAME}" ]] && source "${CONDA_ACTIVATE_SCRIPT}" "${PROJECT_ROOT}/env/${CONDA_ENV_NAME}"; then
+  if ! source_conda_activate "${activate_target}"; then
+    if [[ -z "${CONDA_ENV_PATH}" && -d "${PROJECT_ROOT}/env/${CONDA_ENV_NAME}" ]] && source_conda_activate "${PROJECT_ROOT}/env/${CONDA_ENV_NAME}"; then
       activate_target="${PROJECT_ROOT}/env/${CONDA_ENV_NAME}"
-    elif [[ -z "${CONDA_ENV_PATH}" && -d "${PROJECT_ROOT}/env/labemix" ]] && source "${CONDA_ACTIVATE_SCRIPT}" "${PROJECT_ROOT}/env/labemix"; then
+    elif [[ -z "${CONDA_ENV_PATH}" && -d "${PROJECT_ROOT}/env/labemix" ]] && source_conda_activate "${PROJECT_ROOT}/env/labemix"; then
       activate_target="${PROJECT_ROOT}/env/labemix"
-    elif [[ -z "${CONDA_ENV_PATH}" && -d "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}" ]] && source "${CONDA_ACTIVATE_SCRIPT}" "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}"; then
+    elif [[ -z "${CONDA_ENV_PATH}" && -d "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}" ]] && source_conda_activate "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}"; then
       activate_target="${CONDA_ROOT}/envs/${CONDA_ENV_NAME}"
     else
       echo "ERROR: failed to activate conda env target '${activate_target}'." >&2
