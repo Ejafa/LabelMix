@@ -90,11 +90,24 @@ _WANDB_RUN_PATTERNS: List[re.Pattern[str]] = [
     re.compile(r"run-\d{8}_\d{6}-([A-Za-z0-9]+)\b"),
 ]
 
-# The first arg parser parses out only the --config argument, this argument is used to
-# load a yaml file containing key-values that override the defaults for the main parser below
-parser = argparse.ArgumentParser(description='Training Config', add_help=False)
-parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
-                    help='YAML config file specifying default arguments')
+
+# ---------------------------------------------------------------------------
+# Parser construction
+# ---------------------------------------------------------------------------
+# The module-level ``config_parser`` handles only ``-c / --config`` so a YAML
+# file can be loaded before the main parser runs.  The main ``parser`` carries
+# every training argument.  Both are created here at module scope so that the
+# existing CLI entrypoint (``python train.py …``) keeps working exactly as
+# before.
+#
+# For programmatic / Ray-based usage, call ``create_parsers()`` to get a *fresh*
+# pair with no shared state, or use ``build_args()`` which internally creates
+# fresh parsers each time.
+# ---------------------------------------------------------------------------
+
+config_parser = argparse.ArgumentParser(description='Training Config', add_help=False)
+config_parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
+                           help='YAML config file specifying default arguments')
 
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
@@ -490,6 +503,8 @@ group.add_argument('--no-prefetcher', action='store_true', default=False,
                    help='disable fast prefetcher')
 group.add_argument('--output', default='', type=str, metavar='PATH',
                    help='path to output folder (default: none, current dir)')
+group.add_argument('--log-dir', default='', type=str, metavar='DIR',
+                   help='directory for training log files (default: none, no file logging)')
 group.add_argument('--experiment', default='', type=str, metavar='NAME',
                    help='name of train experiment, name of sub-folder for output')
 group.add_argument('--eval-metric', default='top1', type=str, metavar='EVAL_METRIC',
@@ -553,6 +568,111 @@ parser.add_argument('--kd-teacher-feature-dim', default=None, type=int,
                     help='Teacher model feature dimension (auto-detected from model.head_hidden_size or model.num_features if not specified)')
 parser.add_argument('--kd-token-distill-type', default='soft', type=str, choices=['soft', 'hard'],
                     help='Token distillation type: "soft" for KL-div with temperature, "hard" for CE with teacher argmax (default: soft)')
+
+
+# ---------------------------------------------------------------------------
+# Public API for programmatic use (Ray, notebooks, tests)
+# ---------------------------------------------------------------------------
+
+def create_parsers():
+    """Return a *fresh* ``(config_parser, main_parser)`` pair.
+
+    Every call builds new ``ArgumentParser`` instances so callers (e.g. Ray
+    trials running concurrently) never share mutable state.
+
+    *config_parser* handles only ``-c / --config``.
+    *main_parser* contains every training argument.
+    """
+    import copy as _copy
+    cfg_p = argparse.ArgumentParser(description='Training Config', add_help=False)
+    cfg_p.add_argument('-c', '--config', default='', type=str, metavar='FILE',
+                       help='YAML config file specifying default arguments')
+    # Deep-copy the module-level parser so all arguments are present but
+    # set_defaults() in one trial cannot leak into another.
+    main_p = _copy.deepcopy(parser)
+    return cfg_p, main_p
+
+
+def build_args(
+    config_path: Optional[str] = None,
+    cli_overrides: Optional[List[str]] = None,
+    dict_overrides: Optional[Dict[str, Any]] = None,
+) -> tuple:
+    """Construct training args programmatically.
+
+    Config precedence (highest wins):
+        1. YAML config (``config_path``)
+        2. ``dict_overrides`` (common Python overrides)
+        3. ``cli_overrides`` (trial-specific overrides as a list of CLI tokens)
+
+    Returns ``(args, args_text)`` identical in shape to the old
+    ``_parse_args()`` return value.
+    """
+    import copy as _copy
+    p = _copy.deepcopy(parser)
+
+    # 1. YAML config defaults
+    if config_path:
+        with open(config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+        if cfg:
+            p.set_defaults(**cfg)
+
+    # 2. dict overrides (applied as defaults so CLI can still override)
+    if dict_overrides:
+        p.set_defaults(**dict_overrides)
+
+    # 3. CLI-style overrides
+    args = p.parse_args(cli_overrides or [])
+
+    # Attach config path for downstream use
+    if config_path and not getattr(args, 'config', ''):
+        args.config = config_path
+
+    args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
+    return args, args_text
+
+
+def validate_args(args) -> None:
+    """Run the validation checks that ``main()`` performs on parsed args.
+
+    Raises ``SystemExit`` (via ``parser.error``) or ``ValueError`` on
+    invalid combinations.  Call this *after* ``build_args`` or ``_parse_args``
+    and *before* ``run_training``.
+    """
+    if getattr(args, 'check_resume_search_limit', 1) < 1:
+        raise ValueError('--check-resume-search-limit must be >= 1')
+
+    if getattr(args, 'labelmix', False):
+        if not getattr(args, 'balanced_mode', ''):
+            raise ValueError('--labelmix requires --balanced-mode to be set')
+        if getattr(args, 'labelmix_mix_k', 1) < 1:
+            raise ValueError('--labelmix-mix-k must be >= 1')
+        k_min = getattr(args, 'labelmix_k_min', None)
+        k_max = getattr(args, 'labelmix_k_max', None)
+        if k_min is not None and k_min < 1:
+            raise ValueError('--labelmix-k-min must be >= 1')
+        if k_max is not None and k_max < 1:
+            raise ValueError('--labelmix-k-max must be >= 1')
+        if k_min is not None and k_max is not None and k_max < k_min:
+            raise ValueError('--labelmix-k-max must be >= --labelmix-k-min')
+
+    bm = getattr(args, 'balanced_mode', '')
+    if bm:
+        if isinstance(bm, str):
+            mode = bm.strip().lower()
+            if mode.isdigit():
+                mode = int(mode)
+            elif mode not in ('min', 'max'):
+                raise ValueError('--balanced-mode must be "min", "max", or a positive int')
+        elif isinstance(bm, int):
+            mode = bm
+        else:
+            raise ValueError('--balanced-mode must be "min", "max", or a positive int')
+        if isinstance(mode, int) and mode < 1:
+            raise ValueError('--balanced-mode int value must be >= 1')
+
+
 
 
 def _extract_wandb_id_from_text(text: str) -> Optional[str]:
@@ -835,7 +955,7 @@ def _update_training_status(
 
 def _parse_args():
     # Do we have a config file to parse?
-    args_config, remaining = parser.parse_known_args()
+    args_config, remaining = config_parser.parse_known_args()
     if args_config.config:
         with open(args_config.config, 'r') as f:
             cfg = yaml.safe_load(f)
@@ -1056,9 +1176,29 @@ class LabelMixBroadcastLoader:
         return self._input_buf, (self._labels_buf, self._weights_buf)
 
 
-def main():
-    utils.setup_default_logging()
-    args, args_text = _parse_args()
+def run_training(args=None, args_text=None):
+    """Main training entry point.
+
+    Parameters
+    ----------
+    args : argparse.Namespace, optional
+        Pre-built args (e.g. from ``build_args``).  If *None*, args are
+        parsed from the command line via ``_parse_args()`` (original behavior).
+    args_text : str, optional
+        YAML-serialized args text saved alongside checkpoints.  Generated
+        automatically when *args* is *None*.
+    """
+    log_path = ''
+    if getattr(args, 'log_dir', ''):
+        log_dir = args.log_dir
+        os.makedirs(log_dir, exist_ok=True)
+        exp_name_for_log = getattr(args, 'experiment', '') or 'train'
+        log_path = os.path.join(log_dir, f'{exp_name_for_log}.log')
+    utils.setup_default_logging(log_path=log_path)
+    if args is None:
+        args, args_text = _parse_args()
+    elif args_text is None:
+        args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
     initial_status_file = str(getattr(args, "check_resume_status_file", "") or "").strip()
 
     def _parse_step_setting(value: str, name: str) -> tuple[int, bool]:
@@ -2525,11 +2665,11 @@ def train_step(
                     f'Data: {train_state.data_time_m.val:.3f} ({train_state.data_time_m.avg:.3f})'
                 )
 
+            train_state.update_sample_count = 0
 
         if saver is not None and args.recovery_interval and (step % args.recovery_interval == 0):
             saver.save_recovery(step, batch_idx=0)
 
-        train_state.update_sample_count = 0
         train_state.data_start_time = time.time()
         optimizer.zero_grad()
 
@@ -2632,6 +2772,13 @@ def validate(
     ])
 
     return metrics
+
+
+def main():
+    """CLI entry point — preserves the original ``python train.py`` and
+    ``torchrun ... train.py`` workflows exactly.
+    """
+    run_training()
 
 
 if __name__ == '__main__':
