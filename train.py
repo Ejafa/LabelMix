@@ -530,6 +530,10 @@ group.add_argument('--check-resume-log-dir', default='./logs', type=str, metavar
                    help='Log root scanned for wandb id fallback when --check-resume is enabled.')
 group.add_argument('--check-resume-search-limit', default=30, type=int, metavar='N',
                    help='Max number of recent log files to inspect for wandb id during --check-resume.')
+group.add_argument('--training-started-step', default=2, type=int, metavar='N',
+                   help='Write a .training_started sentinel file to output_dir after this many '
+                        'training steps complete. The job daemon uses this to know when the model '
+                        'is actively training (not just loading). Set 0 to disable. (default: 2)')
 
 # NaFlex scheduled loader arguments
 group.add_argument('--naflex-loader', action='store_true', default=False,
@@ -2254,6 +2258,32 @@ def run_training(args=None, args_text=None):
             )
 
             global_step = step
+
+            # Write .training_started sentinel so the job daemon knows this
+            # experiment is actively training (not still loading model/data).
+            # Only the primary rank writes, and only once.
+            if (
+                utils.is_primary(args)
+                and output_dir is not None
+                and args.training_started_step > 0
+                and global_step == (start_step + args.training_started_step)
+            ):
+                _sentinel = os.path.join(output_dir, '.training_started')
+                try:
+                    with open(_sentinel, 'w') as _sf:
+                        _sf.write(
+                            f'{global_step}\n'
+                            f'{datetime.now().isoformat()}\n'
+                            f'pid={os.getpid()}\n'
+                            f'pgid={os.getpgrp()}\n'
+                        )
+                    _logger.info(
+                        'Training started sentinel written to %s at step %d '
+                        '(pid=%d, pgid=%d)',
+                        _sentinel, global_step, os.getpid(), os.getpgrp(),
+                    )
+                except OSError as _e:
+                    _logger.warning('Failed to write training sentinel: %s', _e)
 
             if lr_scheduler is not None:
                 if lr_scheduler.t_in_epochs:

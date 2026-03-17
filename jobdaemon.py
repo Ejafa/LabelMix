@@ -66,6 +66,7 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_LOG_DIR = "./logs/jobs"
 DEFAULT_STATE_DIR = "./state"
 DEFAULT_INBOX_DIR = "./inbox"
+SCHEDULES_ROOT = "./schedules"
 
 DEFAULT_SATURATION_COOLDOWN = 30  # seconds to wait after OOM before trying next launch
 DEFAULT_OOM_CRASH_THRESHOLD = 120  # if a job dies within this many seconds, treat as OOM
@@ -75,6 +76,7 @@ DEFAULT_BURST_GPU_WAIT = 300 # seconds to wait for a burst-launched job to appea
 DEFAULT_STABILIZATION_WAIT = 300 # base seconds (5 min) for saturation checkpoint; actual wait = checkpoint_number × this value
 DEFAULT_MEMORY_SAFETY_MARGIN = 0.15  # 15% safety margin — predict OOM if free memory < avg_per_job × (1 + margin)
 DEFAULT_OOM_WAIT_TIMEOUT = 600  # 10 minutes — max time to wait for memory headroom before queueing
+DEFAULT_SENTINEL_TIMEOUT = 600  # 10 minutes — max time to wait for .training_started sentinel before fallback
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -136,9 +138,11 @@ class DaemonConfig:
     burst_jobs_launched: int = 0  # how many jobs launched in current burst
     saturation_checkpoints_passed: int = 0  # how many saturation checkpoints completed (for progressive wait)
     overcommit_rr_index: int = 0  # round-robin index for GPU pinning in overcommit mode
+    fill_gpu_index: int = 0  # index into gpus list: the GPU we are currently filling
     prev_running: int = 0  # previous running count for FIFO slot detection (persisted)
     peak_memory_per_job: Optional[float] = None  # MiB: best estimate of memory per job from stabilized jobs
     last_checkpoint_burst_index: int = 0  # burst_jobs_launched at last successful saturation checkpoint
+    last_launched_job_name: Optional[str] = None  # name of the last job launched (waiting for its sentinel)
 
 
 @dataclass
@@ -1312,6 +1316,152 @@ def check_gpu_presence(job: Job) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Sentinel-based training-started detection
+# ---------------------------------------------------------------------------
+
+def _parse_cli_flag(cmd: str, flag: str) -> Optional[str]:
+    """Extract the value of *flag* (e.g. ``--output``) from a shell command string.
+
+    Handles both ``--flag value`` and ``--flag=value`` forms.  Returns
+    *None* when the flag is absent.
+    """
+    tokens = shlex.split(cmd)
+    for i, tok in enumerate(tokens):
+        if tok == flag and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith(f"{flag}="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def get_job_sentinel_path(job: Job) -> Optional[str]:
+    """Derive the ``.training_started`` sentinel path from a job's command.
+
+    The sentinel lives at ``<output>/<experiment>/.training_started``.
+    Both ``--output`` and ``--experiment`` must be present in the command.
+    """
+    cmd = job.cmd_template or job.cmd
+    output_root = _parse_cli_flag(cmd, "--output")
+    experiment = _parse_cli_flag(cmd, "--experiment")
+    if output_root and experiment:
+        return os.path.join(output_root, experiment, ".training_started")
+    return None
+
+
+def check_training_started(job: Job) -> bool:
+    """Return *True* if the job has written its ``.training_started`` sentinel.
+
+    The sentinel file written by ``train.py`` contains a ``pgid=<N>`` line.
+    We verify that the PGID recorded in the sentinel matches ``job.pgid``
+    so that stale sentinels from a previous run (or manually created files)
+    are not mistaken for a valid start signal.
+
+    Falls back to :func:`check_gpu_presence` when the sentinel path cannot
+    be determined.
+    """
+    sentinel = get_job_sentinel_path(job)
+    if sentinel is None:
+        # Cannot determine sentinel path — fall back to GPU presence check
+        return check_gpu_presence(job)
+    if not os.path.isfile(sentinel):
+        return False
+
+    # ------------------------------------------------------------------
+    # Verify ownership: the PGID written by train.py must match the
+    # process-group of the subprocess the daemon launched for this job.
+    # ------------------------------------------------------------------
+    if job.pgid is None:
+        # No pgid recorded (shouldn't happen) — accept presence only
+        return True
+    try:
+        with open(sentinel, "r") as f:
+            content = f.read()
+        for line in content.splitlines():
+            if line.startswith("pgid="):
+                sentinel_pgid = int(line.split("=", 1)[1])
+                if sentinel_pgid == job.pgid:
+                    return True
+                _log(
+                    f"⚠ Sentinel {sentinel} has pgid={sentinel_pgid} "
+                    f"but job {job.name} expects pgid={job.pgid} "
+                    f"— ignoring stale/foreign sentinel"
+                )
+                return False
+        # No pgid line found — sentinel is invalid / not from our train.py
+        _log(
+            f"⚠ Sentinel {sentinel} has no pgid line "
+            f"— ignoring invalid sentinel"
+        )
+        return False
+    except (OSError, ValueError) as exc:
+        _log(f"⚠ Failed to read sentinel {sentinel}: {exc}")
+        return False
+
+
+def get_gpu_free_memory(gpu_index: int) -> Optional[int]:
+    """Return free memory (MiB) on a single GPU, or *None* on failure."""
+    mem_info = get_gpu_memory_total_and_used()
+    if not mem_info:
+        return None
+    for idx, total, used in mem_info:
+        if idx == gpu_index:
+            return total - used
+    return None
+
+
+def can_fit_another_job_on_gpu(
+    gpu_index: int,
+    state: "State",
+    safety_margin: float = DEFAULT_MEMORY_SAFETY_MARGIN,
+    gpus_needed: int = 1,
+) -> Tuple[bool, str]:
+    """Check if *gpu_index* has enough free memory for one more job.
+
+    Uses the per-job memory estimate from stabilized jobs.  Falls back
+    to ``True`` when there is no baseline yet (first job on that GPU).
+
+    For multi-GPU jobs, *gpus_needed* is used to convert the total
+    per-job memory estimate into a per-GPU-slot estimate so the
+    comparison against single-GPU free memory is correct.
+
+    Returns (can_fit, reason_string).
+    """
+    free = get_gpu_free_memory(gpu_index)
+    if free is None:
+        return True, "Cannot query GPU memory — assuming OK"
+
+    avg_per_job = get_per_job_avg_memory(state)
+    if avg_per_job is None or avg_per_job < 100:
+        # No reliable baseline yet — first job on GPU, safe to add
+        return True, (
+            f"GPU {gpu_index}: no reliable memory baseline yet "
+            f"(avg={avg_per_job}), allowing launch"
+        )
+
+    # avg_per_job is total across ALL GPUs the job uses (e.g. a 2-GPU
+    # job using 35 GB on each GPU → avg_per_job ≈ 70 GB).  We must
+    # divide by gpus_needed to get the per-GPU-slot estimate so the
+    # comparison against single-GPU free memory is correct.
+    per_gpu_slot = avg_per_job / max(gpus_needed, 1)
+    needed = per_gpu_slot * (1.0 + safety_margin)
+
+    if free >= needed:
+        return True, (
+            f"GPU {gpu_index}: {free:.0f} MiB free >= "
+            f"{needed:.0f} MiB needed "
+            f"(per_slot={per_gpu_slot:.0f}, total/job={avg_per_job:.0f}, "
+            f"gpus_needed={gpus_needed}) — OK"
+        )
+    else:
+        return False, (
+            f"GPU {gpu_index}: {free:.0f} MiB free < "
+            f"{needed:.0f} MiB needed "
+            f"(per_slot={per_gpu_slot:.0f}, total/job={avg_per_job:.0f}, "
+            f"gpus_needed={gpus_needed}) — full"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Inbox watcher
 # ---------------------------------------------------------------------------
 
@@ -1804,30 +1954,24 @@ def daemon_main(args: argparse.Namespace) -> None:
 
         # Step 3: Launch pending jobs
         #
-        # OVERCOMMIT MODE (always on):
-        #   All jobs share all GPUs. Launch with health gates until
-        #   OOM detected, then drain mode (FIFO: 1-out → 1-in).
+        # FILL-PER-GPU SCHEDULING (signal-based, deterministic):
+        #   Launch a job on GPU group [X..X+N-1] → wait for sentinel
+        #   → check ALL GPUs in group for free memory → if room, launch
+        #   another on the same group → if full, advance fill_gpu_index
+        #   by gpus_needed to the next group → repeat.
+        #
+        # Phase 1 - BURST: Fill GPUs one at a time until all GPUs are
+        #   full or all pending jobs are launched.
+        # Phase 2 - FIFO: 1-out-1-in. When a running job completes,
+        #   launch the next pending job on the same GPU (fill-per-GPU).
         if not state.daemon.paused:
             pending = [j for j in state.jobs if j.status == "pending"]
             running_count = sum(1 for j in state.jobs if j.status == "running")
 
-            # --- OVERCOMMIT MODE (Health-Gated Burst + Saturation Checkpoints) ---
-            #
-            # Phase 1 - BURST: Launch jobs one-by-one. Before EACH launch:
-            #   a) HEALTH GATE: Verify ALL currently running jobs are still
-            #      alive. If any died → stop burst, enter FIFO.
-            #   b) SATURATION CHECKPOINT: Every num_gpus jobs, pause for
-            #      stabilization_wait seconds to let late OOM crashes
-            #      surface, then re-verify all running jobs.
-            #   c) GPU PRESENCE WAIT: After launching, wait for the job
-            #      to appear on GPU before launching the next one.
-            #
-            # Phase 2 - FIFO: 1-out-1-in. When a running job completes,
-            #   launch the next pending job. This keeps resources fully
-            #   utilized without overloading.
-
             all_gpus = list(state.daemon.gpus)
             num_gpus = len(all_gpus)
+            safety_margin = getattr(args, 'memory_safety_margin', DEFAULT_MEMORY_SAFETY_MARGIN)
+            sentinel_timeout = getattr(args, 'sentinel_timeout', DEFAULT_SENTINEL_TIMEOUT)
 
             if state.daemon.burst_phase and not pending and state.daemon.burst_jobs_launched > 0:
                 # All pending jobs launched in burst — transition to FIFO
@@ -1835,34 +1979,223 @@ def daemon_main(args: argparse.Namespace) -> None:
                      f"({state.daemon.burst_jobs_launched} total). "
                      f"Switching to FIFO mode.")
                 state.daemon.burst_phase = False
+                state.daemon.last_launched_job_name = None
                 changed = True
 
             elif state.daemon.burst_phase and pending:
-                # --- BURST PHASE (Health-Gated) ---
-                # Launch jobs one-by-one. Before each launch, verify all
-                # running jobs are still alive (health gate). After every
-                # num_gpus launches, do a deeper stabilization checkpoint.
+                # --- BURST PHASE (Fill-Per-GPU, Signal-Based) ---
+                #
+                # Algorithm:
+                #   1. If we are waiting for a previously launched job's
+                #      sentinel, check for it. If not ready yet, skip this
+                #      cycle (the main poll loop will come back).
+                #   2. Once the sentinel is confirmed (or this is the first
+                #      job), check if the current GPU has room for another.
+                #   3. If yes → launch on the same GPU.
+                #   4. If no  → advance fill_gpu_index to next GPU and launch there.
+                #   5. If all GPUs are full → switch to FIFO.
 
-                burst_delay = getattr(args, 'burst_delay', DEFAULT_BURST_DELAY)
-                gpu_check_delay = getattr(args, 'gpu_check_delay', DEFAULT_GPU_CHECK_DELAY)
-                stabilization_wait = getattr(args, 'stabilization_wait', DEFAULT_STABILIZATION_WAIT)
+                pending = [j for j in state.jobs if j.status == "pending"]
 
-                # If still in burst phase, launch next job(s)
-                if state.daemon.burst_phase:
-                    pending = [j for j in state.jobs if j.status == "pending"]
-                    launched_this_cycle = []
-                    burst_gpu_wait = getattr(args, 'burst_gpu_wait', DEFAULT_BURST_GPU_WAIT)
+                # ─── STEP A: Wait for last-launched job's sentinel ───
+                waiting_for_sentinel = False
+                if state.daemon.last_launched_job_name:
+                    last_job = next(
+                        (j for j in state.jobs
+                         if j.name == state.daemon.last_launched_job_name
+                         and j.status == "running"),
+                        None,
+                    )
+                    if last_job is not None:
+                        # Check if the last job died while we were waiting
+                        if last_job._proc and last_job._proc.poll() is not None:
+                            exit_code = last_job._proc.poll()
+                            last_job.exit_code = exit_code
+                            last_job.error_snippet = tail_log(last_job.log_file, lines=5)
+                            if last_job._log_fh:
+                                try:
+                                    last_job._log_fh.close()
+                                except Exception:
+                                    pass
+                                last_job._log_fh = None
+                            _log(f"💀 {last_job.name} died while waiting "
+                                 f"for sentinel (exit={exit_code})")
+                            is_oom = is_oom_crash(
+                                last_job,
+                                oom_threshold=getattr(
+                                    args, 'oom_threshold',
+                                    DEFAULT_OOM_CRASH_THRESHOLD))
+                            if is_oom:
+                                _requeue_job(
+                                    last_job,
+                                    f"OOM before sentinel (exit={exit_code})")
+                                state.daemon.saturated = True
+                                state.daemon.saturation_time = (
+                                    datetime.now().isoformat())
+                                _log(f"🔀 BURST → FIFO: OOM on GPU "
+                                     f"{all_gpus[state.daemon.fill_gpu_index]}. "
+                                     f"Switching to 1-out-1-in mode.")
+                                state.daemon.burst_phase = False
+                            elif last_job.retries < last_job.max_retries:
+                                last_job.retries += 1
+                                last_job.status = "pending"
+                                last_job.pid = None
+                                last_job.pgid = None
+                                last_job.gpu_ids = None
+                                last_job.master_port = None
+                                _log(f"↩ {last_job.name} requeueing "
+                                     f"(retry {last_job.retries}/"
+                                     f"{last_job.max_retries})")
+                            else:
+                                last_job.status = "failed"
+                                last_job.completed_at = (
+                                    datetime.now().isoformat())
+                                _log(f"❌ {last_job.name} permanently failed")
+                            state.daemon.last_launched_job_name = None
+                            changed = True
 
-                    for job in pending:
-                        # ─── HEALTH GATE ────────────────────────────────
-                        # Before launching the next job, verify ALL running
-                        # jobs are still alive. If any died, it means the
-                        # machine is at capacity → switch to FIFO.
+                        elif check_training_started(last_job):
+                            # Sentinel confirmed — snapshot memory and
+                            # clear the wait so we can proceed.
+                            _snapshot_peak_memory(state)
+                            _log(f"✅ {last_job.name} training started "
+                                 f"(sentinel confirmed on GPU "
+                                 f"{all_gpus[state.daemon.fill_gpu_index]})")
+                            state.daemon.last_launched_job_name = None
+                            changed = True
+
+                        elif last_job.started_at:
+                            # Still waiting — check if we exceeded timeout
+                            try:
+                                started = datetime.fromisoformat(
+                                    last_job.started_at)
+                                elapsed = (
+                                    datetime.now() - started
+                                ).total_seconds()
+                            except Exception:
+                                elapsed = 0
+                            if elapsed > sentinel_timeout:
+                                _log(f"⚠️ {last_job.name} sentinel not "
+                                     f"found after {elapsed:.0f}s — "
+                                     f"proceeding (fallback to GPU presence)")
+                                if check_gpu_presence(last_job):
+                                    _log(f"  ✅ {last_job.name} has GPU "
+                                         f"presence, treating as started")
+                                else:
+                                    _log(f"  ⚠️ {last_job.name} no GPU "
+                                         f"presence either, proceeding "
+                                         f"cautiously")
+                                state.daemon.last_launched_job_name = None
+                                changed = True
+                            else:
+                                # Still within timeout — wait for next
+                                # poll cycle
+                                waiting_for_sentinel = True
+
+                if not waiting_for_sentinel and state.daemon.burst_phase and pending:
+                    # ─── STEP B: Determine target GPU group ──────────
+                    # For multi-GPU jobs (gpus_needed > 1), we treat
+                    # consecutive GPUs as a "group". fill_gpu_index
+                    # always points to the FIRST GPU in the current
+                    # group.  We check ALL GPUs in the group for
+                    # available memory before launching.
+                    #
+                    # When a group is full, we advance by gpus_needed
+                    # (not by 1) so that groups don't overlap.
+                    # E.g. with gpus_needed=2 and GPUs [0..7]:
+                    #   group 0 = [0,1], group 1 = [2,3], ...
+                    gpj = pending[0].gpus_needed  # peek at next job
+                    fill_idx = state.daemon.fill_gpu_index
+                    # Build the GPU group for the current fill_idx
+                    target_group = [
+                        all_gpus[(fill_idx + g) % num_gpus]
+                        for g in range(gpj)
+                    ]
+
+                    # Only check memory if we already have jobs on
+                    # ANY GPU in this group (first job always launches).
+                    jobs_on_group = sum(
+                        1 for j in state.jobs
+                        if j.status == "running"
+                        and j.gpu_ids
+                        and any(g in j.gpu_ids for g in target_group)
+                    )
+                    if jobs_on_group > 0:
+                        # Check ALL GPUs in the group — the group can
+                        # only fit another job if EVERY GPU has room.
+                        group_can_fit = True
+                        group_reasons = []
+                        for gid in target_group:
+                            fit, reason = can_fit_another_job_on_gpu(
+                                gid, state, safety_margin,
+                                gpus_needed=gpj)
+                            group_reasons.append(f"GPU {gid}: {reason}")
+                            if not fit:
+                                group_can_fit = False
+                        _log(f"🔍 GPU group {target_group} "
+                             f"({jobs_on_group} job(s) running): "
+                             + "; ".join(group_reasons))
+
+                        if not group_can_fit:
+                            # Current group is full — try next group(s).
+                            # Advance by gpus_needed each step so groups
+                            # don't overlap.
+                            advanced = False
+                            num_groups = num_gpus // max(gpj, 1)
+                            for step in range(1, max(num_groups, 1)):
+                                next_idx = (
+                                    fill_idx + step * gpj
+                                ) % num_gpus
+                                next_group = [
+                                    all_gpus[(next_idx + g) % num_gpus]
+                                    for g in range(gpj)
+                                ]
+                                # Check all GPUs in next group
+                                next_ok = True
+                                next_reasons = []
+                                for gid in next_group:
+                                    fit_n, reason_n = (
+                                        can_fit_another_job_on_gpu(
+                                            gid, state, safety_margin,
+                                            gpus_needed=gpj))
+                                    next_reasons.append(
+                                        f"GPU {gid}: {reason_n}")
+                                    if not fit_n:
+                                        next_ok = False
+                                if next_ok:
+                                    state.daemon.fill_gpu_index = next_idx
+                                    target_group = next_group
+                                    fill_idx = next_idx
+                                    _log(f"➡️ Advanced to GPU group "
+                                         f"{target_group}: "
+                                         + "; ".join(next_reasons))
+                                    advanced = True
+                                    break
+                                else:
+                                    _log(f"  GPU group {next_group} "
+                                         f"also full: "
+                                         + "; ".join(next_reasons))
+
+                            if not advanced:
+                                # ALL GPU groups full — switch to FIFO
+                                _log(f"🔀 BURST → FIFO: All "
+                                     f"{num_groups} GPU group(s) full. "
+                                     f"Switching to 1-out-1-in mode.")
+                                state.daemon.burst_phase = False
+                                state.daemon.saturated = True
+                                state.daemon.saturation_time = (
+                                    datetime.now().isoformat())
+                                changed = True
+
+                    # ─── STEP C: Launch the job on target GPU group ─
+                    if state.daemon.burst_phase and pending:
+                        job = pending[0]
+
+                        # Health gate: verify all running jobs alive
                         dead_jobs = []
                         for rj in state.jobs:
                             if rj.status != "running":
                                 continue
-                            # Check if process is still alive
                             proc_alive = False
                             rj_exit_code = None
                             if rj._proc is not None:
@@ -1873,28 +2206,33 @@ def daemon_main(args: argparse.Namespace) -> None:
                                     rj_exit_code = ret
                             else:
                                 proc_alive = is_process_alive(rj.pid)
-
                             if not proc_alive:
                                 dead_jobs.append((rj, rj_exit_code))
 
                         if dead_jobs:
-                            _log(f"🛑 HEALTH GATE: {len(dead_jobs)} running job(s) "
-                                 f"died before launching next:")
+                            _log(f"🛑 HEALTH GATE: {len(dead_jobs)} "
+                                 f"job(s) died:")
                             any_oom = False
                             for dj, dj_exit in dead_jobs:
                                 _log(f"   💀 {dj.name} (exit={dj_exit})")
                                 dj.exit_code = dj_exit
-                                dj.error_snippet = tail_log(dj.log_file, lines=5)
-                                # Close log file handle
+                                dj.error_snippet = tail_log(
+                                    dj.log_file, lines=5)
                                 if dj._log_fh:
                                     try:
                                         dj._log_fh.close()
                                     except Exception:
                                         pass
                                     dj._log_fh = None
-                                if is_oom_crash(dj, oom_threshold=args.oom_threshold):
+                                if is_oom_crash(
+                                    dj,
+                                    oom_threshold=getattr(
+                                        args, 'oom_threshold',
+                                        DEFAULT_OOM_CRASH_THRESHOLD)):
                                     any_oom = True
-                                    _requeue_job(dj, "Died (OOM) — detected by health gate")
+                                    _requeue_job(
+                                        dj,
+                                        "Died (OOM) — health gate")
                                 elif dj.retries < dj.max_retries:
                                     dj.retries += 1
                                     dj.status = "pending"
@@ -1903,417 +2241,239 @@ def daemon_main(args: argparse.Namespace) -> None:
                                     dj.gpu_ids = None
                                     dj.master_port = None
                                     _log(f"   ↩ {dj.name} requeueing "
-                                         f"(retry {dj.retries}/{dj.max_retries})")
+                                         f"(retry {dj.retries}/"
+                                         f"{dj.max_retries})")
                                 else:
                                     dj.status = "failed"
-                                    dj.completed_at = datetime.now().isoformat()
-                                    _log(f"   ❌ {dj.name} permanently failed")
+                                    dj.completed_at = (
+                                        datetime.now().isoformat())
+                                    _log(f"   ❌ {dj.name} permanently "
+                                         f"failed")
 
-                            # Any dead job during burst = machine saturated
-                            alive_running = sum(1 for j in state.jobs if j.status == "running")
-
-                            # CASCADE REQUEUE: If OOM detected, kill+requeue
-                            # all jobs launched after the last checkpoint —
-                            # they were launched under a bad memory estimate
                             if any_oom:
-                                oom_names = [dj.name for dj, _ in dead_jobs
-                                             if is_oom_crash(dj, oom_threshold=args.oom_threshold)]
                                 cascade_requeue_since_checkpoint(
-                                    state, oom_names[0] if oom_names else "unknown",
-                                    args.oom_threshold)
-                                alive_running = sum(1 for j in state.jobs if j.status == "running")
-
-                            _log(f"🔀 BURST → FIFO: Job(s) died with "
-                                 f"{alive_running} still running. "
+                                    state,
+                                    dead_jobs[0][0].name,
+                                    getattr(
+                                        args, 'oom_threshold',
+                                        DEFAULT_OOM_CRASH_THRESHOLD))
+                            _log(f"🔀 BURST → FIFO: Job(s) died. "
                                  f"Switching to 1-out-1-in mode.")
                             state.daemon.burst_phase = False
                             state.daemon.saturated = True
-                            state.daemon.saturation_time = datetime.now().isoformat()
+                            state.daemon.saturation_time = (
+                                datetime.now().isoformat())
                             changed = True
-                            break
-
-                        # ─── SATURATION CHECKPOINT ──────────────────────
-                        # After every num_gpus jobs, pause and do a deeper
-                        # health check. This catches late OOM crashes that
-                        # happen during the first training step (after model
-                        # loading / compilation), which is the pattern we
-                        # saw in the logs.
-                        if (state.daemon.burst_jobs_launched > 0
-                                and state.daemon.burst_jobs_launched % num_gpus == 0):
-                            # Progressive wait: 1st checkpoint = 1×base,
-                            # 2nd = 2×base, 3rd = 3×base, etc.
-                            # This gives early jobs a short check, and later
-                            # (more crowded) rounds a longer soak time.
-                            checkpoint_number = state.daemon.saturation_checkpoints_passed + 1
-                            progressive_wait = checkpoint_number * stabilization_wait
-                            _log(f"🔍 SATURATION CHECKPOINT #{checkpoint_number}: "
-                                 f"{state.daemon.burst_jobs_launched} "
-                                 f"jobs launched (= {state.daemon.burst_jobs_launched // num_gpus} "
-                                 f"× {num_gpus} GPUs). Waiting {progressive_wait}s "
-                                 f"({checkpoint_number} × {stabilization_wait}s) "
-                                 f"for late crashes...")
-                            save_state(state)
-
-                            # Wait for progressive_wait seconds, checking
-                            # for deaths every 5 seconds
-                            checkpoint_start = time.time()
-                            checkpoint_failed = False
-                            while time.time() - checkpoint_start < progressive_wait:
-                                time.sleep(5)
-                                # Check all running jobs
-                                for rj in state.jobs:
-                                    if rj.status != "running":
-                                        continue
-                                    rj_dead = False
-                                    rj_exit = None
-                                    if rj._proc is not None:
-                                        ret = rj._proc.poll()
-                                        if ret is not None:
-                                            rj_dead = True
-                                            rj_exit = ret
-                                    else:
-                                        if not is_process_alive(rj.pid):
-                                            rj_dead = True
-                                    if rj_dead:
-                                        elapsed_cp = time.time() - checkpoint_start
-                                        _log(f"🛑 CHECKPOINT: {rj.name} died after "
-                                             f"{elapsed_cp:.0f}s (exit={rj_exit})")
-                                        rj.exit_code = rj_exit
-                                        rj.error_snippet = tail_log(rj.log_file, lines=5)
-                                        if rj._log_fh:
-                                            try:
-                                                rj._log_fh.close()
-                                            except Exception:
-                                                pass
-                                            rj._log_fh = None
-                                        if is_oom_crash(rj, oom_threshold=args.oom_threshold):
-                                            _requeue_job(rj, "OOM during saturation checkpoint")
-                                        elif rj.retries < rj.max_retries:
-                                            rj.retries += 1
-                                            rj.status = "pending"
-                                            rj.pid = None
-                                            rj.pgid = None
-                                            rj.gpu_ids = None
-                                            rj.master_port = None
-                                        else:
-                                            rj.status = "failed"
-                                            rj.completed_at = datetime.now().isoformat()
-                                        checkpoint_failed = True
-                                        break
-                                if checkpoint_failed:
-                                    break
-
-                            if checkpoint_failed:
-                                # CASCADE REQUEUE: kill+requeue all jobs
-                                # launched since this checkpoint started
-                                cascade_requeue_since_checkpoint(
-                                    state, rj.name, args.oom_threshold)
-                                alive_running = sum(1 for j in state.jobs if j.status == "running")
-                                _log(f"🔀 BURST → FIFO: Saturation checkpoint "
-                                     f"#{checkpoint_number} failed with "
-                                     f"{alive_running} job(s) still running. "
-                                     f"Switching to 1-out-1-in mode.")
-                                state.daemon.burst_phase = False
-                                state.daemon.saturated = True
-                                state.daemon.saturation_time = datetime.now().isoformat()
+                        else:
+                            # All healthy — launch on target GPU
+                            try:
+                                port = allocate_port(state)
+                                wd = job.working_dir or args.working_dir
+                                # Fill-per-GPU-group: pin to current
+                                # group (target_group was computed in
+                                # STEP B above).
+                                pin_gpus = list(target_group)
+                                # Also keep rr_index in sync for
+                                # estimate_oom_risk compatibility
+                                state.daemon.overcommit_rr_index = (
+                                    (fill_idx + job.gpus_needed)
+                                    % num_gpus
+                                )
+                                launch_job(
+                                    job, pin_gpus, port,
+                                    args.log_dir, wd)
+                                state.daemon.burst_jobs_launched += 1
+                                job.launched_at_burst_index = (
+                                    state.daemon.burst_jobs_launched)
+                                state.daemon.last_launched_job_name = (
+                                    job.name)
                                 changed = True
-                                break
-                            else:
-                                state.daemon.saturation_checkpoints_passed = checkpoint_number
-                                state.daemon.last_checkpoint_burst_index = state.daemon.burst_jobs_launched
 
-                                # Snapshot peak memory per job now that
-                                # all jobs have been stable for the full
-                                # checkpoint wait (the MOST reliable time)
-                                _snapshot_peak_memory(state)
+                                _log(
+                                    f"🚀 BURST [{state.daemon.burst_jobs_launched}] "
+                                    f"Launched {job.name} on GPU "
+                                    f"{pin_gpus} (fill_gpu_index="
+                                    f"{fill_idx}, total running: "
+                                    f"{running_count + 1})")
 
-                                alive_running = sum(1 for j in state.jobs if j.status == "running")
-                                _log(f"✅ CHECKPOINT #{checkpoint_number} PASSED: "
-                                     f"All {alive_running} job(s) "
-                                     f"still healthy after {progressive_wait}s. "
-                                     f"Continuing burst. "
-                                     f"(Next checkpoint wait: "
-                                     f"{(checkpoint_number + 1) * stabilization_wait}s)")
-
-                        # ─── OOM PREDICTION GATE ────────────────────────
-                        # Before launching, estimate if GPU memory can fit
-                        # another job based on average memory per running job.
-                        # If at risk, wait up to oom_wait_timeout for headroom.
-                        # If still no room → switch to FIFO queue.
-                        safety_margin = getattr(args, 'memory_safety_margin', DEFAULT_MEMORY_SAFETY_MARGIN)
-                        oom_wait_timeout = getattr(args, 'oom_wait_timeout', DEFAULT_OOM_WAIT_TIMEOUT)
-
-                        at_risk, risk_reason = estimate_oom_risk(
-                            state, job.gpus_needed, safety_margin)
-
-                        if at_risk:
-                            _log(f"⚠️ OOM PREDICTION: {job.name} at risk — {risk_reason}")
-                            _log(f"⏳ Waiting up to {oom_wait_timeout:.0f}s for memory headroom...")
-                            save_state(state)
-
-                            headroom_ok, wait_reason = memory_wait_for_headroom(
-                                state, job.gpus_needed, safety_margin,
-                                oom_wait_timeout, args)
-
-                            if not headroom_ok:
-                                _log(f"🛑 OOM PREDICTION: No memory headroom after waiting. "
-                                     f"{wait_reason}")
-                                alive_running = sum(
-                                    1 for j in state.jobs if j.status == "running")
-                                _log(f"🔀 BURST → FIFO: Memory prediction says OOM likely "
-                                     f"with {alive_running} job(s) running. "
-                                     f"Switching to 1-out-1-in queue mode.")
-                                state.daemon.burst_phase = False
-                                state.daemon.saturated = True
-                                state.daemon.saturation_time = datetime.now().isoformat()
-                                changed = True
-                                break
-                            else:
-                                _log(f"✅ OOM PREDICTION: Headroom available — {wait_reason}")
-
-                        # ─── LAUNCH THE JOB ─────────────────────────────
-                        try:
-                            port = allocate_port(state)
-                            wd = job.working_dir or args.working_dir
-                            # Round-robin GPU pinning: assign job.gpus_needed
-                            # consecutive GPUs for even distribution
-                            gpj = job.gpus_needed
-                            rr_gpus = [
-                                all_gpus[(state.daemon.overcommit_rr_index + g) % len(all_gpus)]
-                                for g in range(gpj)
-                            ]
-                            state.daemon.overcommit_rr_index = (
-                                state.daemon.overcommit_rr_index + gpj
-                            ) % len(all_gpus)
-                            launch_job(job, rr_gpus, port, args.log_dir, wd)
-                            state.daemon.burst_jobs_launched += 1
-                            job.launched_at_burst_index = state.daemon.burst_jobs_launched
-                            changed = True
-                            launched_this_cycle.append(job)
-
-                            _log(f"🚀 BURST [{state.daemon.burst_jobs_launched}] "
-                                 f"Launched {job.name} (total running: "
-                                 f"{running_count + len(launched_this_cycle)})")
-
-                            # Quick sanity check: did it die immediately?
-                            if job._proc and job._proc.poll() is not None:
-                                exit_code = job._proc.poll()
-                                job.exit_code = exit_code
-                                _log(f"⚡ {job.name} died immediately (exit={exit_code})")
-                                is_oom = is_oom_crash(job, oom_threshold=args.oom_threshold)
-                                _requeue_job(job, f"Died immediately (exit={exit_code})")
-                                if is_oom:
-                                    _log(f"🔀 BURST → FIFO: OOM on immediate launch. "
-                                         f"Switching to 1-out-1-in mode.")
-                                    state.daemon.burst_phase = False
-                                    state.daemon.saturated = True
-                                    state.daemon.saturation_time = datetime.now().isoformat()
-                                    break
-                                else:
-                                    job.retries += 1
-                                    if job.retries > job.max_retries:
-                                        job.status = "failed"
-                                        job.completed_at = datetime.now().isoformat()
-                                    continue
-
-                            # --- WAIT FOR GPU PRESENCE BEFORE LAUNCHING NEXT ---
-                            # Poll NVML (via pynvml) until this job's workers appear
-                            # on the GPU. This ensures NCCL init completes before
-                            # the next job starts competing for GPU resources.
-                            _log(f"⏳ Waiting for {job.name} to appear on GPU "
-                                 f"(timeout={burst_gpu_wait}s)...")
-                            save_state(state)  # persist progress so far
-                            gpu_wait_start = time.time()
-                            gpu_found = False
-                            while time.time() - gpu_wait_start < burst_gpu_wait:
-                                # Check if job died while waiting
-                                if job._proc and job._proc.poll() is not None:
+                                # Quick sanity: died immediately?
+                                time.sleep(1)
+                                if (job._proc
+                                        and job._proc.poll() is not None):
                                     exit_code = job._proc.poll()
                                     job.exit_code = exit_code
-                                    _log(f"⚡ {job.name} died while waiting for GPU "
-                                         f"(exit={exit_code})")
-                                    is_oom = is_oom_crash(job, oom_threshold=args.oom_threshold)
-                                    _requeue_job(job, f"Died during GPU wait (exit={exit_code})")
+                                    _log(f"⚡ {job.name} died immediately"
+                                         f" (exit={exit_code})")
+                                    is_oom = is_oom_crash(
+                                        job,
+                                        oom_threshold=getattr(
+                                            args, 'oom_threshold',
+                                            DEFAULT_OOM_CRASH_THRESHOLD))
+                                    _requeue_job(
+                                        job,
+                                        f"Died immediately "
+                                        f"(exit={exit_code})")
+                                    state.daemon.last_launched_job_name = (
+                                        None)
                                     if is_oom:
-                                        _log(f"🔀 BURST → FIFO: OOM during GPU wait. "
-                                             f"Switching to 1-out-1-in mode.")
+                                        _log(
+                                            f"🔀 BURST → FIFO: OOM on "
+                                            f"GPU {target_gpu}.")
                                         state.daemon.burst_phase = False
                                         state.daemon.saturated = True
-                                        state.daemon.saturation_time = datetime.now().isoformat()
+                                        state.daemon.saturation_time = (
+                                            datetime.now().isoformat())
                                     else:
                                         job.retries += 1
                                         if job.retries > job.max_retries:
                                             job.status = "failed"
-                                            job.completed_at = datetime.now().isoformat()
-                                    break
+                                            job.completed_at = (
+                                                datetime.now().isoformat())
+                                else:
+                                    # Job launched OK — save state and
+                                    # wait for sentinel on next poll cycle
+                                    save_state(state)
 
-                                # Also check OTHER running jobs while waiting
-                                # (health gate during GPU wait)
-                                other_died = False
-                                for rj in state.jobs:
-                                    if rj.status != "running" or rj.name == job.name:
-                                        continue
-                                    if rj._proc is not None and rj._proc.poll() is not None:
-                                        rj_exit = rj._proc.poll()
-                                        _log(f"🛑 {rj.name} died during GPU wait for "
-                                             f"{job.name} (exit={rj_exit})")
-                                        rj.exit_code = rj_exit
-                                        rj.error_snippet = tail_log(rj.log_file, lines=5)
-                                        if rj._log_fh:
-                                            try:
-                                                rj._log_fh.close()
-                                            except Exception:
-                                                pass
-                                            rj._log_fh = None
-                                        if is_oom_crash(rj, oom_threshold=args.oom_threshold):
-                                            _requeue_job(rj, "OOM during GPU wait of another job")
-                                        elif rj.retries < rj.max_retries:
-                                            rj.retries += 1
-                                            rj.status = "pending"
-                                            rj.pid = None
-                                            rj.pgid = None
-                                            rj.gpu_ids = None
-                                            rj.master_port = None
-                                        else:
-                                            rj.status = "failed"
-                                            rj.completed_at = datetime.now().isoformat()
-                                        other_died = True
-                                        break
-
-                                if other_died:
-                                    _log(f"🔀 BURST → FIFO: Another job died while "
-                                         f"waiting for {job.name}. "
-                                         f"Switching to 1-out-1-in mode.")
-                                    state.daemon.burst_phase = False
-                                    state.daemon.saturated = True
-                                    state.daemon.saturation_time = datetime.now().isoformat()
-                                    break
-
-                                # Check if workers are on GPU
-                                if check_gpu_presence(job):
-                                    elapsed_wait = time.time() - gpu_wait_start
-                                    _log(f"✅ {job.name} confirmed on GPU after "
-                                         f"{elapsed_wait:.0f}s. Ready for next launch.")
-                                    gpu_found = True
-                                    break
-
-                                time.sleep(5)  # poll every 5 seconds
-
-                            if not gpu_found and state.daemon.burst_phase:
-                                elapsed_wait = time.time() - gpu_wait_start
-                                # Job still alive but not on GPU after timeout
-                                if job._proc and job._proc.poll() is None:
-                                    _log(f"⚠️ {job.name} not on GPU after "
-                                         f"{elapsed_wait:.0f}s, but still alive. "
-                                         f"Proceeding cautiously with next launch.")
-
-                            # If burst was cancelled during the wait, stop
-                            if not state.daemon.burst_phase:
-                                break
-
-                            # Small additional delay after GPU confirmation
-                            # to let things settle
-                            if gpu_found and burst_delay > 0:
-                                time.sleep(min(burst_delay, 5))
-
-                        except Exception as e:
-                            _log(f"Error launching {job.name}: {e}")
-                            job.error_snippet = str(e)
-
-                    if launched_this_cycle:
-                        _log(f"✅ Burst launched {len(launched_this_cycle)} job(s) this cycle")
+                            except Exception as e:
+                                _log(f"Error launching {job.name}: {e}")
+                                job.error_snippet = str(e)
 
             elif not state.daemon.burst_phase:
-                # --- FIFO PHASE (1-out-1-in) ---
-                # Only launch a new job when a running job just finished
-                # (detected by running_count decreasing)
-                prev_running = state.daemon.prev_running if state.daemon.prev_running > 0 else running_count
+                # --- FIFO PHASE (1-out-1-in, Fill-Per-GPU) ---
+                # When a running job completes, launch the next pending
+                # job on the GPU that was freed.
+                prev_running = (
+                    state.daemon.prev_running
+                    if state.daemon.prev_running > 0
+                    else running_count
+                )
                 slots_freed = max(0, prev_running - running_count)
 
                 if slots_freed > 0 and pending:
-                    # A job finished — launch the next one(s) to fill the slot(s)
-                    _log(f"🔄 FIFO: {slots_freed} slot(s) freed, launching replacement(s)")
+                    _log(f"🔄 FIFO: {slots_freed} slot(s) freed, "
+                         f"launching replacement(s)")
 
                     # Check cooldown
                     cooldown_ok = True
                     if state.daemon.saturation_time:
                         try:
-                            sat_time = datetime.fromisoformat(state.daemon.saturation_time)
-                            elapsed = (datetime.now() - sat_time).total_seconds()
-                            cooldown_ok = elapsed >= args.saturation_cooldown
+                            sat_time = datetime.fromisoformat(
+                                state.daemon.saturation_time)
+                            elapsed = (
+                                datetime.now() - sat_time
+                            ).total_seconds()
+                            cooldown_ok = (
+                                elapsed >= args.saturation_cooldown)
                         except Exception:
                             cooldown_ok = True
 
                     if cooldown_ok:
+                        # Find which GPUs were freed (from recently
+                        # completed/failed jobs that had gpu_ids)
+                        freed_gpus = []
+                        for j in state.jobs:
+                            if (j.status in ("completed", "failed")
+                                    and j.gpu_ids
+                                    and j.completed_at):
+                                freed_gpus.extend(j.gpu_ids)
+                        # Deduplicate, preserving order
+                        seen = set()
+                        unique_freed = []
+                        for g in freed_gpus:
+                            if g not in seen:
+                                seen.add(g)
+                                unique_freed.append(g)
+
                         for i, job in enumerate(pending):
                             if i >= slots_freed:
                                 break
 
-                            # ─── FIFO OOM PREDICTION ────────────────
-                            # Even in FIFO mode, check if memory can
-                            # fit the replacement job before launching.
-                            safety_margin = getattr(args, 'memory_safety_margin', DEFAULT_MEMORY_SAFETY_MARGIN)
-                            oom_wait_timeout = getattr(args, 'oom_wait_timeout', DEFAULT_OOM_WAIT_TIMEOUT)
+                            # Pick GPU: prefer a freed GPU, else
+                            # use fill_gpu_index round-robin
+                            gpj = job.gpus_needed
+                            if unique_freed and len(unique_freed) >= gpj:
+                                pin_gpus = unique_freed[:gpj]
+                                unique_freed = unique_freed[gpj:]
+                            else:
+                                fi = state.daemon.fill_gpu_index
+                                pin_gpus = [
+                                    all_gpus[(fi + g) % num_gpus]
+                                    for g in range(gpj)
+                                ]
+                                state.daemon.fill_gpu_index = (
+                                    (fi + gpj) % num_gpus
+                                )
 
-                            at_risk, risk_reason = estimate_oom_risk(
-                                state, job.gpus_needed, safety_margin)
-                            if at_risk:
-                                _log(f"⚠️ FIFO OOM PREDICTION: {job.name} at risk — "
-                                     f"{risk_reason}")
-                                _log(f"⏳ Waiting up to {oom_wait_timeout:.0f}s "
-                                     f"for memory headroom...")
-                                save_state(state)
-                                headroom_ok, wait_reason = memory_wait_for_headroom(
-                                    state, job.gpus_needed, safety_margin,
-                                    oom_wait_timeout, args)
-                                if not headroom_ok:
-                                    _log(f"🛑 FIFO: Skipping {job.name} — "
-                                         f"no memory headroom. {wait_reason}")
-                                    state.daemon.saturation_time = datetime.now().isoformat()
+                            # Per-GPU-group memory check: verify
+                            # ALL GPUs in the group have headroom.
+                            group_ok = True
+                            for _gid in pin_gpus:
+                                _fit, reason = (
+                                    can_fit_another_job_on_gpu(
+                                        _gid, state, safety_margin,
+                                        gpus_needed=gpj))
+                                if not _fit:
+                                    group_ok = False
                                     break
-                                else:
-                                    _log(f"✅ FIFO: Memory available — {wait_reason}")
+                            if not group_ok:
+                                _log(f"🛑 FIFO: {job.name} skipped — "
+                                     f"{reason}")
+                                state.daemon.saturation_time = (
+                                    datetime.now().isoformat())
+                                break
+
+                            state.daemon.overcommit_rr_index = (
+                                (all_gpus.index(pin_gpus[0]) + gpj)
+                                % num_gpus
+                            )
 
                             try:
                                 port = allocate_port(state)
                                 wd = job.working_dir or args.working_dir
-                                # Round-robin GPU pinning: assign job.gpus_needed
-                                # consecutive GPUs for even distribution
-                                gpj = job.gpus_needed
-                                rr_gpus = [
-                                    all_gpus[(state.daemon.overcommit_rr_index + g) % len(all_gpus)]
-                                    for g in range(gpj)
-                                ]
-                                state.daemon.overcommit_rr_index = (
-                                    state.daemon.overcommit_rr_index + gpj
-                                ) % len(all_gpus)
-                                launch_job(job, rr_gpus, port, args.log_dir, wd)
+                                launch_job(
+                                    job, pin_gpus, port,
+                                    args.log_dir, wd)
                                 changed = True
-                                _log(f"🚀 FIFO: Launched {job.name} "
-                                     f"(total running: {running_count + i + 1})")
+                                _log(
+                                    f"🚀 FIFO: Launched {job.name} on "
+                                    f"GPU {pin_gpus} (total running: "
+                                    f"{running_count + i + 1})")
 
-                                # Quick verify it didn't die immediately
+                                # Quick verify
                                 time.sleep(2)
-                                if job._proc and job._proc.poll() is not None:
+                                if (job._proc
+                                        and job._proc.poll() is not None):
                                     exit_code = job._proc.poll()
                                     job.exit_code = exit_code
-                                    is_oom = is_oom_crash(job, oom_threshold=args.oom_threshold)
-                                    _requeue_job(job, f"Died immediately in FIFO (exit={exit_code})")
+                                    is_oom = is_oom_crash(
+                                        job,
+                                        oom_threshold=getattr(
+                                            args, 'oom_threshold',
+                                            DEFAULT_OOM_CRASH_THRESHOLD))
+                                    _requeue_job(
+                                        job,
+                                        f"Died immediately in FIFO "
+                                        f"(exit={exit_code})")
                                     if is_oom:
-                                        _log(f"🛑 FIFO: {job.name} OOM → waiting for more slots")
-                                        state.daemon.saturation_time = datetime.now().isoformat()
+                                        _log(
+                                            f"🛑 FIFO: {job.name} OOM "
+                                            f"→ waiting for more slots")
+                                        state.daemon.saturation_time = (
+                                            datetime.now().isoformat())
                                     else:
                                         job.retries += 1
                                         if job.retries > job.max_retries:
                                             job.status = "failed"
-                                            job.completed_at = datetime.now().isoformat()
+                                            job.completed_at = (
+                                                datetime.now().isoformat())
                                     break
                             except Exception as e:
                                 _log(f"Error launching {job.name}: {e}")
                                 job.error_snippet = str(e)
 
-                # Track running count for FIFO slot detection (persisted in DaemonConfig)
-                state.daemon.prev_running = sum(1 for j in state.jobs if j.status == "running")
+                # Track running count for FIFO slot detection
+                state.daemon.prev_running = sum(
+                    1 for j in state.jobs if j.status == "running")
 
         # Step 4: Persist state
         if changed:
@@ -2475,10 +2635,41 @@ def _parse_port_range(s: str) -> Tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
+def _resolve_schedule_dirs(args: argparse.Namespace) -> None:
+    """If -s/--schedule-name was given, override state/inbox/log dirs.
+
+    Maps:
+        --state-dir → schedules/<name>/state
+        --inbox-dir → schedules/<name>/inbox
+        --log-dir   → schedules/<name>/logs
+
+    Only overrides dirs that still have their DEFAULT value (i.e. the user
+    didn't explicitly pass --state-dir etc.).
+    """
+    sname = getattr(args, "schedule_name", None)
+    if not sname:
+        return
+    base = os.path.join(SCHEDULES_ROOT, sname)
+    if getattr(args, "state_dir", DEFAULT_STATE_DIR) == DEFAULT_STATE_DIR:
+        args.state_dir = os.path.join(base, "state")
+    if getattr(args, "inbox_dir", DEFAULT_INBOX_DIR) == DEFAULT_INBOX_DIR:
+        args.inbox_dir = os.path.join(base, "inbox")
+    if getattr(args, "log_dir", DEFAULT_LOG_DIR) == DEFAULT_LOG_DIR:
+        args.log_dir = os.path.join(base, "logs")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Job daemon for GPU training orchestration",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Top-level schedule-name flag (before subcommands)
+    p.add_argument(
+        "-s", "--schedule-name",
+        default=None,
+        help="Schedule name — isolates all state/inbox/logs under "
+             "schedules/<name>/. Prevents stale state collisions "
+             "between different experiment runs.",
     )
     sub = p.add_subparsers(dest="command", help="Available commands")
 
@@ -2531,6 +2722,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"Max seconds to wait for GPU memory headroom before "
                          f"switching to queue mode. "
                          f"(default: {DEFAULT_OOM_WAIT_TIMEOUT}s = 10 min)")
+    sp.add_argument("--sentinel-timeout", type=float, default=DEFAULT_SENTINEL_TIMEOUT,
+                    help=f"Max seconds to wait for a job's .training_started sentinel "
+                         f"before falling back to GPU presence detection. "
+                         f"(default: {DEFAULT_SENTINEL_TIMEOUT}s = 10 min)")
 
     # -- submit --
     sp = sub.add_parser("submit", help="Submit job(s)")
@@ -2587,6 +2782,9 @@ def main() -> None:
     if args.command is None:
         parser.print_help()
         sys.exit(1)
+
+    # Resolve schedule-name → state/inbox/log dirs
+    _resolve_schedule_dirs(args)
 
     dispatch = {
         "start": daemon_main,

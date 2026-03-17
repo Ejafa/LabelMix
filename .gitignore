@@ -126,6 +126,7 @@ wandb/
 WANDB/
 state/
 inbox/
+schedules/
 ~
 .codex
 .github

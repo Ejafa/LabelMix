@@ -189,7 +189,7 @@ def get_model_configs() -> Dict[str, str]:
 #   => 8 × 8 × 2 = 128 training runs (full grid, no pruning)
 # ---------------------------------------------------------------------------
 
-_K_VALUES = [7, 8, 9, 10] # 3, 4, 5, 6,
+_K_VALUES = [8, 9, 10] # 3, 4, 5, 6, 7
 _ALPHA_VALUES = [0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0]
 _LOSS_VALUES = ["pl_loss", "soft_ce"]
 
