@@ -123,8 +123,8 @@ def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
         "num_saves": 20,
         "wandb_project": "labelmix_ejafa",
         "log_wandb": True,
-        "workers": 4,
-        "loader_prefetch_factor": 2,
+        "workers": 16,
+        "loader_prefetch_factor": 4,
         "balanced_buffer_steps": 4,
         "balanced_cache_threshold_steps": 3,
         "pin_mem": True,
@@ -189,9 +189,9 @@ def get_model_configs() -> Dict[str, str]:
 #   => 8 × 8 × 2 = 128 training runs (full grid, no pruning)
 # ---------------------------------------------------------------------------
 
-_K_VALUES = [8, 9, 10] # 3, 4, 5, 6, 7
-_ALPHA_VALUES = [0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0]
-_LOSS_VALUES = ["pl_loss", "soft_ce"]
+_K_VALUES = [4] #[8, 9, 10] # 3, 4, 5, 6, 7
+_ALPHA_VALUES = [1.5] #[0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0]
+_LOSS_VALUES = ["pl_loss"] #, "soft_ce"]
 
 SEARCH_SPACE: Dict[str, Any] = {
     "labelmix_mix_k": _K_VALUES,
