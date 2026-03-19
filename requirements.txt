@@ -7,3 +7,5 @@ numpy
 datasets
 wandb
 ray>=2.9
+nvidia-ml-py>=12.535.0
+psutil>=5.9.0

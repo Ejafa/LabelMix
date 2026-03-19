@@ -123,6 +123,10 @@ Testing notebook.ipynb
 
 # wandb, logs, data and output dirs
 wandb/
+WANDB/
+state/
+inbox/
+schedules/
 ~
 .codex
 .github
