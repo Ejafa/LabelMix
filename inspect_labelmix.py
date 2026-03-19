@@ -275,11 +275,11 @@ def main() -> None:
     utils.setup_default_logging()
     args = _parse_args()
 
-    if getattr(args, "dataset", None) is None:
-        raise ValueError("Config must specify dataset.")
-
     _logger.info("no_aug=%s", _ensure_bool(getattr(args, "no_aug", False)))
     _logger.info("args=%s", json.dumps(vars(args), indent=2, default=str))
+
+    if getattr(args, "dataset", None) is None:
+        raise ValueError("Config must specify dataset.")
 
     args.device = torch.device(args.device)
 
