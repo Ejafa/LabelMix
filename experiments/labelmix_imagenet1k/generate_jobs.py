@@ -121,10 +121,10 @@ def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
         "num_logs": 1000,
         "num_evals": 100,
         "num_saves": 20,
-        "wandb_project": "labelmix_ejafa",
+        "wandb_project": "labelmix",
         "log_wandb": True,
-        "workers": 16,
-        "loader_prefetch_factor": 4,
+        "workers": 4,
+        "loader_prefetch_factor": 2,
         "balanced_buffer_steps": 4,
         "balanced_cache_threshold_steps": 3,
         "pin_mem": True,
@@ -151,6 +151,26 @@ def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
         "labelmix_schedule": "fixed",
         "labelmix_k_schedule": "fixed",
         "labelmix_step_mode": "total",
+        # K schedule params
+        "labelmix_k_reverse": False,
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_k_total_epochs": None,
+        # Alpha schedule params
+        "labelmix_reverse": False,
+        "labelmix_warmup_steps": 0,
+        "labelmix_total_epochs": None,
+        "labelmix_total_steps": None,
+        # Sampling params
+        "labelmix_sampling": True,
+        # "labelmix_sampling_min_side_px": 8,
+        # "labelmix_sampling_max_aspect": 10.0,
+        "labelmix_sampling_bins": 16,
+        "labelmix_sampling_pool_size": 128,
+        "labelmix_sampling_low_watermark": 32,
+        "labelmix_sampling_max_attempts": 200,
+        # Producer params
+        "labelmix_producer_rank": -1,
+        "labelmix_producer_workers": 0,
         # Disable timm mixup/cutmix (LabelMix replaces these)
         "mixup": 0,
         "cutmix": 0,
@@ -189,14 +209,21 @@ def get_model_configs() -> Dict[str, str]:
 #   => 8 × 8 × 2 = 128 training runs (full grid, no pruning)
 # ---------------------------------------------------------------------------
 
-_K_VALUES = [4] #[8, 9, 10] # 3, 4, 5, 6, 7
-_ALPHA_VALUES = [1.5] #[0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0]
-_LOSS_VALUES = ["pl_loss"] #, "soft_ce"]
+# _SEED = [43, 44] #[8, 9, 10] # 3, 4, 5, 6, 7
+_K_VALUES = [2, 4, 6]
+_ALPHA_VALUES = [0.2, 0.6, 1.0, 1.5]
+_LOSS_VALUES = ["pl_loss", "soft_ce"]
+_SAMPLING_CONFIGS = [
+    (8, 10.0),
+    (0, 20.0),
+]
+
 
 SEARCH_SPACE: Dict[str, Any] = {
     "labelmix_mix_k": _K_VALUES,
     "labelmix_alpha_min": _ALPHA_VALUES,
     "labelmix_loss": _LOSS_VALUES,
+    "_sampling_config": _SAMPLING_CONFIGS,
 }
 
 
@@ -213,32 +240,59 @@ def build_experiment_name(
     Example output: ``k3_a0.3_pl-loss``
     """
     parts: List[str] = []
-
-    if "labelmix_mix_k" in trial_overrides:
-        parts.append(f"k{trial_overrides['labelmix_mix_k']}")
-
-    if "labelmix_alpha_min" in trial_overrides:
-        v = trial_overrides["labelmix_alpha_min"]
-        parts.append(f"a{v:g}")
-
-    if "labelmix_loss" in trial_overrides:
-        parts.append(str(trial_overrides["labelmix_loss"]).replace("_", "-"))
-
-    # Include schedule info only when it differs from the default ("fixed")
-    k_sched = trial_overrides.get("labelmix_k_schedule") or common_overrides.get(
-        "labelmix_k_schedule"
+    labelmix_enabled = trial_overrides.get(
+        "labelmix", common_overrides.get("labelmix", False)
     )
-    if k_sched and k_sched != "fixed":
-        parts.append(f"ks-{k_sched}")
 
-    a_sched = trial_overrides.get("labelmix_schedule") or common_overrides.get(
-        "labelmix_schedule"
-    )
-    if a_sched and a_sched != "fixed":
-        parts.append(f"as-{a_sched}")
+    if not labelmix_enabled:
+        parts.append("baseline")
+    else:
+        if "labelmix_mix_k" in trial_overrides:
+            parts.append(f"k{trial_overrides['labelmix_mix_k']}")
+
+        if "labelmix_alpha_min" in trial_overrides:
+            v = trial_overrides["labelmix_alpha_min"]
+            parts.append(f"a{v:g}")
+
+        if "labelmix_loss" in trial_overrides:
+            parts.append(str(trial_overrides["labelmix_loss"]).replace("_", "-"))
+
+        if "_sampling_config" in trial_overrides:
+            min_side_px, max_aspect = trial_overrides["_sampling_config"]
+            parts.append(f"ms{int(min_side_px)}")
+            parts.append(f"ar{float(max_aspect):g}")
+        elif (
+            "labelmix_sampling_min_side_px" in trial_overrides
+            or "labelmix_sampling_max_aspect" in trial_overrides
+        ):
+            min_side_px = trial_overrides.get("labelmix_sampling_min_side_px")
+            max_aspect = trial_overrides.get("labelmix_sampling_max_aspect")
+            parts.append(f"ms{int(min_side_px)}")
+            parts.append(f"ar{float(max_aspect):g}")
+
+        # Include schedule info only when it differs from the default ("fixed")
+        k_sched = trial_overrides.get("labelmix_k_schedule") or common_overrides.get(
+            "labelmix_k_schedule"
+        )
+        if k_sched and k_sched != "fixed":
+            parts.append(f"ks-{k_sched}")
+
+        a_sched = trial_overrides.get("labelmix_schedule") or common_overrides.get(
+            "labelmix_schedule"
+        )
+        if a_sched and a_sched != "fixed":
+            parts.append(f"as-{a_sched}")
+
+        # Include sampling tag when sampling is enabled
+        sampling = trial_overrides.get("labelmix_sampling") or common_overrides.get(
+            "labelmix_sampling"
+        )
+        if sampling:
+            parts.append("sampling")
 
     # Catch-all for any extra overrides not already covered
     _covered = {
+        "labelmix",
         "labelmix_mix_k",
         "labelmix_k_min",
         "labelmix_k_max",
@@ -247,6 +301,10 @@ def build_experiment_name(
         "labelmix_loss",
         "labelmix_k_schedule",
         "labelmix_schedule",
+        "labelmix_sampling",
+        "_sampling_config",
+        "labelmix_sampling_min_side_px",
+        "labelmix_sampling_max_aspect",
     }
     for k, v in sorted(trial_overrides.items()):
         if k not in _covered and not k.startswith("_"):
@@ -267,6 +325,8 @@ def dict_to_cli_args(d: Dict[str, Any]) -> str:
     """
     parts: List[str] = []
     for k, v in d.items():
+        if v is None:
+            continue
         flag = f"--{k.replace('_', '-')}"
         if isinstance(v, bool):
             if v:
@@ -284,8 +344,8 @@ def dict_to_cli_args(d: Dict[str, Any]) -> str:
 
 def generate(
     gpus_per_job: int = 1,
-    output_path: str = "jobs.yaml",
-    output_root: str = "./output_runs/daemon",
+    output_path: str = "imagenet_baseline_jobs.yaml",
+    output_root: str = "./output_runs/ablation",
     max_retries: int = 3,
     model_filter: List[str] | None = None,
 ) -> None:
@@ -333,6 +393,11 @@ def generate(
         for combo in combinations:
             trial_overrides = dict(zip(keys, combo))
 
+            if "_sampling_config" in trial_overrides:
+                min_side_px, max_aspect = trial_overrides.pop("_sampling_config")
+                trial_overrides["labelmix_sampling_min_side_px"] = int(min_side_px)
+                trial_overrides["labelmix_sampling_max_aspect"] = float(max_aspect)
+
             # Sync k params: k_min == k_max == mix_k (fixed K per trial)
             if "labelmix_mix_k" in trial_overrides:
                 k = trial_overrides["labelmix_mix_k"]
@@ -345,8 +410,10 @@ def generate(
                     "labelmix_alpha_max", trial_overrides["labelmix_alpha_min"]
                 )
 
-            # Build human-readable experiment name
-            exp_name = build_experiment_name(trial_overrides, common_overrides)
+            # Include the model tag in the experiment name so job names and
+            # output directories stay unique even for single-model runs.
+            base_exp_name = build_experiment_name(trial_overrides, common_overrides)
+            exp_name = f"{model_tag}__{base_exp_name}"
 
             # Merge all overrides (common < trial-specific < runtime)
             all_overrides: Dict[str, Any] = {}
@@ -363,12 +430,7 @@ def generate(
                 f"train.py --config {config_path} {cli_args}"
             )
 
-            # Prefix with model tag when multiple models are active
-            name = (
-                f"{model_tag}__{exp_name}"
-                if len(model_configs) > 1
-                else exp_name
-            )
+            name = exp_name
             jobs.append({"name": name, "cmd": cmd})
 
     # ---- Write output YAML -------------------------------------------------

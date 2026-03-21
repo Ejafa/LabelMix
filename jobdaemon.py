@@ -106,6 +106,7 @@ class Job:
     memory_at_stable: Optional[float] = None  # MiB per GPU when job stabilized on GPU
     oom_requeue_count: int = 0  # number of times this job was requeued due to OOM
     launched_at_burst_index: Optional[int] = None  # burst_jobs_launched when this job was launched
+    assigned_gpus: Optional[List[int]] = None  # pre-assigned GPU indices from job_scheduler bin-packing
 
     # Runtime-only (not persisted)
     _proc: Optional[subprocess.Popen] = field(default=None, repr=False, compare=False)
@@ -143,6 +144,7 @@ class DaemonConfig:
     peak_memory_per_job: Optional[float] = None  # MiB: best estimate of memory per job from stabilized jobs
     last_checkpoint_burst_index: int = 0  # burst_jobs_launched at last successful saturation checkpoint
     last_launched_job_name: Optional[str] = None  # name of the last job launched (waiting for its sentinel)
+    pre_grouped: bool = False  # True = jobs have pre-assigned GPU indices from job_scheduler
 
 
 @dataclass
@@ -1348,13 +1350,50 @@ def get_job_sentinel_path(job: Job) -> Optional[str]:
     return None
 
 
+def _is_descendant_of(pid: int, ancestor_pid: int) -> bool:
+    """Return *True* if *pid* is a descendant of *ancestor_pid* (or equal).
+
+    Walks up the process tree via ``/proc/<pid>/stat`` (Linux-specific).
+    Returns *False* on any error (process already exited, non-Linux, etc.).
+    """
+    if pid == ancestor_pid:
+        return True
+    visited = {pid}
+    current = pid
+    try:
+        while True:
+            stat_path = f"/proc/{current}/stat"
+            with open(stat_path, "r") as f:
+                # Format: pid (comm) state ppid ...
+                data = f.read()
+            # The comm field can contain spaces/parens, so find the last ')'
+            close_paren = data.rfind(")")
+            fields_after = data[close_paren + 2:].split()
+            ppid = int(fields_after[1])  # ppid is field index 3 (0-based after comm)
+            if ppid == ancestor_pid:
+                return True
+            if ppid in visited or ppid <= 1:
+                return False
+            visited.add(ppid)
+            current = ppid
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def check_training_started(job: Job) -> bool:
     """Return *True* if the job has written its ``.training_started`` sentinel.
 
     The sentinel file written by ``train.py`` contains a ``pgid=<N>`` line.
-    We verify that the PGID recorded in the sentinel matches ``job.pgid``
-    so that stale sentinels from a previous run (or manually created files)
-    are not mistaken for a valid start signal.
+    We verify that the PGID recorded in the sentinel belongs to the same
+    process tree as this job, so that stale sentinels from a previous run
+    (or manually created files) are not mistaken for a valid start signal.
+
+    When ``torchrun`` is used with ``start_new_session=True``, child worker
+    processes may get their own process group (via ``multiprocessing``), so
+    the sentinel PGID won't match the ``torchrun`` launcher's PGID exactly.
+    We accept the sentinel if:
+      1. The sentinel PGID matches ``job.pgid`` exactly, OR
+      2. The sentinel PID/PGID is a descendant of ``job.pid``.
 
     Falls back to :func:`check_gpu_presence` when the sentinel path cannot
     be determined.
@@ -1367,8 +1406,8 @@ def check_training_started(job: Job) -> bool:
         return False
 
     # ------------------------------------------------------------------
-    # Verify ownership: the PGID written by train.py must match the
-    # process-group of the subprocess the daemon launched for this job.
+    # Verify ownership: the sentinel's PGID/PID must belong to this job's
+    # process tree (exact PGID match OR descendant of job.pid).
     # ------------------------------------------------------------------
     if job.pgid is None:
         # No pgid recorded (shouldn't happen) — accept presence only
@@ -1376,21 +1415,42 @@ def check_training_started(job: Job) -> bool:
     try:
         with open(sentinel, "r") as f:
             content = f.read()
+        sentinel_pgid = None
+        sentinel_pid = None
         for line in content.splitlines():
             if line.startswith("pgid="):
                 sentinel_pgid = int(line.split("=", 1)[1])
-                if sentinel_pgid == job.pgid:
-                    return True
-                _log(
-                    f"⚠ Sentinel {sentinel} has pgid={sentinel_pgid} "
-                    f"but job {job.name} expects pgid={job.pgid} "
-                    f"— ignoring stale/foreign sentinel"
-                )
-                return False
-        # No pgid line found — sentinel is invalid / not from our train.py
+            elif line.startswith("pid="):
+                sentinel_pid = int(line.split("=", 1)[1])
+
+        if sentinel_pgid is None:
+            # No pgid line found — sentinel is invalid / not from our train.py
+            _log(
+                f"⚠ Sentinel {sentinel} has no pgid line "
+                f"— ignoring invalid sentinel"
+            )
+            return False
+
+        # Accept: exact PGID match
+        if sentinel_pgid == job.pgid:
+            return True
+
+        # Accept: sentinel process is a descendant of the job's launcher
+        # (handles torchrun workers that get their own process group)
+        check_pid = sentinel_pid if sentinel_pid is not None else sentinel_pgid
+        if job.pid is not None and _is_descendant_of(check_pid, job.pid):
+            _log(
+                f"✓ Sentinel {sentinel} pgid={sentinel_pgid} differs from "
+                f"job pgid={job.pgid}, but pid={check_pid} is a descendant "
+                f"of job pid={job.pid} — accepting"
+            )
+            return True
+
         _log(
-            f"⚠ Sentinel {sentinel} has no pgid line "
-            f"— ignoring invalid sentinel"
+            f"⚠ Sentinel {sentinel} has pgid={sentinel_pgid} "
+            f"but job {job.name} expects pgid={job.pgid} "
+            f"and pid={check_pid} is not a descendant of job pid={job.pid} "
+            f"— ignoring stale/foreign sentinel"
         )
         return False
     except (OSError, ValueError) as exc:
@@ -1477,18 +1537,24 @@ def scan_inbox(inbox_dir: str) -> List[str]:
     return files
 
 
-def parse_input_yaml(path: str) -> List[Job]:
-    """Parse an input YAML file into a list of Job objects."""
+def parse_input_yaml(path: str) -> Tuple[List[Job], bool]:
+    """Parse an input YAML file into a list of Job objects.
+
+    Returns:
+        (jobs_list, is_pre_grouped) — is_pre_grouped is True when the YAML
+        was generated by job_scheduler with pre-assigned GPU indices.
+    """
     with open(path, "r") as f:
         data = yaml.safe_load(f)
     if not data or "jobs" not in data:
         _log(f"Warning: {path} has no 'jobs' key, skipping")
-        return []
+        return [], False
 
     defaults = data.get("defaults", {})
     default_gpus = defaults.get("gpus", 1)
     default_retries = defaults.get("max_retries", DEFAULT_MAX_RETRIES)
     default_working_dir = defaults.get("working_dir", None)
+    is_pre_grouped = defaults.get("pre_grouped", False)
 
     jobs = []
     for entry in data["jobs"]:
@@ -1497,6 +1563,7 @@ def parse_input_yaml(path: str) -> List[Job]:
         if not cmd:
             _log(f"Warning: job '{name}' has no cmd, skipping")
             continue
+        assigned_gpus = entry.get("assigned_gpus", None)
         jobs.append(Job(
             name=name,
             cmd=cmd,
@@ -1504,8 +1571,9 @@ def parse_input_yaml(path: str) -> List[Job]:
             max_retries=entry.get("max_retries", default_retries),
             working_dir=entry.get("working_dir", default_working_dir),
             submitted_at=datetime.now().isoformat(),
+            assigned_gpus=assigned_gpus,
         ))
-    return jobs
+    return jobs, is_pre_grouped
 
 
 def move_to_processed(file_path: str) -> None:
@@ -1767,7 +1835,8 @@ def daemon_main(args: argparse.Namespace) -> None:
     state.daemon.overcommit = True  # overcommit is always on
     state.daemon.saturated = False
     state.daemon.saturation_time = None
-    state.daemon.burst_phase = True  # start in burst mode
+    state.daemon.pre_grouped = getattr(args, 'pre_grouped', False)
+    state.daemon.burst_phase = not state.daemon.pre_grouped  # skip burst in pre-grouped mode
     state.daemon.burst_jobs_launched = 0
     state.daemon.saturation_checkpoints_passed = 0
     state.daemon.master_port_range = list(
@@ -1782,7 +1851,11 @@ def daemon_main(args: argparse.Namespace) -> None:
     _log(f"  GPUs: {gpus}")
     _log(f"  GPU backend: {'pynvml (nvidia-ml-py)' if HAS_PYNVML else 'nvidia-smi subprocess (install pynvml for better performance)'}")
     _log(f"  Process backend: {'psutil' if HAS_PSUTIL else 'os.kill + /proc (install psutil for better reliability)'}")
-    _log(f"  ⚡ OVERCOMMIT: Health-gated burst with saturation checkpoints")
+    if state.daemon.pre_grouped:
+        _log(f"  📦 PRE-GROUPED MODE: Jobs have pre-assigned GPU indices")
+        _log(f"     All pending jobs will be launched immediately without fitting")
+    else:
+        _log(f"  ⚡ OVERCOMMIT: Health-gated burst with saturation checkpoints")
     _log(f"  Saturation checkpoint: every {len(gpus)} jobs (= num GPUs), "
          f"progressive wait = N × {args.stabilization_wait}s "
          f"(1st={args.stabilization_wait}s, 2nd={2*args.stabilization_wait}s, ...)")
@@ -1830,7 +1903,10 @@ def daemon_main(args: argparse.Namespace) -> None:
         new_files = scan_inbox(args.inbox_dir)
         for fpath in new_files:
             try:
-                new_jobs = parse_input_yaml(fpath)
+                new_jobs, is_pre_grouped = parse_input_yaml(fpath)
+                if is_pre_grouped:
+                    state.daemon.pre_grouped = True
+                    _log(f"📦 PRE-GROUPED YAML detected: {os.path.basename(fpath)}")
                 # Check for duplicate names
                 existing_names = {j.name for j in state.jobs}
                 for job in new_jobs:
@@ -1954,7 +2030,11 @@ def daemon_main(args: argparse.Namespace) -> None:
 
         # Step 3: Launch pending jobs
         #
-        # FILL-PER-GPU SCHEDULING (signal-based, deterministic):
+        # MODE A - PRE-GROUPED: Jobs have pre-assigned GPU indices from
+        #   job_scheduler. Launch all pending jobs immediately on their
+        #   assigned GPUs without waiting or memory-fitting.
+        #
+        # MODE B - FILL-PER-GPU SCHEDULING (signal-based, deterministic):
         #   Launch a job on GPU group [X..X+N-1] → wait for sentinel
         #   → check ALL GPUs in group for free memory → if room, launch
         #   another on the same group → if full, advance fill_gpu_index
@@ -1973,7 +2053,82 @@ def daemon_main(args: argparse.Namespace) -> None:
             safety_margin = getattr(args, 'memory_safety_margin', DEFAULT_MEMORY_SAFETY_MARGIN)
             sentinel_timeout = getattr(args, 'sentinel_timeout', DEFAULT_SENTINEL_TIMEOUT)
 
-            if state.daemon.burst_phase and not pending and state.daemon.burst_jobs_launched > 0:
+            # ─── PRE-GROUPED MODE ────────────────────────────────
+            # When --pre-grouped is set and jobs have assigned_gpus,
+            # launch ALL pending jobs immediately without any
+            # memory-fitting or sentinel-waiting logic.
+            pre_grouped = getattr(state.daemon, 'pre_grouped', False) or getattr(args, 'pre_grouped', False)
+            if pre_grouped and pending:
+                # Launch all pending pre-grouped jobs in rapid succession
+                launched_this_cycle = 0
+                for job in list(pending):
+                    if job.assigned_gpus:
+                        pin_gpus = job.assigned_gpus
+                    else:
+                        # Fallback: round-robin if no assignment
+                        gpj = job.gpus_needed
+                        rr = state.daemon.overcommit_rr_index
+                        pin_gpus = [
+                            all_gpus[(rr + g) % num_gpus]
+                            for g in range(gpj)
+                        ]
+                        state.daemon.overcommit_rr_index = (
+                            rr + gpj) % num_gpus
+
+                    try:
+                        port = allocate_port(state)
+                        wd = job.working_dir or args.working_dir
+                        launch_job(
+                            job, pin_gpus, port,
+                            args.log_dir, wd)
+                        launched_this_cycle += 1
+                        changed = True
+                        _log(
+                            f"🚀 PRE-GROUPED: Launched {job.name} "
+                            f"on GPU {pin_gpus}")
+
+                        # Brief pause between launches to avoid
+                        # port/resource contention
+                        time.sleep(2)
+
+                        # Quick sanity: died immediately?
+                        if (job._proc
+                                and job._proc.poll() is not None):
+                            exit_code = job._proc.poll()
+                            job.exit_code = exit_code
+                            _log(f"⚡ {job.name} died immediately"
+                                 f" (exit={exit_code})")
+                            if is_oom_crash(
+                                job,
+                                oom_threshold=getattr(
+                                    args, 'oom_threshold',
+                                    DEFAULT_OOM_CRASH_THRESHOLD)):
+                                _requeue_job(
+                                    job,
+                                    f"OOM in pre-grouped launch "
+                                    f"(exit={exit_code})")
+                            elif job.retries < job.max_retries:
+                                job.retries += 1
+                                job.status = "pending"
+                                job.pid = None
+                                job.pgid = None
+                                job.gpu_ids = None
+                                job.master_port = None
+                            else:
+                                job.status = "failed"
+                                job.completed_at = (
+                                    datetime.now().isoformat())
+
+                    except Exception as e:
+                        _log(f"Error launching {job.name}: {e}")
+                        job.error_snippet = str(e)
+
+                if launched_this_cycle > 0:
+                    _log(f"📦 PRE-GROUPED: Launched "
+                         f"{launched_this_cycle} job(s) this cycle")
+                    save_state(state)
+
+            elif state.daemon.burst_phase and not pending and state.daemon.burst_jobs_launched > 0:
                 # All pending jobs launched in burst — transition to FIFO
                 _log(f"🏁 Burst complete: all jobs launched "
                      f"({state.daemon.burst_jobs_launched} total). "
@@ -2726,6 +2881,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"Max seconds to wait for a job's .training_started sentinel "
                          f"before falling back to GPU presence detection. "
                          f"(default: {DEFAULT_SENTINEL_TIMEOUT}s = 10 min)")
+    sp.add_argument("--pre-grouped", action="store_true", default=False,
+                    help="Jobs have pre-assigned GPU indices from job_scheduler. "
+                         "Launch all jobs immediately without memory-fitting or "
+                         "sentinel-waiting. Use with job_scheduler.py output.")
 
     # -- submit --
     sp = sub.add_parser("submit", help="Submit job(s)")
