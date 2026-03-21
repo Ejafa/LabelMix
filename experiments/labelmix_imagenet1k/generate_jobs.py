@@ -443,6 +443,10 @@ def generate(
         "jobs": jobs,
     }
 
+    # Check if output file already exists
+    if os.path.exists(output_path):
+        raise FileExistsError(f"Output file {output_path} already exists. Please rename the file or delete it before proceeding.")
+
     with open(output_path, "w") as f:
         yaml.safe_dump(output, f, default_flow_style=False, sort_keys=False)
 

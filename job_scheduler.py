@@ -622,6 +622,11 @@ def save_profile_cache(
     """
     os.makedirs(schedule_dir, exist_ok=True)
     path = os.path.join(schedule_dir, PROFILE_CACHE_FILENAME)
+    
+    # Check if output file already exists
+    if os.path.exists(path):
+        raise FileExistsError(f"Profile cache file {path} already exists. Please rename the file or delete it before proceeding.")
+    
     data = {
         "gpu_total_mib": gpu_total_mib,
         "models": profiles,
@@ -764,6 +769,10 @@ def write_node_yaml(
     jobs: List[Dict[str, Any]],
 ) -> None:
     """Write a per-node jobs.yaml with pre_grouped flag."""
+    # Check if output file already exists
+    if os.path.exists(path):
+        raise FileExistsError(f"Output file {path} already exists. Please rename the file or delete it before proceeding.")
+    
     # Clean internal keys from jobs before writing
     clean_jobs = []
     for job in jobs:
@@ -1079,6 +1088,11 @@ def schedule(
 
         info_path = os.path.join(schedule_dir, "schedule_info.yaml")
         os.makedirs(schedule_dir, exist_ok=True)
+        
+        # Check if output file already exists
+        if os.path.exists(info_path):
+            raise FileExistsError(f"Schedule info file {info_path} already exists. Please rename the file or delete it before proceeding.")
+        
         with open(info_path, "w") as f:
             yaml.safe_dump(schedule_info, f, default_flow_style=False, sort_keys=False)
         print(f"\n💾 Schedule info saved → {info_path}")
