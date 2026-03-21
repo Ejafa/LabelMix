@@ -23,7 +23,7 @@ SSH_USER="root"
 SSH_PORT="${JIZHI_SSH_PORT:-36000}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15 -p ${SSH_PORT}"
 TMUX_SESSION="daemon"              # tmux session name on each node
-SCHEDULE_NAME="imagenet_sweep"     # isolates state/inbox/logs under schedules/<name>/
+SCHEDULE_NAME="ablation_sweep"     # isolates state/inbox/logs under schedules/<name>/
 CONDA_ROOT="/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/miniconda3"
 CONDA_ENV="labelmix"               # conda environment to activate before running daemon
 
@@ -129,7 +129,7 @@ do_launch() {
             # Create detached tmux session running the daemon
             local gpus="${NODE_GPUS[$i]}"
             tmux new-session -d -s "${TMUX_SESSION}" \
-                "source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} start --gpus ${gpus}; exec bash"
+                "source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} start --gpus ${gpus} --pre-grouped; exec bash"
             sleep 2
 
             # Submit jobs in the same tmux session (new window)
@@ -152,7 +152,7 @@ do_launch() {
             local gpus="${NODE_GPUS[$i]}"
             remote_cmd "${host}" "
                 tmux new-session -d -s ${TMUX_SESSION} \
-                    'source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} start --gpus ${gpus}; exec bash'
+                    'source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} start --gpus ${gpus} --pre-grouped; exec bash'
             " 2>/dev/null
 
             if ! remote_tmux_exists "${host}"; then
@@ -210,7 +210,7 @@ do_status() {
                 if remote_cmd "${host}" "pgrep -f 'jobdaemon.py start'" >/dev/null 2>&1; then
                     daemon_status="${GRN}running${RST}"
                 else
-                    daemon_status="${YLW}tmux up, daemon gone${RST}"
+                    daem/on_status="${YLW}tmux up, daemon gone${RST}"
                 fi
             else
                 tmux_status="${RED}none${RST}"
