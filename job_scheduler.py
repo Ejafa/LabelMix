@@ -22,7 +22,7 @@ Usage::
     python job_scheduler.py --input jobs.yaml \\
         --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\
         --schedule-name imagenet_sweep \\
-        --profile-steps 20
+        --profile-steps 200
 
     # Reuse cached profile (skip profiling)
     python job_scheduler.py --input jobs.yaml \\
@@ -344,14 +344,6 @@ def _build_profile_cmd(
             removed_flags.add("--num-steps")
             continue
 
-        # Disable wandb
-        if tok == "--log-wandb":
-            new_tokens.append("--no-log-wandb")
-            continue
-        if tok == "--log_wandb":
-            new_tokens.append("--no-log-wandb")
-            continue
-
         # Disable checkpoint saving (override num_saves to 0)
         if tok == "--num-saves" and i + 1 < len(tokens):
             new_tokens.append("--num-saves")
@@ -382,6 +374,32 @@ def _build_profile_cmd(
         if tok == "--check_resume":
             continue
 
+        # Ignore/remove --log-wandb token
+        if tok == "--log-wandb":
+            continue
+        if tok == "--log_wandb":
+            continue
+
+        # Disable EMA (Exponential Moving Average)
+        if tok == "--model-ema":
+            continue
+        if tok == "--model_ema":
+            continue
+        if tok.startswith("--model-ema="):
+            continue
+        if tok.startswith("--model_ema="):
+            continue
+
+        # Set warmup_steps to 0
+        if tok == "--warmup-steps" and i + 1 < len(tokens):
+            new_tokens.append("--warmup-steps")
+            new_tokens.append("0")
+            skip_next = True
+            continue
+        if tok.startswith("--warmup-steps="):
+            new_tokens.append("--warmup-steps=0")
+            continue
+
         new_tokens.append(tok)
 
     # Inject --num-steps if not already present
@@ -394,12 +412,20 @@ def _build_profile_cmd(
     if "--log-wandb" not in cmd and "--log_wandb" not in cmd:
         new_tokens.append("--no-log-wandb")
 
+    # Inject --no-model-ema to ensure EMA is disabled
+    # (even if it's enabled in the config YAML, CLI override takes precedence)
+
     # Inject num-saves=0 and num-evals=0 if not already handled
     if "--num-saves" not in removed_flags:
         new_tokens.append("--num-saves")
         new_tokens.append("0")
     if "--num-evals" not in removed_flags:
         new_tokens.append("--num-evals")
+        new_tokens.append("0")
+
+    # Inject warmup-steps=0 if not already handled
+    if "--warmup-steps" not in removed_flags:
+        new_tokens.append("--warmup-steps")
         new_tokens.append("0")
 
     # Use a temp output dir for profiling
@@ -465,9 +491,37 @@ def _get_peak_gpu_memory(gpu_ids: List[int]) -> Dict[int, int]:
     return result
 
 
+def select_profile_gpu_ids(profile_gpu: int, gpus_needed: int) -> List[int]:
+    """Select concrete local GPU indices for profiling.
+
+    For multi-GPU jobs, returns ``gpus_needed`` indices starting from
+    ``profile_gpu`` (wrapping within the locally detected GPU list).
+    """
+    if gpus_needed <= 0:
+        return []
+
+    local_info = get_local_gpu_free_memory()
+    available = sorted(idx for idx, _total, _free in local_info)
+
+    if available:
+        if gpus_needed > len(available):
+            return []
+        if profile_gpu in available:
+            start = available.index(profile_gpu)
+        else:
+            start = 0
+        return [
+            available[(start + i) % len(available)]
+            for i in range(gpus_needed)
+        ]
+
+    # Fallback when we cannot query local GPUs: optimistic contiguous IDs.
+    return [profile_gpu + i for i in range(gpus_needed)]
+
+
 def profile_model_memory(
     representative_job: Dict[str, Any],
-    gpu_ids: List[int],
+    use_gpus: List[int],
     profile_steps: int,
     working_dir: str,
     timeout: int = 600,
@@ -475,16 +529,17 @@ def profile_model_memory(
     """Run a short test of a model and measure peak GPU memory per GPU.
 
     Launches the job's command with --num-steps=profile_steps on the
-    specified GPU(s), waits for completion, and samples peak memory
+    specified GPU group, waits for completion, and samples peak memory
     during the run.
 
     Returns peak memory in MiB per GPU, or None on failure.
     """
     cmd_template = representative_job.get("cmd", "")
-    gpus_needed = representative_job.get("gpus", 1)
+    gpus_needed = int(representative_job.get("gpus", 1) or 1)
 
-    # Only use the required number of GPUs
-    use_gpus = gpu_ids[:gpus_needed]
+    if len(use_gpus) != gpus_needed:
+        print(f"  ❌ Profiling GPU selection mismatch: model needs {gpus_needed} GPU(s), got {use_gpus}")
+        return None
 
     cmd, env = _build_profile_cmd(cmd_template, profile_steps, use_gpus)
 
@@ -496,6 +551,7 @@ def profile_model_memory(
 
     # Launch the profile run
     log_file = f"/tmp/profile_{model_key}.log"
+    print(f"  📝 Profile log: {log_file}")
     try:
         fh = open(log_file, "w")
         proc = subprocess.Popen(
@@ -564,6 +620,7 @@ def profile_model_memory(
     avg_peak = int(sum(valid_peaks) / len(valid_peaks))
     print(f"  ✅ {model_key}: peak {avg_peak} MiB/GPU "
           f"(per GPU: {dict(peak_per_gpu)})")
+    print(f"  📄 Profile log saved: {log_file}")
 
     # Wait for GPU memory to settle back to baseline
     print(f"  ⏳ Waiting for GPU memory to release...")
@@ -622,11 +679,7 @@ def save_profile_cache(
     """
     os.makedirs(schedule_dir, exist_ok=True)
     path = os.path.join(schedule_dir, PROFILE_CACHE_FILENAME)
-    
-    # Check if output file already exists
-    if os.path.exists(path):
-        raise FileExistsError(f"Profile cache file {path} already exists. Please rename the file or delete it before proceeding.")
-    
+
     data = {
         "gpu_total_mib": gpu_total_mib,
         "models": profiles,
@@ -767,20 +820,21 @@ def write_node_yaml(
     path: str,
     defaults: Dict[str, Any],
     jobs: List[Dict[str, Any]],
+    gpu_total_mib: int,
+    safety_margin: float,
 ) -> None:
     """Write a per-node jobs.yaml with pre_grouped flag."""
-    # Check if output file already exists
-    if os.path.exists(path):
-        raise FileExistsError(f"Output file {path} already exists. Please rename the file or delete it before proceeding.")
-    
-    # Clean internal keys from jobs before writing
+    # Clean internal keys from jobs before writing, but keep scheduler metadata
     clean_jobs = []
     for job in jobs:
         clean = {k: v for k, v in job.items() if not k.startswith("_")}
+        clean["memory_mib_per_gpu"] = job.get("_memory_per_gpu")
+        clean["model_key"] = job.get("_model_key")
         clean_jobs.append(clean)
 
     defaults_copy = dict(defaults)
     defaults_copy["pre_grouped"] = True
+    defaults_copy["static_gpu_budget_mib"] = int(gpu_total_mib * (1.0 - safety_margin))
 
     output = {"defaults": defaults_copy, "jobs": clean_jobs}
     with open(path, "w") as f:
@@ -822,7 +876,8 @@ def schedule(
     profile_steps : int
         Number of training steps for each profile test run.
     profile_gpu : int
-        GPU index to use for profiling (default: 0).
+        Starting GPU index for profiling selection (default: 0).
+        Multi-GPU jobs use consecutive indices from this start.
     working_dir : str
         Working directory for profile runs.
     safety_margin : float
@@ -935,23 +990,30 @@ def schedule(
 
         for key in models_to_profile:
             representative = model_jobs[key][0]
-            peak = profile_model_memory(
-                representative_job=representative,
-                gpu_ids=[profile_gpu],
-                profile_steps=profile_steps,
-                working_dir=working_dir,
-            )
+            gpus_needed = int(representative.get("gpus", 1) or 1)
+            profile_gpu_ids = select_profile_gpu_ids(profile_gpu, gpus_needed)
+            if len(profile_gpu_ids) != gpus_needed:
+                print(f"  ⚠️  Cannot allocate {gpus_needed} local GPU(s) for profiling {key}; "
+                      f"got {profile_gpu_ids}. Using conservative estimate.")
+                peak = None
+            else:
+                peak = profile_model_memory(
+                    representative_job=representative,
+                    use_gpus=profile_gpu_ids,
+                    profile_steps=profile_steps,
+                    working_dir=working_dir,
+                )
             if peak is not None:
                 model_profiles[key] = {
                     "peak_memory_mib": peak,
-                    "gpus_needed": representative.get("gpus", 1),
+                    "gpus_needed": gpus_needed,
                 }
             else:
                 # Use conservative 50% of GPU total
                 conservative = gpu_total_mib // 2
                 model_profiles[key] = {
                     "peak_memory_mib": conservative,
-                    "gpus_needed": representative.get("gpus", 1),
+                    "gpus_needed": gpus_needed,
                 }
                 print(f"  ⚠️  Using conservative estimate for {key}: "
                       f"{conservative} MiB/GPU")
@@ -1009,7 +1071,8 @@ def schedule(
                 gpu_job_count[g] += 1
 
         usable = int(node_gpu_total * (1.0 - safety_margin))
-        print(f"\n  node_{i} ({info['host']}): {len(packed)} jobs on "
+        node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
+        print(f"\n  {node_label} ({info['host']}): {len(packed)} jobs on "
               f"{num_gpus} GPUs")
         for g in range(num_gpus):
             pct = (gpu_usage[g] / usable * 100) if usable > 0 else 0
@@ -1026,7 +1089,8 @@ def schedule(
     total_weight = sum(weights) or 1
     for i, (info, packed) in enumerate(zip(node_info, node_packed)):
         pct = (info['total_free_mib'] / total_weight) * 100 if total_weight else 0
-        print(f"  node_{i} ({info['host']:<15}) "
+        node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
+        print(f"  {node_label} ({info['host']:<15}) "
               f"{info['total_free_mib']:>10,} MiB "
               f"{len(packed):>6} "
               f"{pct:>8.1f}%")
@@ -1042,7 +1106,8 @@ def schedule(
     if dry_run:
         print(f"\n🔍 DRY RUN — no files written.")
         for i, (info, packed) in enumerate(zip(node_info, node_packed)):
-            print(f"\n  node_{i} ({info['host']}): {len(packed)} job(s)")
+            node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
+            print(f"\n  {node_label} ({info['host']}): {len(packed)} job(s)")
             for j in packed[:5]:
                 gpu_str = ",".join(str(g) for g in j.get("assigned_gpus", []))
                 print(f"    - {j['name']} → GPU [{gpu_str}]")
@@ -1055,7 +1120,14 @@ def schedule(
     for i, (info, packed) in enumerate(zip(node_info, node_packed)):
         fname = f"{output_prefix}_{i}_jobs.yaml"
         fpath = os.path.join(output_dir, fname)
-        write_node_yaml(fpath, defaults, packed)
+        node_gpu_total = info["gpu_total_mib"] or gpu_total_mib
+        write_node_yaml(
+            fpath,
+            defaults,
+            packed,
+            gpu_total_mib=node_gpu_total,
+            safety_margin=safety_margin,
+        )
         written_files.append((fpath, info["host"], len(packed)))
 
     # Also save the schedule info to the schedule dir if specified
@@ -1066,6 +1138,7 @@ def schedule(
             "total_jobs": total_jobs,
             "profile_steps": profile_steps,
             "safety_margin": safety_margin,
+            "model_profiles": model_profiles,
             "nodes": [],
         }
         for i, (info, packed) in enumerate(zip(node_info, node_packed)):
@@ -1084,15 +1157,24 @@ def schedule(
                     gpu_summary[g]["jobs"] += 1
                     gpu_summary[g]["memory_mib"] += pj.get("_memory_per_gpu", 0)
             node_entry["gpu_assignments"] = gpu_summary
+
+            # Explicit per-job static assignments for daemon launch policy
+            node_entry["job_assignments"] = [
+                {
+                    "name": pj.get("name"),
+                    "model_key": pj.get("_model_key"),
+                    "gpus_needed": pj.get("gpus", defaults.get("gpus", 1)),
+                    "assigned_gpus": pj.get("assigned_gpus", []),
+                    "memory_per_gpu_mib": pj.get("_memory_per_gpu"),
+                    "static_gpu_budget_mib": int((info["gpu_total_mib"] or gpu_total_mib) * (1.0 - safety_margin)),
+                }
+                for pj in packed
+            ]
             schedule_info["nodes"].append(node_entry)
 
         info_path = os.path.join(schedule_dir, "schedule_info.yaml")
         os.makedirs(schedule_dir, exist_ok=True)
-        
-        # Check if output file already exists
-        if os.path.exists(info_path):
-            raise FileExistsError(f"Schedule info file {info_path} already exists. Please rename the file or delete it before proceeding.")
-        
+
         with open(info_path, "w") as f:
             yaml.safe_dump(schedule_info, f, default_flow_style=False, sort_keys=False)
         print(f"\n💾 Schedule info saved → {info_path}")
@@ -1107,17 +1189,19 @@ def schedule(
     sched_flag = f" -s {schedule_name}" if schedule_name else ""
     for i, (fpath, host, count) in enumerate(written_files):
         if count == 0:
-            print(f"\n  # Node {i} ({host}): 0 jobs — skip")
+            node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
+            print(f"\n  # {node_label} ({host}): 0 jobs — skip")
             continue
         fname = os.path.basename(fpath)
+        node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
         if is_local(host):
-            print(f"\n  # Node {i} ({host}) — LOCAL:")
+            print(f"\n  # {node_label} ({host}) — LOCAL:")
             print(f"  tmux new -s daemon")
             print(f"  python jobdaemon.py{sched_flag} start --gpus 0,1,2,3,4,5,6,7 --pre-grouped")
             print(f"  # (in another terminal)")
             print(f"  python jobdaemon.py{sched_flag} submit {fname}")
         else:
-            print(f"\n  # Node {i} ({host}) — REMOTE:")
+            print(f"\n  # {node_label} ({host}) — REMOTE:")
             print(f"  ssh root@{host}")
             print(f"  cd {os.getcwd()}")
             print(f"  tmux new -s daemon")
@@ -1209,8 +1293,8 @@ def main() -> None:
         "--profile-gpu",
         type=int,
         default=0,
-        help="GPU index to use for profiling (default: 0). "
-             "Only one GPU is needed for profiling.",
+        help="Starting GPU index for profiling (default: 0). "
+             "Multi-GPU jobs use consecutive indices from this start.",
     )
     parser.add_argument(
         "--working-dir",

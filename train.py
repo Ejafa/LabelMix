@@ -2162,22 +2162,37 @@ def run_training(args=None, args_text=None):
     log_interval = args.log_interval
     if args.num_logs is not None:
         if args.num_logs <= 0:
-            raise ValueError('--num-logs must be > 0')
-        log_interval = max(1, num_steps // args.num_logs)
+            if args.num_logs == 0:
+                print("WARNING: --num-logs is set to 0, logging will be disabled")
+                log_interval = float('inf')  # Disable logging
+            else:
+                raise ValueError('--num-logs must be >= 0')
+        else:
+            log_interval = max(1, num_steps // args.num_logs)
         args.log_interval = log_interval
 
     val_interval = args.val_interval
     if args.num_evals is not None:
         if args.num_evals <= 0:
-            raise ValueError('--num-evals must be > 0')
-        val_interval = max(1, num_steps // args.num_evals)
+            if args.num_evals == 0:
+                print("WARNING: --num-evals is set to 0, evaluation will be disabled")
+                val_interval = float('inf')  # Disable evaluation
+            else:
+                raise ValueError('--num-evals must be >= 0')
+        else:
+            val_interval = max(1, num_steps // args.num_evals)
         args.val_interval = val_interval
 
     save_interval = val_interval
     if args.num_saves is not None:
         if args.num_saves <= 0:
-            raise ValueError('--num-saves must be > 0')
-        save_interval = max(1, num_steps // args.num_saves)
+            if args.num_saves == 0:
+                print("WARNING: --num-saves is set to 0, checkpoint saving will be disabled")
+                save_interval = float('inf')  # Disable checkpoint saving
+            else:
+                raise ValueError('--num-saves must be >= 0')
+        else:
+            save_interval = max(1, num_steps // args.num_saves)
 
     start_step = 0
     if args.start_step is not None:
