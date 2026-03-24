@@ -108,6 +108,10 @@ class KScheduler:
 
     K is updated once per epoch and progresses over total epochs.
     Modes: fixed | linear | cosine
+
+    Optional cooldown:
+      - if ``labelmix_k_cooldown_epochs`` is set (> 0), the last
+        ``labelmix_k_cooldown_epochs`` epochs force ``k = 1``.
     """
 
     def __init__(
@@ -118,6 +122,7 @@ class KScheduler:
         reverse: bool = False,
         warmup_epochs: int = 0,
         total_epochs: Optional[int] = None,
+        labelmix_k_cooldown_epochs: Optional[int] = None,
     ) -> None:
         self.k_min = int(k_min)
         self.k_max = int(k_max)
@@ -131,11 +136,25 @@ class KScheduler:
         self.warmup_epochs = max(0, int(warmup_epochs))
         self.total_epochs = max(1, int(total_epochs) if total_epochs is not None else 1)
 
+        if labelmix_k_cooldown_epochs is None:
+            self.labelmix_k_cooldown_epochs: Optional[int] = None
+        else:
+            cooldown = int(labelmix_k_cooldown_epochs)
+            if cooldown < 0:
+                raise ValueError("labelmix_k_cooldown_epochs must be >= 0")
+            self.labelmix_k_cooldown_epochs = cooldown
+
     def get_k(self, epoch: int) -> int:
+        epoch = int(epoch)
+
+        if self.labelmix_k_cooldown_epochs is not None and self.labelmix_k_cooldown_epochs > 0:
+            cooldown_start = max(0, self.total_epochs - self.labelmix_k_cooldown_epochs)
+            if epoch >= cooldown_start:
+                return 1
+
         if self.schedule == "fixed" or self.k_min == self.k_max:
             return self.k_min
 
-        epoch = int(epoch)
         if epoch < self.warmup_epochs:
             return self.k_max if self.reverse else self.k_min
 
@@ -510,6 +529,7 @@ class BalancedBucketDataset(IterableDataset):
             k_reverse = bool(self.lm_config.get("k_reverse", False))
             k_warmup_epochs = int(self.lm_config.get("k_warmup_epochs", 0))
             k_total_epochs = self.lm_config.get("k_total_epochs")
+            k_cooldown_epochs = self.lm_config.get("labelmix_k_cooldown_epochs")
             if k_total_epochs is None:
                 k_total_epochs = self.lm_config.get("total_epochs")
             if k_total_epochs is None:
@@ -521,6 +541,7 @@ class BalancedBucketDataset(IterableDataset):
                 reverse=k_reverse,
                 warmup_epochs=k_warmup_epochs,
                 total_epochs=k_total_epochs,
+                labelmix_k_cooldown_epochs=k_cooldown_epochs,
             )
             if self.k_scheduler.k_max > self.num_classes:
                 raise ValueError(

@@ -181,6 +181,8 @@ group.add_argument('--labelmix-k-warmup-epochs', default=0, type=int,
                    help='Warmup epochs for LabelMix K schedule.')
 group.add_argument('--labelmix-k-total-epochs', default=None, type=int,
                    help='Total epochs for LabelMix K schedule (default: inferred from total run length).')
+group.add_argument('--labelmix-k-cooldown-epochs', default=None, type=int,
+                   help='Force k=1 during the last N epochs of training for LabelMix K schedule.')
 group.add_argument('--labelmix-alpha-min', default=0.1, type=float,
                    help='LabelMix Dirichlet alpha min.')
 group.add_argument('--labelmix-alpha-max', default=1.0, type=float,
@@ -660,6 +662,9 @@ def validate_args(args) -> None:
             raise ValueError('--labelmix-k-max must be >= 1')
         if k_min is not None and k_max is not None and k_max < k_min:
             raise ValueError('--labelmix-k-max must be >= --labelmix-k-min')
+        k_cooldown_epochs = getattr(args, 'labelmix_k_cooldown_epochs', None)
+        if k_cooldown_epochs is not None and k_cooldown_epochs < 0:
+            raise ValueError('--labelmix-k-cooldown-epochs must be >= 0')
 
     bm = getattr(args, 'balanced_mode', '')
     if bm:
@@ -1292,6 +1297,8 @@ def run_training(args=None, args_text=None):
             parser.error('--labelmix-k-warmup-epochs must be >= 0')
         if args.labelmix_k_total_epochs is not None and args.labelmix_k_total_epochs <= 0:
             parser.error('--labelmix-k-total-epochs must be > 0')
+        if args.labelmix_k_cooldown_epochs is not None and args.labelmix_k_cooldown_epochs < 0:
+            parser.error('--labelmix-k-cooldown-epochs must be >= 0')
         if args.labelmix_step_mode == 'total' and not (args.labelmix_total_epochs or args.labelmix_total_steps):
             parser.error('--labelmix-step-mode=total requires --labelmix-total-epochs or --labelmix-total-steps')
     elif args.labelmix_producer_rank >= 0:
@@ -1789,6 +1796,7 @@ def run_training(args=None, args_text=None):
                 'k_reverse': args.labelmix_k_reverse,
                 'k_warmup_epochs': args.labelmix_k_warmup_epochs,
                 'k_total_epochs': labelmix_k_total_epochs,
+                'labelmix_k_cooldown_epochs': args.labelmix_k_cooldown_epochs,
                 'train_epochs': default_train_epochs,
                 'alpha_min': args.labelmix_alpha_min,
                 'alpha_max': args.labelmix_alpha_max,

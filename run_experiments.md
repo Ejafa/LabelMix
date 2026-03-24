@@ -41,10 +41,12 @@ End-to-end guide for generating experiment jobs, distributing them across nodes,
 The experiment pipeline follows this flow:
 
 ```
-generate_jobs.py  →  jobs.yaml  →  job_scheduler.py  →  node_X_jobs.yaml
-                                                              ↓
-                                              launch_all.sh (one command)
-                                                     ↓
+generate_jobs.py  →  jobs.yaml  →  job_scheduler.py --schedule-name <schedule>
+                                                        ↓
+                                      <schedule>_node_X_jobs.yaml files
+                                                        ↓
+                                            launch_all.sh (one command)
+                                                        ↓
                                     ┌────────────────┼────────────────┐
                                     ▼                ▼                ▼
                                node_0            node_1           node_2
@@ -57,6 +59,7 @@ generate_jobs.py  →  jobs.yaml  →  job_scheduler.py  →  node_X_jobs.yaml
 **Key design principles:**
 - Each node runs its own independent `jobdaemon.py` instance
 - The `-s` (schedule name) flag isolates state per experiment run under `schedules/<name>/`
+- If you use `--node-index`, use the same `-s` + `--node-index` context for `start`, `submit`, `status`, and all management commands
 - `launch_all.sh` automates the entire cluster lifecycle (launch / status / jobs / stop)
 - Node IPs and GPU counts come from the `NODE_IP_LIST` environment variable
 
@@ -175,16 +178,19 @@ The `job_scheduler.py` script splits a `jobs.yaml` into per-node YAML files base
 ```bash
 # Auto-discover GPU memory on all nodes (queries via SSH)
 python job_scheduler.py --input jobs.yaml \
-    --nodes 28.12.129.140 28.12.25.40 28.12.130.213
+    --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \
+    --schedule-name imagenet_sweep
 
 # Override with manual free-memory values (MiB per node)
 python job_scheduler.py --input jobs.yaml \
     --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \
-    --free-memory 320000 320000 310000
+    --free-memory 320000 320000 310000 \
+    --schedule-name imagenet_sweep
 
 # Preview the split without writing files
 python job_scheduler.py --input jobs.yaml \
     --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \
+    --schedule-name imagenet_sweep \
     --dry-run
 ```
 
@@ -196,7 +202,8 @@ python job_scheduler.py --input jobs.yaml \
 | `--nodes` | **(required)** | Space-separated list of node IPs/hostnames |
 | `--free-memory` | auto-query | Override free GPU memory (MiB) per node. Must match `--nodes` count. |
 | `-o`, `--output-dir` | `.` | Directory to write per-node YAML files |
-| `--prefix` | `node` | Filename prefix (e.g. `node` → `node_0_jobs.yaml`) |
+| `--prefix` | `node` | Filename prefix base. With `--schedule-name`, outputs become `<schedule>_<prefix>_<idx>_jobs.yaml` |
+| `--schedule-name` | `None` | Prefixes output filenames with schedule name (recommended for multi-run isolation) |
 | `--dry-run` | — | Print the distribution plan without writing files |
 
 ### Output
@@ -214,9 +221,15 @@ Node                       Free Memory     Jobs    Weight
   TOTAL                      950,000 MiB     64
 
 ✅ Written 3 file(s):
-   node_0_jobs.yaml  (22 jobs for 28.12.129.140)
-   node_1_jobs.yaml  (22 jobs for 28.12.25.40)
-   node_2_jobs.yaml  (20 jobs for 28.12.130.213)
+   imagenet_sweep_node_0_jobs.yaml  (22 jobs for 28.12.129.140)
+   imagenet_sweep_node_1_jobs.yaml  (22 jobs for 28.12.25.40)
+   imagenet_sweep_node_2_jobs.yaml  (20 jobs for 28.12.130.213)
+```
+
+After writing files, submit with matching context. Example for node 0:
+
+```bash
+python jobdaemon.py -s imagenet_sweep --node-index 0 submit imagenet_sweep_node_0_jobs.yaml
 ```
 
 ---
@@ -272,9 +285,9 @@ SCHEDULE_NAME="imagenet_sweep"             # isolates state under schedules/<nam
 
 1. Parses `NODE_IP_LIST` to get node IPs and GPU counts
 2. For each node:
-   - Verifies `node_X_jobs.yaml` exists
-   - Creates a tmux session running `python jobdaemon.py -s <SCHEDULE_NAME> start --gpus <gpu_list>`
-   - Opens a second tmux window that submits `node_X_jobs.yaml` after a 5s delay
+   - Verifies `<SCHEDULE_NAME>_node_X_jobs.yaml` exists
+   - Creates a tmux session running `python jobdaemon.py -s <SCHEDULE_NAME> --node-index <X> start --gpus <gpu_list>`
+   - Opens a second tmux window that submits `<SCHEDULE_NAME>_node_X_jobs.yaml` with matching `-s` and `--node-index`
 3. For remote nodes, all commands are executed via SSH
 
 ### `--status` Output
@@ -309,14 +322,14 @@ SCHEDULE_NAME="imagenet_sweep"             # isolates state under schedules/<nam
 
 ### Check Status (Single Node)
 
-If you're attached to a node's tmux session, you can query the local daemon directly:
+If you're attached to a node's tmux session, query the daemon with the same context used at launch.
 
 ```bash
-# One-shot status table
-python jobdaemon.py -s imagenet_sweep status
+# One-shot status table (node 0)
+python jobdaemon.py -s imagenet_sweep --node-index 0 status
 
 # Live auto-refresh (every 2 seconds)
-python jobdaemon.py -s imagenet_sweep status --watch
+python jobdaemon.py -s imagenet_sweep --node-index 0 status --watch
 ```
 
 ### Check Status (All Nodes)
@@ -328,32 +341,34 @@ python jobdaemon.py -s imagenet_sweep status --watch
 ### Pause / Resume
 
 ```bash
-python jobdaemon.py -s imagenet_sweep pause
-python jobdaemon.py -s imagenet_sweep resume
+python jobdaemon.py -s imagenet_sweep --node-index 0 pause
+python jobdaemon.py -s imagenet_sweep --node-index 0 resume
 ```
 
 ### Cancel Jobs
 
 ```bash
 # Cancel a specific job
-python jobdaemon.py -s imagenet_sweep cancel <job_name>
+python jobdaemon.py -s imagenet_sweep --node-index 0 cancel <job_name>
 
 # Cancel all pending jobs
-python jobdaemon.py -s imagenet_sweep cancel --all-pending
+python jobdaemon.py -s imagenet_sweep --node-index 0 cancel --all-pending
 
 # Cancel all pending + running jobs
-python jobdaemon.py -s imagenet_sweep cancel --all
+python jobdaemon.py -s imagenet_sweep --node-index 0 cancel --all
 ```
 
 ### Retry Failed Jobs
 
 ```bash
 # Retry a specific failed job
-python jobdaemon.py -s imagenet_sweep retry <job_name>
+python jobdaemon.py -s imagenet_sweep --node-index 0 retry <job_name>
 
 # Retry all failed jobs
-python jobdaemon.py -s imagenet_sweep retry --all-failed
+python jobdaemon.py -s imagenet_sweep --node-index 0 retry --all-failed
 ```
+
+> **Important:** For any manual command (`submit`, `status`, `pause`, `resume`, `cancel`, `retry`), keep `-s` and `--node-index` identical to the daemon's `start` command. A mismatch means you're talking to a different inbox/state directory.
 
 ---
 
@@ -413,26 +428,53 @@ python jobdaemon.py start --gpus 0-7
 #   inbox → ./inbox/
 #   logs  → ./logs/jobs/
 
-# With -s: everything under schedules/<name>/
+# With -s only: everything under schedules/<name>/
 python jobdaemon.py -s imagenet_sweep start --gpus 0-7
 #   state → ./schedules/imagenet_sweep/state/
 #   inbox → ./schedules/imagenet_sweep/inbox/
 #   logs  → ./schedules/imagenet_sweep/logs/
+
+# With -s + --node-index: per-node isolated paths
+python jobdaemon.py -s imagenet_sweep --node-index 0 start --gpus 0-7
+#   state → ./schedules/imagenet_sweep/node_0/state/
+#   inbox → ./schedules/imagenet_sweep/node_0/inbox/
+#   logs  → ./schedules/imagenet_sweep/node_0/logs/
 ```
 
 ### Directory Structure
 
 ```
 schedules/
-├── imagenet_sweep/        ← current experiment
-│   ├── state/             ← daemon state (job queue, GPU assignments)
-│   ├── inbox/             ← submitted job files
-│   └── logs/              ← per-job log files
-└── next_experiment/       ← future experiment (completely isolated)
-    ├── state/
-    ├── inbox/
-    └── logs/
+├── imagenet_sweep/
+│   ├── state/                     ← used when no --node-index is set
+│   ├── inbox/                     ← used when no --node-index is set
+│   ├── logs/                      ← used when no --node-index is set
+│   ├── node_0/
+│   │   ├── state/
+│   │   ├── inbox/
+│   │   └── logs/
+│   ├── node_1/
+│   │   ├── state/
+│   │   ├── inbox/
+│   │   └── logs/
+│   └── node_2/
+│       ├── state/
+│       ├── inbox/
+│       └── logs/
+└── next_experiment/               ← future experiment (completely isolated)
 ```
+
+### Consistency Rule
+
+All commands must target the same context:
+
+```bash
+python jobdaemon.py -s imagenet_sweep --node-index 0 start  --gpus 0,1,2,3,4,5,6,7
+python jobdaemon.py -s imagenet_sweep --node-index 0 submit imagenet_sweep_node_0_jobs.yaml
+python jobdaemon.py -s imagenet_sweep --node-index 0 status
+```
+
+If `--node-index` differs (or is missing on one command), the daemon and client will point to different `state`/`inbox` paths.
 
 ### Key Benefits
 
@@ -652,6 +694,23 @@ If the daemon picks up jobs from a previous experiment:
 - You're likely missing the `-s` flag, so it reads from the shared `./state/` directory
 - Fix: always use `-s <schedule_name>` or use `launch_all.sh` which passes it automatically
 - Change `SCHEDULE_NAME` in `launch_all.sh` for each new experiment batch
+
+### Submitted files are present, but daemon does not pick them up
+
+This is almost always a context mismatch between commands.
+
+Common mismatch examples:
+- Daemon started with `-s imagenet_sweep` (no `--node-index`), but submit used `--node-index 0`
+- Daemon started with `--node-index 1`, but submit/status used `--node-index 0`
+- `-s` values differ between `start` and `submit`
+
+Fix by keeping context identical:
+
+```bash
+python jobdaemon.py -s imagenet_sweep --node-index 0 start --gpus 0,1,2,3,4,5,6,7
+python jobdaemon.py -s imagenet_sweep --node-index 0 submit imagenet_sweep_node_0_jobs.yaml
+python jobdaemon.py -s imagenet_sweep --node-index 0 status
+```
 
 ### `--jobs` shows "Could not query status" on remote nodes
 

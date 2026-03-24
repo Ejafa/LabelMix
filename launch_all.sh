@@ -10,7 +10,8 @@
 #
 # Prerequisites:
 #   1. Run generate_jobs.py → jobs.yaml
-#   2. Run job_scheduler.py → node_0_jobs.yaml, node_1_jobs.yaml, ...
+#   2. Run job_scheduler.py --schedule-name <SCHEDULE_NAME>
+#      → <SCHEDULE_NAME>_node_0_jobs.yaml, <SCHEDULE_NAME>_node_1_jobs.yaml, ...
 #   3. Passwordless SSH to all remote nodes
 # ============================================================================
 set -euo pipefail
@@ -91,8 +92,8 @@ done
 echo ""
 
 # Per-node YAML files (must exist in PROJECT_DIR)
-# Auto-generated from NODES array: node_0_jobs.yaml, node_1_jobs.yaml, ...
-node_yaml() { echo "node_${1}_jobs.yaml"; }
+# Auto-generated from NODES array: ${SCHEDULE_NAME}_node_0_jobs.yaml, ${SCHEDULE_NAME}_node_1_jobs.yaml, ...
+node_yaml() { echo "${SCHEDULE_NAME}_node_${1}_jobs.yaml"; }
 
 # ─── LAUNCH ─────────────────────────────────────────────────────────────────
 
@@ -129,12 +130,12 @@ do_launch() {
             # Create detached tmux session running the daemon
             local gpus="${NODE_GPUS[$i]}"
             tmux new-session -d -s "${TMUX_SESSION}" \
-                "source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} start --gpus ${gpus} --pre-grouped; exec bash"
+                "source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} --node-index ${i} start --gpus ${gpus}; exec bash"
             sleep 2
 
             # Submit jobs in the same tmux session (new window)
             tmux new-window -t "${TMUX_SESSION}" \
-                "source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && sleep 5 && python jobdaemon.py -s ${SCHEDULE_NAME} submit ${yaml}; exec bash"
+                "source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && sleep 5 && python jobdaemon.py -s ${SCHEDULE_NAME} --node-index ${i} submit ${yaml}; exec bash"
 
             ok "node_${i} (${host}): daemon started, ${yaml} submitted"
 
@@ -152,7 +153,7 @@ do_launch() {
             local gpus="${NODE_GPUS[$i]}"
             remote_cmd "${host}" "
                 tmux new-session -d -s ${TMUX_SESSION} \
-                    'source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} start --gpus ${gpus} --pre-grouped; exec bash'
+                    'source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} --node-index ${i} start --gpus ${gpus}; exec bash'
             " 2>/dev/null
 
             if ! remote_tmux_exists "${host}"; then
@@ -163,7 +164,7 @@ do_launch() {
             # Submit jobs in a second tmux window (after a short delay)
             remote_cmd "${host}" "
                 tmux new-window -t ${TMUX_SESSION} \
-                    'source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && sleep 5 && python jobdaemon.py -s ${SCHEDULE_NAME} submit ${yaml}; exec bash'
+                    'source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && sleep 5 && python jobdaemon.py -s ${SCHEDULE_NAME} --node-index ${i} submit ${yaml}; exec bash'
             " 2>/dev/null
 
             ok "node_${i} (${host}): daemon started, ${yaml} submitted"
@@ -292,9 +293,9 @@ do_job_status() {
         echo -e "${BLU}━━━ node_${i} (${host}) ━━━${RST}"
 
         if [[ "$i" -eq 0 ]]; then
-            (cd "${PROJECT_DIR}" && python jobdaemon.py -s ${SCHEDULE_NAME} status 2>/dev/null) || warn "Could not query status"
+            (cd "${PROJECT_DIR}" && python jobdaemon.py -s ${SCHEDULE_NAME} --node-index ${i} status 2>/dev/null) || warn "Could not query status"
         else
-            remote_cmd "${host}" "source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} status" 2>/dev/null \
+            remote_cmd "${host}" "source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate ${CONDA_ENV} && cd ${PROJECT_DIR} && python jobdaemon.py -s ${SCHEDULE_NAME} --node-index ${i} status" 2>/dev/null \
                 || warn "Could not query status on ${host}"
         fi
         echo ""

@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Generate jobs.yaml for the LabelMix ImageNet-1K experiment family.
 
-Phase 1 — Fixed-K × Fixed-alpha grid search on vit-wee
-========================================================
-Goal: determine the best (K, alpha) pair before exploring scheduling.
+Phase 1 — K-schedule × alpha × loss sweep on vit-wee
+=====================================================
+Goal: measure how LabelMix K curriculum shape interacts with fixed alpha
+and loss choice before broadening to additional architectures.
 
 Grid:
-    K     = [7, 8, 9, 10] # 3, 4, 5, 6,
-    alpha = [0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0]
-    loss  = [pl_loss, soft_ce]
-    => 8 × 8 × 2 = 128 full training runs, no early stopping.
+    k_schedule          = [linear, cosine]
+    k_min               = [1]
+    k_max               = [4, 6, 8]
+    k_cooldown_epochs   = [0, 10]
+    alpha (fixed value) = [0.2, 0.6, 1.0, 1.5]
+    loss                = [pl_loss, soft_ce]
+    => 2 × 1 × 3 × 2 × 4 × 2 = 96 full training runs.
 
 All 10 baseline model configs are available under ``configs/`` but only
-vit-wee is active for Phase 1. Uncomment others when ready.
+vit-wee is active for this phase. Uncomment others when ready.
 
 Usage::
 
@@ -155,6 +159,7 @@ def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
         "labelmix_k_reverse": False,
         "labelmix_k_warmup_epochs": 0,
         "labelmix_k_total_epochs": None,
+        "labelmix_k_cooldown_epochs": None,
         # Alpha schedule params
         "labelmix_reverse": False,
         "labelmix_warmup_steps": 0,
@@ -162,8 +167,8 @@ def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
         "labelmix_total_steps": None,
         # Sampling params
         "labelmix_sampling": True,
-        # "labelmix_sampling_min_side_px": 8,
-        # "labelmix_sampling_max_aspect": 10.0,
+        "labelmix_sampling_min_side_px": 0,
+        "labelmix_sampling_max_aspect": 20.0,
         "labelmix_sampling_bins": 16,
         "labelmix_sampling_pool_size": 128,
         "labelmix_sampling_low_watermark": 32,
@@ -198,32 +203,32 @@ def get_model_configs() -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Search space — Phase 1: Fixed-K × Fixed-alpha × Loss grid search
+# Search space — Phase 1: K-schedule × alpha × loss sweep
 #
-# Goal: determine whether K scheduling or alpha scheduling matters more,
-#        and compare pl_loss vs soft_ce.
-# Step 1: sweep fixed K, fixed alpha, and loss on vit-wee.
-#   K     = [3, 4, 5, 6, 7, 8, 9, 10]
-#   alpha = [0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0]
-#   loss  = [pl_loss, soft_ce]
-#   => 8 × 8 × 2 = 128 training runs (full grid, no pruning)
+# Sweep dimensions:
+#   k_schedule        = [linear, cosine]
+#   k_min             = [1]
+#   k_max             = [4, 6, 8]
+#   k_cooldown_epochs = [0, 10]
+#   alpha             = [0.2, 0.6, 1.0, 1.5]  (fixed per trial via min=max)
+#   loss              = [pl_loss, soft_ce]
+#   => 2 × 1 × 3 × 2 × 4 × 2 = 96 runs per active model config.
 # ---------------------------------------------------------------------------
 
-# _SEED = [43, 44] #[8, 9, 10] # 3, 4, 5, 6, 7
-_K_VALUES = [2, 4, 6]
+_K_SCHEDULE = ["linear", "cosine"]
+_K_MIN = [1]
+_K_MAX = [4, 6, 8]
+_K_COOLDOWN_EPOCHS = [0, 10]
 _ALPHA_VALUES = [0.2, 0.6, 1.0, 1.5]
-_LOSS_VALUES = ["pl_loss", "soft_ce"]
-_SAMPLING_CONFIGS = [
-    (8, 10.0),
-    (0, 20.0),
-]
-
+_LOSS = ["pl_loss", "soft_ce"]
 
 SEARCH_SPACE: Dict[str, Any] = {
-    "labelmix_mix_k": _K_VALUES,
+    "labelmix_k_schedule": _K_SCHEDULE,
+    "labelmix_k_min": _K_MIN,
+    "labelmix_k_max": _K_MAX,
+    "labelmix_k_cooldown_epochs": _K_COOLDOWN_EPOCHS,
     "labelmix_alpha_min": _ALPHA_VALUES,
-    "labelmix_loss": _LOSS_VALUES,
-    "_sampling_config": _SAMPLING_CONFIGS,
+    "labelmix_loss": _LOSS,
 }
 
 
@@ -237,7 +242,7 @@ def build_experiment_name(
 ) -> str:
     """Build a human-readable experiment name from trial hyperparameters.
 
-    Example output: ``k3_a0.3_pl-loss``
+    Example output: ``k1-8_kcd10_ks-linear_a1_pl-loss_scheduling``
     """
     parts: List[str] = []
     labelmix_enabled = trial_overrides.get(
@@ -247,12 +252,23 @@ def build_experiment_name(
     if not labelmix_enabled:
         parts.append("baseline")
     else:
-        if "labelmix_mix_k" in trial_overrides:
+        k_min = trial_overrides.get("labelmix_k_min")
+        k_max = trial_overrides.get("labelmix_k_max")
+        if k_min is not None and k_max is not None:
+            parts.append(f"k{k_min}-{k_max}")
+        elif "labelmix_mix_k" in trial_overrides:
             parts.append(f"k{trial_overrides['labelmix_mix_k']}")
 
+        if "labelmix_k_cooldown_epochs" in trial_overrides:
+            parts.append(f"kcd{trial_overrides['labelmix_k_cooldown_epochs']}")
+
+        alpha_value = None
         if "labelmix_alpha_min" in trial_overrides:
-            v = trial_overrides["labelmix_alpha_min"]
-            parts.append(f"a{v:g}")
+            alpha_value = trial_overrides["labelmix_alpha_min"]
+        elif "labelmix_alpha_max" in trial_overrides:
+            alpha_value = trial_overrides["labelmix_alpha_max"]
+        if alpha_value is not None:
+            parts.append(f"a{alpha_value:g}")
 
         if "labelmix_loss" in trial_overrides:
             parts.append(str(trial_overrides["labelmix_loss"]).replace("_", "-"))
@@ -283,12 +299,12 @@ def build_experiment_name(
         if a_sched and a_sched != "fixed":
             parts.append(f"as-{a_sched}")
 
-        # Include sampling tag when sampling is enabled
+        # Include scheduling tag when LabelMix sampling is enabled
         sampling = trial_overrides.get("labelmix_sampling") or common_overrides.get(
             "labelmix_sampling"
         )
         if sampling:
-            parts.append("sampling")
+            parts.append("scheduling")
 
     # Catch-all for any extra overrides not already covered
     _covered = {
@@ -300,6 +316,7 @@ def build_experiment_name(
         "labelmix_alpha_max",
         "labelmix_loss",
         "labelmix_k_schedule",
+        "labelmix_k_cooldown_epochs",
         "labelmix_schedule",
         "labelmix_sampling",
         "_sampling_config",
@@ -389,6 +406,7 @@ def generate(
 
     # ---- Build job entries -------------------------------------------------
     jobs: List[Dict[str, str]] = []
+    seen_experiment_names: set[str] = set()
     for model_tag, config_path in model_configs.items():
         for combo in combinations:
             trial_overrides = dict(zip(keys, combo))
@@ -414,6 +432,12 @@ def generate(
             # output directories stay unique even for single-model runs.
             base_exp_name = build_experiment_name(trial_overrides, common_overrides)
             exp_name = f"{model_tag}__{base_exp_name}"
+            if exp_name in seen_experiment_names:
+                raise ValueError(
+                    f"Duplicate experiment name generated: {exp_name}. "
+                    "Ensure all active sweep axes are encoded in build_experiment_name()."
+                )
+            seen_experiment_names.add(exp_name)
 
             # Merge all overrides (common < trial-specific < runtime)
             all_overrides: Dict[str, Any] = {}

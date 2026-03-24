@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
-"""Smart job scheduler with memory profiling and model-aware GPU grouping.
+"""Smart job scheduler with memory profiling and fair per-node split.
 
-Instead of letting the jobdaemon discover memory usage at runtime (which
-causes slow sequential starts and suboptimal GPU utilization), this
-scheduler:
+This scheduler keeps responsibilities minimal and explicit:
 
-1. Analyzes all jobs and identifies unique model configurations.
-2. Runs a short test (N steps) for each unique model to measure peak
-   GPU memory usage.
-3. Bin-packs jobs onto GPUs to maximize total memory utilization,
-   grouping by model so that similar-memory jobs share GPUs optimally.
-4. Saves the profiled memory info and GPU assignments as a cached
-   schedule YAML under ``schedules/<name>/`` so subsequent runs skip
-   the profiling step.
-5. Outputs per-node YAML files with ``pre_grouped: true`` so the
-   jobdaemon launches everything immediately without waiting/fitting.
+1. Analyze all jobs and identify unique model configurations.
+2. Profile each unique model for peak GPU memory (with cache reuse).
+3. Split jobs fairly across nodes by available free GPU memory.
+4. Attach model/memory metadata to each job in per-node YAML output.
+5. Leave GPU placement and runtime admission control to ``jobdaemon.py``.
+
+Generated artifacts (explicit contract)::
+
+    1) <output-dir>/<schedule>_node_<idx>_jobs.yaml
+       - Purpose: runtime input for ``jobdaemon.py submit``.
+       - Consumed by: ``jobdaemon.py`` (inbox ingestion path).
+
+    2) schedules/<schedule>/memory_profile.yaml
+       - Purpose: scheduler cache for model peak-memory profiling.
+       - Consumed by: future ``job_scheduler.py`` runs only.
+       - Not consumed by: ``jobdaemon.py``.
+
+    3) schedules/<schedule>/debug/schedule_info.yaml
+       - Purpose: human-readable audit/debug snapshot of one scheduling run.
+       - Consumed by: nothing in runtime pipeline (debug-only metadata).
+       - Not required for daemon ``start/submit/status``.
+
+    4) /tmp/profile_<model_key>.log
+       - Purpose: profiler stdout/stderr logs for troubleshooting.
+       - Consumed by: humans only (debug-only).
 
 Usage::
 
-    # Profile models and generate optimized schedule
+    # Profile models and generate per-node YAML files
     python job_scheduler.py --input jobs.yaml \\
         --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\
         --schedule-name imagenet_sweep \\
@@ -29,15 +42,15 @@ Usage::
         --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\
         --schedule-name imagenet_sweep
 
-    # Preview the plan without writing files
+    # Preview without writing files
     python job_scheduler.py --input jobs.yaml \\
         --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\
         --schedule-name imagenet_sweep \\
         --dry-run
 
-    # Then on each node, start daemon with --pre-grouped:
-    #   python jobdaemon.py -s imagenet_sweep start --gpus 0,1,...,7 --pre-grouped
-    #   python jobdaemon.py -s imagenet_sweep submit node_0_jobs.yaml
+    # Then on each node, start daemon (dynamic GPU scheduling):
+    #   python jobdaemon.py -s imagenet_sweep --node-index 0 start --gpus 0,1,...,7
+    #   python jobdaemon.py -s imagenet_sweep --node-index 0 submit imagenet_sweep_node_0_jobs.yaml
 """
 from __future__ import annotations
 
@@ -57,6 +70,9 @@ import yaml
 
 SCHEDULES_ROOT = "./schedules"
 PROFILE_CACHE_FILENAME = "memory_profile.yaml"
+DEBUG_SUBDIR_NAME = "debug"
+PROFILE_LOGS_SUBDIR_NAME = "profile_logs"
+SCHEDULE_INFO_FILENAME = "schedule_info.yaml"
 
 # ---------------------------------------------------------------------------
 # GPU memory query
@@ -525,6 +541,7 @@ def profile_model_memory(
     profile_steps: int,
     working_dir: str,
     timeout: int = 600,
+    profile_log_dir: Optional[str] = None,
 ) -> Optional[int]:
     """Run a short test of a model and measure peak GPU memory per GPU.
 
@@ -550,7 +567,11 @@ def profile_model_memory(
     baseline = _get_peak_gpu_memory(use_gpus)
 
     # Launch the profile run
-    log_file = f"/tmp/profile_{model_key}.log"
+    if profile_log_dir:
+        os.makedirs(profile_log_dir, exist_ok=True)
+        log_file = os.path.join(profile_log_dir, f"profile_{model_key}.log")
+    else:
+        log_file = f"/tmp/profile_{model_key}.log"
     print(f"  📝 Profile log: {log_file}")
     try:
         fh = open(log_file, "w")
@@ -642,9 +663,10 @@ def profile_model_memory(
 # ---------------------------------------------------------------------------
 
 def load_profile_cache(schedule_dir: str) -> Optional[Dict[str, Any]]:
-    """Load cached memory profile from a schedule directory.
+    """Load scheduler-internal memory profile cache from a schedule directory.
 
     Returns the full profile dict or None if not found.
+    This cache is used only by ``job_scheduler.py`` (not by ``jobdaemon.py``).
     """
     path = os.path.join(schedule_dir, PROFILE_CACHE_FILENAME)
     if not os.path.exists(path):
@@ -664,7 +686,10 @@ def save_profile_cache(
     profiles: Dict[str, Dict[str, Any]],
     gpu_total_mib: int,
 ) -> None:
-    """Save memory profiles to the schedule directory.
+    """Save scheduler-only memory profiles to ``schedules/<name>/memory_profile.yaml``.
+
+    This artifact is reused by future scheduler runs and is not consumed by
+    runtime daemon commands.
 
     Format::
 
@@ -690,114 +715,34 @@ def save_profile_cache(
 
 
 # ---------------------------------------------------------------------------
-# GPU bin-packing
+# Job metadata annotation
 # ---------------------------------------------------------------------------
 
-def bin_pack_jobs_to_gpus(
+def annotate_jobs_with_profile_metadata(
     jobs: List[Dict[str, Any]],
     model_profiles: Dict[str, Dict[str, Any]],
-    gpu_total_mib: int,
-    num_gpus: int,
-    safety_margin: float = 0.10,
+    fallback_memory_mib: int,
 ) -> List[Dict[str, Any]]:
-    """Assign GPU indices to jobs using first-fit-decreasing bin packing.
-
-    Groups jobs by model (same model → same memory footprint), then
-    assigns them to GPUs to maximize utilization while respecting memory
-    limits.
-
-    Each job in the returned list gets an extra ``assigned_gpus`` field
-    (list of GPU indices).
-
-    Strategy:
-    - Sort models by memory usage (descending) for better packing.
-    - For each job, find the GPU(s) with the most remaining capacity
-      that can still fit the job.
-    - Uses safety_margin (10% default) to avoid edge-case OOMs.
-    """
-    usable_per_gpu = int(gpu_total_mib * (1.0 - safety_margin))
-    gpu_remaining = [usable_per_gpu] * num_gpus  # remaining MiB per GPU
-
-    # Build list of (job_dict, model_key, memory_per_gpu)
-    job_entries = []
+    """Attach model/memory metadata to jobs without assigning concrete GPUs."""
+    annotated: List[Dict[str, Any]] = []
     for job in jobs:
         model_key = extract_model_key(job)
-        gpus_needed = job.get("gpus", 1)
         profile = model_profiles.get(model_key)
         if profile:
-            mem_per_gpu = profile["peak_memory_mib"]
+            mem_per_gpu = int(profile["peak_memory_mib"])
         else:
-            # No profile — use a conservative estimate (50% of GPU)
-            mem_per_gpu = usable_per_gpu // 2
-            print(f"  ⚠️  No profile for {model_key}, using conservative "
-                  f"estimate: {mem_per_gpu} MiB/GPU")
-        job_entries.append((job, model_key, mem_per_gpu, gpus_needed))
-
-    # Sort by memory descending (first-fit-decreasing → better packing)
-    job_entries.sort(key=lambda x: x[2], reverse=True)
-
-    # Assign GPUs
-    assigned_jobs = []
-    unassigned = []
-
-    for job, model_key, mem_per_gpu, gpus_needed in job_entries:
-        if gpus_needed == 1:
-            # Single-GPU job: find the GPU with most remaining that can fit
-            best_gpu = None
-            best_remaining = -1
-            for g in range(num_gpus):
-                if gpu_remaining[g] >= mem_per_gpu and gpu_remaining[g] > best_remaining:
-                    best_gpu = g
-                    best_remaining = gpu_remaining[g]
-
-            if best_gpu is not None:
-                gpu_remaining[best_gpu] -= mem_per_gpu
-                job_copy = dict(job)
-                job_copy["assigned_gpus"] = [best_gpu]
-                job_copy["_model_key"] = model_key
-                job_copy["_memory_per_gpu"] = mem_per_gpu
-                assigned_jobs.append(job_copy)
-            else:
-                unassigned.append((job, model_key, mem_per_gpu, gpus_needed))
-        else:
-            # Multi-GPU job: find gpus_needed consecutive or best-fit GPUs
-            # Try to find gpus_needed GPUs all with enough remaining memory
-            # Sort GPUs by remaining capacity (descending)
-            gpu_order = sorted(
-                range(num_gpus),
-                key=lambda g: gpu_remaining[g],
-                reverse=True,
+            mem_per_gpu = int(fallback_memory_mib)
+            print(
+                f"  ⚠️  No profile for {model_key}, using conservative estimate: "
+                f"{mem_per_gpu} MiB/GPU"
             )
-            fit_gpus = [g for g in gpu_order if gpu_remaining[g] >= mem_per_gpu]
 
-            if len(fit_gpus) >= gpus_needed:
-                chosen = fit_gpus[:gpus_needed]
-                for g in chosen:
-                    gpu_remaining[g] -= mem_per_gpu
-                job_copy = dict(job)
-                job_copy["assigned_gpus"] = sorted(chosen)
-                job_copy["_model_key"] = model_key
-                job_copy["_memory_per_gpu"] = mem_per_gpu
-                assigned_jobs.append(job_copy)
-            else:
-                unassigned.append((job, model_key, mem_per_gpu, gpus_needed))
+        job_copy = dict(job)
+        job_copy["model_key"] = model_key
+        job_copy["memory_mib_per_gpu"] = mem_per_gpu
+        annotated.append(job_copy)
 
-    if unassigned:
-        print(f"\n  ⚠️  {len(unassigned)} job(s) could not fit in {num_gpus} GPUs:")
-        for job, mk, mem, gn in unassigned:
-            print(f"     {job['name']} ({mk}, {mem} MiB/GPU, needs {gn} GPU(s))")
-        # Add unassigned jobs with round-robin GPU assignment as fallback
-        rr = 0
-        for job, model_key, mem_per_gpu, gpus_needed in unassigned:
-            chosen = [(rr + g) % num_gpus for g in range(gpus_needed)]
-            rr = (rr + gpus_needed) % num_gpus
-            job_copy = dict(job)
-            job_copy["assigned_gpus"] = sorted(chosen)
-            job_copy["_model_key"] = model_key
-            job_copy["_memory_per_gpu"] = mem_per_gpu
-            assigned_jobs.append(job_copy)
-
-    return assigned_jobs
+    return annotated
 
 
 # ---------------------------------------------------------------------------
@@ -820,21 +765,17 @@ def write_node_yaml(
     path: str,
     defaults: Dict[str, Any],
     jobs: List[Dict[str, Any]],
-    gpu_total_mib: int,
-    safety_margin: float,
 ) -> None:
-    """Write a per-node jobs.yaml with pre_grouped flag."""
-    # Clean internal keys from jobs before writing, but keep scheduler metadata
+    """Write a per-node jobs.yaml for dynamic scheduling by jobdaemon."""
     clean_jobs = []
     for job in jobs:
-        clean = {k: v for k, v in job.items() if not k.startswith("_")}
-        clean["memory_mib_per_gpu"] = job.get("_memory_per_gpu")
-        clean["model_key"] = job.get("_model_key")
+        clean = dict(job)
+        clean.pop("assigned_gpus", None)
         clean_jobs.append(clean)
 
     defaults_copy = dict(defaults)
-    defaults_copy["pre_grouped"] = True
-    defaults_copy["static_gpu_budget_mib"] = int(gpu_total_mib * (1.0 - safety_margin))
+    defaults_copy.pop("pre_grouped", None)
+    defaults_copy.pop("static_gpu_budget_mib", None)
 
     output = {"defaults": defaults_copy, "jobs": clean_jobs}
     with open(path, "w") as f:
@@ -852,10 +793,9 @@ def schedule(
     profile_steps: int = 20,
     profile_gpu: int = 0,
     working_dir: str = ".",
-    safety_margin: float = 0.05,
     skip_profile: bool = False,
 ) -> None:
-    """Profile models, bin-pack jobs onto GPUs, split across nodes.
+    """Profile models, annotate jobs with memory metadata, and split across nodes.
 
     Parameters
     ----------
@@ -880,8 +820,6 @@ def schedule(
         Multi-GPU jobs use consecutive indices from this start.
     working_dir : str
         Working directory for profile runs.
-    safety_margin : float
-        Safety margin for bin packing (default: 0.05 = 5%).
     skip_profile : bool
         If True, skip profiling even if no cache exists (use conservative estimates).
     """
@@ -958,8 +896,12 @@ def schedule(
 
     # ── Step 3: Memory profiling ────────────────────────────────────
     schedule_dir = None
+    schedule_debug_dir = None
+    profile_log_dir = None
     if schedule_name:
         schedule_dir = os.path.join(SCHEDULES_ROOT, schedule_name)
+        schedule_debug_dir = os.path.join(schedule_dir, DEBUG_SUBDIR_NAME)
+        profile_log_dir = os.path.join(schedule_debug_dir, PROFILE_LOGS_SUBDIR_NAME)
 
     model_profiles: Dict[str, Dict[str, Any]] = {}
     cache = load_profile_cache(schedule_dir) if schedule_dir else None
@@ -1002,6 +944,7 @@ def schedule(
                     use_gpus=profile_gpu_ids,
                     profile_steps=profile_steps,
                     working_dir=working_dir,
+                    profile_log_dir=profile_log_dir,
                 )
             if peak is not None:
                 model_profiles[key] = {
@@ -1044,42 +987,29 @@ def schedule(
         splits.append(jobs[offset:offset + count])
         offset += count
 
-    # ── Step 5: Bin-pack each node's jobs onto its GPUs ─────────────
-    print(f"\n📦 Bin-packing jobs onto GPUs (safety_margin={safety_margin*100:.0f}%)...")
-
-    node_packed: List[List[Dict[str, Any]]] = []
+    # ── Step 5: Annotate each node's jobs with profile metadata ─────
+    node_jobs: List[List[Dict[str, Any]]] = []
+    conservative_fallback = gpu_total_mib // 2
     for i, (info, split) in enumerate(zip(node_info, splits)):
         if not split:
-            node_packed.append([])
+            node_jobs.append([])
             continue
 
-        num_gpus = info["num_gpus"]
-        # Use the node's actual GPU total if available, else the global
-        node_gpu_total = info["gpu_total_mib"] or gpu_total_mib
-
-        packed = bin_pack_jobs_to_gpus(
-            split, model_profiles, node_gpu_total, num_gpus, safety_margin,
+        annotated = annotate_jobs_with_profile_metadata(
+            split,
+            model_profiles,
+            fallback_memory_mib=conservative_fallback,
         )
-        node_packed.append(packed)
+        node_jobs.append(annotated)
 
-        # Print GPU utilization summary for this node
-        gpu_usage: Dict[int, int] = {g: 0 for g in range(num_gpus)}
-        gpu_job_count: Dict[int, int] = {g: 0 for g in range(num_gpus)}
-        for pj in packed:
-            for g in pj.get("assigned_gpus", []):
-                gpu_usage[g] += pj.get("_memory_per_gpu", 0)
-                gpu_job_count[g] += 1
+        model_summary: Dict[str, int] = {}
+        for j in annotated:
+            mk = j.get("model_key", "unknown")
+            model_summary[mk] = model_summary.get(mk, 0) + 1
 
-        usable = int(node_gpu_total * (1.0 - safety_margin))
         node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
-        print(f"\n  {node_label} ({info['host']}): {len(packed)} jobs on "
-              f"{num_gpus} GPUs")
-        for g in range(num_gpus):
-            pct = (gpu_usage[g] / usable * 100) if usable > 0 else 0
-            bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
-            print(f"    GPU {g}: {gpu_job_count[g]} jobs, "
-                  f"~{gpu_usage[g]:,}/{usable:,} MiB "
-                  f"[{bar}] {pct:.0f}%")
+        print(f"\n  {node_label} ({info['host']}): {len(annotated)} jobs")
+        print(f"    Models: {model_summary}")
 
     # ── Step 6: Print plan ──────────────────────────────────────────
     print(f"\n📊 Job Distribution Plan:")
@@ -1087,127 +1017,133 @@ def schedule(
     print(f"{'Node':<25} {'Free Memory':>15} {'Jobs':>8} {'Weight':>10}")
     print(f"{'─' * 65}")
     total_weight = sum(weights) or 1
-    for i, (info, packed) in enumerate(zip(node_info, node_packed)):
+    for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
         pct = (info['total_free_mib'] / total_weight) * 100 if total_weight else 0
         node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
         print(f"  {node_label} ({info['host']:<15}) "
               f"{info['total_free_mib']:>10,} MiB "
-              f"{len(packed):>6} "
+              f"{len(node_list):>6} "
               f"{pct:>8.1f}%")
     print(f"{'─' * 65}")
-    total_packed = sum(len(p) for p in node_packed)
-    print(f"  {'TOTAL':<25} {sum(weights):>10,} MiB {total_packed:>6}")
+    total_split = sum(len(p) for p in node_jobs)
+    print(f"  {'TOTAL':<25} {sum(weights):>10,} MiB {total_split:>6}")
 
-    if total_packed != total_jobs:
-        print(f"\n⚠️  WARNING: packed total ({total_packed}) != "
+    if total_split != total_jobs:
+        print(f"\n⚠️  WARNING: split total ({total_split}) != "
               f"total jobs ({total_jobs})")
 
     # ── Step 7: Write output files ──────────────────────────────────
     if dry_run:
         print(f"\n🔍 DRY RUN — no files written.")
-        for i, (info, packed) in enumerate(zip(node_info, node_packed)):
+        for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
             node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
-            print(f"\n  {node_label} ({info['host']}): {len(packed)} job(s)")
-            for j in packed[:5]:
-                gpu_str = ",".join(str(g) for g in j.get("assigned_gpus", []))
-                print(f"    - {j['name']} → GPU [{gpu_str}]")
-            if len(packed) > 5:
-                print(f"    ... and {len(packed) - 5} more")
+            print(f"\n  {node_label} ({info['host']}): {len(node_list)} job(s)")
+            for j in node_list[:5]:
+                print(
+                    f"    - {j['name']} "
+                    f"(model={j.get('model_key')}, mem={j.get('memory_mib_per_gpu')} MiB/GPU)"
+                )
+            if len(node_list) > 5:
+                print(f"    ... and {len(node_list) - 5} more")
         return
 
     os.makedirs(output_dir, exist_ok=True)
+    file_prefix = output_prefix
+    if schedule_name:
+        file_prefix = f"{schedule_name}_{output_prefix}"
+
     written_files = []
-    for i, (info, packed) in enumerate(zip(node_info, node_packed)):
-        fname = f"{output_prefix}_{i}_jobs.yaml"
+    for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
+        fname = f"{file_prefix}_{i}_jobs.yaml"
         fpath = os.path.join(output_dir, fname)
-        node_gpu_total = info["gpu_total_mib"] or gpu_total_mib
         write_node_yaml(
             fpath,
             defaults,
-            packed,
-            gpu_total_mib=node_gpu_total,
-            safety_margin=safety_margin,
+            node_list,
         )
-        written_files.append((fpath, info["host"], len(packed)))
+        written_files.append((fpath, info["host"], len(node_list), i))
 
-    # Also save the schedule info to the schedule dir if specified
+    # Also save schedule debug metadata if schedule context is set
     if schedule_dir:
         schedule_info = {
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "input_file": input_path,
             "total_jobs": total_jobs,
             "profile_steps": profile_steps,
-            "safety_margin": safety_margin,
             "model_profiles": model_profiles,
             "nodes": [],
         }
-        for i, (info, packed) in enumerate(zip(node_info, node_packed)):
+        for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
             node_entry = {
                 "index": i,
                 "host": info["host"],
                 "num_gpus": info["num_gpus"],
                 "total_free_mib": info["total_free_mib"],
-                "num_jobs": len(packed),
+                "num_jobs": len(node_list),
+                "jobs": [
+                    {
+                        "name": j.get("name"),
+                        "model_key": j.get("model_key"),
+                        "gpus_needed": j.get("gpus", defaults.get("gpus", 1)),
+                        "memory_per_gpu_mib": j.get("memory_mib_per_gpu"),
+                    }
+                    for j in node_list
+                ],
             }
-            # Per-GPU summary
-            gpu_summary = {}
-            for pj in packed:
-                for g in pj.get("assigned_gpus", []):
-                    gpu_summary.setdefault(g, {"jobs": 0, "memory_mib": 0})
-                    gpu_summary[g]["jobs"] += 1
-                    gpu_summary[g]["memory_mib"] += pj.get("_memory_per_gpu", 0)
-            node_entry["gpu_assignments"] = gpu_summary
-
-            # Explicit per-job static assignments for daemon launch policy
-            node_entry["job_assignments"] = [
-                {
-                    "name": pj.get("name"),
-                    "model_key": pj.get("_model_key"),
-                    "gpus_needed": pj.get("gpus", defaults.get("gpus", 1)),
-                    "assigned_gpus": pj.get("assigned_gpus", []),
-                    "memory_per_gpu_mib": pj.get("_memory_per_gpu"),
-                    "static_gpu_budget_mib": int((info["gpu_total_mib"] or gpu_total_mib) * (1.0 - safety_margin)),
-                }
-                for pj in packed
-            ]
             schedule_info["nodes"].append(node_entry)
 
-        info_path = os.path.join(schedule_dir, "schedule_info.yaml")
-        os.makedirs(schedule_dir, exist_ok=True)
+        os.makedirs(schedule_debug_dir, exist_ok=True)
+        info_path = os.path.join(schedule_debug_dir, SCHEDULE_INFO_FILENAME)
 
         with open(info_path, "w") as f:
             yaml.safe_dump(schedule_info, f, default_flow_style=False, sort_keys=False)
-        print(f"\n💾 Schedule info saved → {info_path}")
+        print(f"\n🧪 Debug metadata saved → {info_path}")
 
     # Print summary and next steps
-    print(f"\n✅ Written {len(written_files)} file(s):")
-    for fpath, host, count in written_files:
-        print(f"   {fpath}  ({count} jobs for {host})")
+    print(f"\n✅ Written {len(written_files)} runtime file(s):")
+    for fpath, host, count, node_index in written_files:
+        print(f"   {fpath}  ({count} jobs for {host}, node_index={node_index})")
 
-    print(f"\n🚀 Next steps — on each node, start the daemon with --pre-grouped:")
+    print(f"\n📁 Scheduler artifacts generated:")
+    print("   Runtime-consumed (required):")
+    for fpath, _host, _count, _node_index in written_files:
+        print(f"   - {fpath}  # submit this file to jobdaemon")
+
+    if schedule_name:
+        profile_cache_path = os.path.join(schedule_dir, PROFILE_CACHE_FILENAME)
+        print("   Scheduler-only cache (not consumed by jobdaemon):")
+        print(f"   - {profile_cache_path}  # reused by future scheduler runs")
+
+        debug_info_path = os.path.join(schedule_debug_dir, SCHEDULE_INFO_FILENAME)
+        debug_profile_logs_path = os.path.join(schedule_debug_dir, PROFILE_LOGS_SUBDIR_NAME)
+        print("   Debug-only metadata/logs (not consumed by runtime):")
+        print(f"   - {debug_info_path}  # audit snapshot for humans")
+        print(f"   - {debug_profile_logs_path}/profile_<model>.log  # profiling logs")
+
+    print(f"\n🚀 Next steps — on each node, run daemon with matching --node-index:")
     print(f"{'─' * 70}")
     sched_flag = f" -s {schedule_name}" if schedule_name else ""
-    for i, (fpath, host, count) in enumerate(written_files):
+    for fpath, host, count, node_index in written_files:
         if count == 0:
-            node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
+            node_label = f"{schedule_name}_node_{node_index}" if schedule_name else f"node_{node_index}"
             print(f"\n  # {node_label} ({host}): 0 jobs — skip")
             continue
         fname = os.path.basename(fpath)
-        node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
+        node_label = f"{schedule_name}_node_{node_index}" if schedule_name else f"node_{node_index}"
         if is_local(host):
             print(f"\n  # {node_label} ({host}) — LOCAL:")
             print(f"  tmux new -s daemon")
-            print(f"  python jobdaemon.py{sched_flag} start --gpus 0,1,2,3,4,5,6,7 --pre-grouped")
+            print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} start --gpus 0,1,2,3,4,5,6,7")
             print(f"  # (in another terminal)")
-            print(f"  python jobdaemon.py{sched_flag} submit {fname}")
+            print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} submit {fname}")
         else:
             print(f"\n  # {node_label} ({host}) — REMOTE:")
             print(f"  ssh root@{host}")
             print(f"  cd {os.getcwd()}")
             print(f"  tmux new -s daemon")
-            print(f"  python jobdaemon.py{sched_flag} start --gpus 0,1,2,3,4,5,6,7 --pre-grouped")
+            print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} start --gpus 0,1,2,3,4,5,6,7")
             print(f"  # (in another terminal)")
-            print(f"  python jobdaemon.py{sched_flag} submit {fname}")
+            print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} submit {fname}")
     print(f"{'─' * 70}")
 
 
@@ -1217,7 +1153,7 @@ def schedule(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Smart job scheduler with memory profiling and model-aware GPU grouping",
+        description="Smart job scheduler with profiling cache and fair per-node splitting",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -1269,7 +1205,7 @@ def main() -> None:
     parser.add_argument(
         "--prefix",
         default="node",
-        help="Filename prefix (default: 'node' → node_0_jobs.yaml)",
+        help="Filename prefix base (default: 'node'). Output is '<schedule-name>_<prefix>_<idx>_jobs.yaml' when --schedule-name is set, otherwise '<prefix>_<idx>_jobs.yaml'.",
     )
     parser.add_argument(
         "--dry-run",
@@ -1279,8 +1215,10 @@ def main() -> None:
     parser.add_argument(
         "--schedule-name",
         default=None,
-        help="Schedule name for caching profiles under schedules/<name>/. "
-             "If a cached profile exists, profiling is skipped.",
+        help="Schedule name namespace. Generates scheduler artifacts under "
+             "schedules/<name>/ (memory_profile.yaml cache) and "
+             "schedules/<name>/debug/ (schedule_info.yaml + profile logs). "
+             "Only per-node *_jobs.yaml files are consumed by jobdaemon.",
     )
     parser.add_argument(
         "--profile-steps",
@@ -1301,12 +1239,7 @@ def main() -> None:
         default=".",
         help="Working directory for profile runs (default: cwd)",
     )
-    parser.add_argument(
-        "--safety-margin",
-        type=float,
-        default=0.10,
-        help="Safety margin for GPU memory bin packing (default: 0.10 = 10%%)",
-    )
+
     parser.add_argument(
         "--skip-profile",
         action="store_true",
@@ -1336,7 +1269,6 @@ def main() -> None:
         profile_steps=args.profile_steps,
         profile_gpu=args.profile_gpu,
         working_dir=args.working_dir,
-        safety_margin=args.safety_margin,
         skip_profile=args.skip_profile,
     )
 
