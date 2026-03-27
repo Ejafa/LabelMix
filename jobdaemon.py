@@ -68,7 +68,7 @@ SCHEDULES_ROOT = "./schedules"
 DEFAULT_SATURATION_COOLDOWN = 30  # seconds to wait after OOM before trying next launch
 DEFAULT_OOM_CRASH_THRESHOLD = 120  # if a job dies within this many seconds, treat as OOM
 DEFAULT_BURST_DELAY = 15 # seconds between consecutive burst launches
-DEFAULT_FIFO_LAUNCH_COOLDOWN = 240  # seconds between FIFO one-by-one launches after burst
+DEFAULT_FIFO_LAUNCH_COOLDOWN = 240  # seconds between FIFO VRAM polls / launch attempts after burst
 DEFAULT_GPU_CHECK_DELAY = 30 # seconds grace period before checking GPU presence
 DEFAULT_BURST_GPU_WAIT = 300 # seconds to wait for a burst-launched job to appear on GPU before launching next
 DEFAULT_STABILIZATION_WAIT = 300 # base seconds (5 min) for saturation checkpoint; actual wait = checkpoint_number × this value
@@ -135,16 +135,17 @@ class DaemonConfig:
     overcommit: bool = True  # greedy GPU memory sharing mode (default)
     saturated: bool = False  # True when machine is at capacity (OOM detected)
     saturation_time: Optional[str] = None  # when saturation was detected
-    burst_phase: bool = True  # True = burst launching, False = FIFO (1-out-1-in)
+    burst_phase: bool = True  # True = burst launching, False = FIFO timed VRAM polling
     burst_jobs_launched: int = 0  # how many jobs launched in current burst
     saturation_checkpoints_passed: int = 0  # how many saturation checkpoints completed (for progressive wait)
     overcommit_rr_index: int = 0  # round-robin index for GPU pinning in overcommit mode
-    fill_gpu_index: int = 0  # index into gpus list: the GPU we are currently filling
-    prev_running: int = 0  # previous running count for FIFO slot detection (persisted)
+    fill_gpu_index: int = 0  # index into gpus list: the GPU group we are currently probing/filling
+    prev_running: int = 0  # legacy FIFO state retained for backward-compatible persistence
     peak_memory_per_job: Optional[float] = None  # MiB: best estimate of memory per job from stabilized jobs
     last_checkpoint_burst_index: int = 0  # burst_jobs_launched at last successful saturation checkpoint
     last_launched_job_name: Optional[str] = None  # name of the last job launched (waiting for its sentinel)
-    last_fifo_launch_time: Optional[str] = None  # timestamp of last FIFO launch for one-by-one cooldown
+    last_fifo_launch_time: Optional[str] = None  # timestamp of last successful FIFO launch
+    last_fifo_check_time: Optional[str] = None  # timestamp of last FIFO VRAM poll / launch attempt
 
 
 @dataclass
@@ -1656,9 +1657,9 @@ def render_status(state: State, compact: bool = False) -> None:
     if state.daemon.burst_phase:
         phase_str = f" [BURST {state.daemon.burst_jobs_launched} launched]"
     elif state.daemon.saturated:
-        phase_str = " [FIFO - draining]"
+        phase_str = " [FIFO - timed VRAM polling, saturated]"
     else:
-        phase_str = " [FIFO - 1-out-1-in]"
+        phase_str = " [FIFO - timed VRAM polling]"
     overcommit_str = f" | OVERCOMMIT{phase_str}"
 
     print(f"\n{'=' * 70}")
@@ -1901,7 +1902,7 @@ def daemon_main(args: argparse.Namespace) -> None:
          f"(1st={args.stabilization_wait}s, 2nd={2*args.stabilization_wait}s, ...)")
     _log(f"  Burst GPU wait: {args.burst_gpu_wait}s (wait for GPU presence before next launch)")
     _log(f"  Burst delay: {args.burst_delay}s (settling time after GPU confirmed)")
-    _log(f"  FIFO one-by-one cooldown: {args.fifo_launch_cooldown}s")
+    _log(f"  FIFO VRAM poll interval: {args.fifo_launch_cooldown}s")
     _log(f"  GPU check delay: {args.gpu_check_delay}s grace period")
     _log(f"  OOM threshold: {args.oom_threshold}s")
     _log(f"  Saturation cooldown: {args.saturation_cooldown}s")
@@ -1935,6 +1936,19 @@ def daemon_main(args: argparse.Namespace) -> None:
                 break
 
     signal.signal(signal.SIGCHLD, _handle_sigchld)
+
+    scheduler_log_times: Dict[str, float] = {}
+
+    def _log_scheduler_event(
+        key: str,
+        msg: str,
+        every: float = 60.0,
+    ) -> None:
+        now = time.time()
+        last = scheduler_log_times.get(key)
+        if last is None or (now - last) >= every:
+            _log(msg)
+            scheduler_log_times[key] = now
 
     # Main loop
     while True:
@@ -1989,6 +2003,18 @@ def daemon_main(args: argparse.Namespace) -> None:
                     existing_names.add(job.name)
                     state.jobs.append(job)
                 _log(f"Ingested {len(new_jobs)} job(s) from {os.path.basename(fpath)}")
+                pending_after_ingest = sum(
+                    1 for j in state.jobs if j.status == "pending")
+                running_after_ingest = sum(
+                    1 for j in state.jobs if j.status == "running")
+                next_pending_name = next(
+                    (j.name for j in state.jobs if j.status == "pending"),
+                    "none",
+                )
+                _log(
+                    f"📥 Queue update: {pending_after_ingest} pending, "
+                    f"{running_after_ingest} running after ingest; "
+                    f"next up: {next_pending_name}")
                 move_to_processed(fpath)
                 changed = True
             except Exception as e:
@@ -2081,7 +2107,7 @@ def daemon_main(args: argparse.Namespace) -> None:
                             getattr(args, 'oom_threshold', DEFAULT_OOM_CRASH_THRESHOLD))
                         state.daemon.burst_phase = False
                         _log(f"🔀 BURST → FIFO: OOM detected in main loop. "
-                             f"Switching to 1-out-1-in mode.")
+                             f"Switching to timed VRAM polling mode.")
                 elif job.retries < job.max_retries:
                     job.retries += 1
                     job.status = "pending"
@@ -2108,8 +2134,8 @@ def daemon_main(args: argparse.Namespace) -> None:
         #
         # Phase 1 - BURST: Fill GPUs one at a time until all GPUs are
         #   full or all pending jobs are launched.
-        # Phase 2 - FIFO: 1-out-1-in. When a running job completes,
-        #   launch the next pending job on the same GPU (fill-per-GPU).
+        # Phase 2 - FIFO: poll GPU VRAM on the configured interval and
+        #   launch the next pending job when a full GPU group fits.
         if not state.daemon.paused:
             pending = [j for j in state.jobs if j.status == "pending"]
             running_count = sum(1 for j in state.jobs if j.status == "running")
@@ -2180,7 +2206,7 @@ def daemon_main(args: argparse.Namespace) -> None:
                                     datetime.now().isoformat())
                                 _log(f"🔀 BURST → FIFO: OOM on GPU "
                                      f"{all_gpus[state.daemon.fill_gpu_index]}. "
-                                     f"Switching to 1-out-1-in mode.")
+                                     f"Switching to timed VRAM polling mode.")
                                 state.daemon.burst_phase = False
                             elif last_job.retries < last_job.max_retries:
                                 last_job.retries += 1
@@ -2237,6 +2263,14 @@ def daemon_main(args: argparse.Namespace) -> None:
                                 # Still within timeout — wait for next
                                 # poll cycle
                                 waiting_for_sentinel = True
+                                _log_scheduler_event(
+                                    "burst_waiting_for_sentinel",
+                                    f"⏸ BURST hold: waiting for {last_job.name} "
+                                    f"to confirm startup before queuing more "
+                                    f"jobs ({len(pending)} pending behind it, "
+                                    f"elapsed {elapsed:.0f}s/{sentinel_timeout:.0f}s)",
+                                    every=max(30.0, args.poll_interval * 6),
+                                )
 
                 if not waiting_for_sentinel and state.daemon.burst_phase and pending:
                     # ─── STEP B: Determine target GPU group ──────────
@@ -2259,13 +2293,6 @@ def daemon_main(args: argparse.Namespace) -> None:
                         for g in range(gpj)
                     ]
 
-                    jobs_on_group = sum(
-                        1 for j in state.jobs
-                        if j.status == "running"
-                        and j.gpu_ids
-                        and any(g in j.gpu_ids for g in target_group)
-                    )
-
                     # Check ALL GPUs in the group — the group can only fit
                     # another job if EVERY GPU has room. Use scheduler
                     # profiling for the pending job (with runtime fallback).
@@ -2279,9 +2306,13 @@ def daemon_main(args: argparse.Namespace) -> None:
                         group_reasons.append(f"GPU {gid}: {reason}")
                         if not fit:
                             group_can_fit = False
-                    _log(f"🔍 GPU group {target_group} "
-                         f"({jobs_on_group} job(s) running): "
-                         + "; ".join(group_reasons))
+                    if group_can_fit:
+                        _log_scheduler_event(
+                            f"burst_capacity_{'-'.join(str(g) for g in target_group)}",
+                            f"✅ BURST capacity available: {next_job.name} can be queued on "
+                            f"GPU group {target_group} ({len(pending)} pending total)",
+                            every=max(30.0, args.poll_interval * 6),
+                        )
 
                     if not group_can_fit:
                         # Current group is full — try next group(s).
@@ -2314,21 +2345,21 @@ def daemon_main(args: argparse.Namespace) -> None:
                                 state.daemon.fill_gpu_index = next_idx
                                 target_group = next_group
                                 fill_idx = next_idx
-                                _log(f"➡️ Advanced to GPU group "
-                                     f"{target_group}: "
-                                     + "; ".join(next_reasons))
+                                _log(f"➡️ Advanced to GPU group {target_group}")
                                 advanced = True
                                 break
-                            else:
-                                _log(f"  GPU group {next_group} "
-                                     f"also full: "
-                                     + "; ".join(next_reasons))
 
                         if not advanced:
+                            _log_scheduler_event(
+                                "burst_all_groups_full",
+                                f"⏸ BURST hold: {next_job.name} remains queued because "
+                                f"all {num_groups} GPU group(s) are at capacity",
+                                every=max(30.0, args.poll_interval * 6),
+                            )
                             # ALL GPU groups full — switch to FIFO
                             _log(f"🔀 BURST → FIFO: All "
                                  f"{num_groups} GPU group(s) full. "
-                                 f"Switching to 1-out-1-in mode.")
+                                 f"Switching to timed VRAM polling mode.")
                             state.daemon.burst_phase = False
                             state.daemon.saturated = True
                             state.daemon.saturation_time = (
@@ -2406,7 +2437,7 @@ def daemon_main(args: argparse.Namespace) -> None:
                                         args, 'oom_threshold',
                                         DEFAULT_OOM_CRASH_THRESHOLD))
                             _log(f"🔀 BURST → FIFO: Job(s) died. "
-                                 f"Switching to 1-out-1-in mode.")
+                                 f"Switching to timed VRAM polling mode.")
                             state.daemon.burst_phase = False
                             state.daemon.saturated = True
                             state.daemon.saturation_time = (
@@ -2487,112 +2518,95 @@ def daemon_main(args: argparse.Namespace) -> None:
                                 job.error_snippet = str(e)
 
             elif not state.daemon.burst_phase:
-                # --- FIFO PHASE (1-out-1-in with cooldown) ---
-                # Launch at most one job per cooldown window.
-                prev_running = (
-                    state.daemon.prev_running
-                    if state.daemon.prev_running > 0
-                    else running_count
-                )
-                slots_freed = max(0, prev_running - running_count)
-
-                seed_launch = (
-                    slots_freed == 0
-                    and pending
-                    and (
-                        state.daemon.last_fifo_launch_time is None
-                        or running_count == 0
-                    )
+                # --- FIFO PHASE (timed VRAM polling) ---
+                # Poll GPU memory on the configured interval and launch at
+                # most one pending job if a GPU group can fit it.
+                fifo_interval = getattr(
+                    args,
+                    'fifo_launch_cooldown',
+                    DEFAULT_FIFO_LAUNCH_COOLDOWN,
                 )
 
-                if (slots_freed > 0 or seed_launch) and pending:
-                    fifo_cooldown = getattr(
-                        args,
-                        'fifo_launch_cooldown',
-                        DEFAULT_FIFO_LAUNCH_COOLDOWN,
-                    )
-                    fifo_ready = True
-                    if state.daemon.last_fifo_launch_time:
+                if pending:
+                    job = pending[0]
+                    fifo_ready = state.daemon.last_fifo_check_time is None
+                    wait_remaining = 0.0
+
+                    if not fifo_ready:
                         try:
-                            last_fifo = datetime.fromisoformat(
-                                state.daemon.last_fifo_launch_time)
-                            elapsed_fifo = (
-                                datetime.now() - last_fifo
+                            last_check = datetime.fromisoformat(
+                                state.daemon.last_fifo_check_time)
+                            elapsed_check = (
+                                datetime.now() - last_check
                             ).total_seconds()
-                            fifo_ready = elapsed_fifo >= fifo_cooldown
+                            fifo_ready = elapsed_check >= fifo_interval
                             if not fifo_ready:
-                                _log(
-                                    f"⏳ FIFO cooldown: waiting "
-                                    f"{fifo_cooldown - elapsed_fifo:.0f}s "
-                                    f"before next one-by-one launch")
+                                wait_remaining = max(
+                                    0.0,
+                                    fifo_interval - elapsed_check,
+                                )
                         except Exception:
                             fifo_ready = True
 
-                    if fifo_ready:
-                        if seed_launch:
-                            _log(
-                                "🌱 FIFO seed launch: no freed slots yet, "
-                                "attempting one bootstrap launch")
-                        else:
-                            _log(f"🔄 FIFO: {slots_freed} slot(s) freed, "
-                                 f"trying one replacement")
+                    if not fifo_ready:
+                        _log_scheduler_event(
+                            "fifo_poll_wait",
+                            f"⏸ FIFO poll wait: {job.name} will be checked again in "
+                            f"{wait_remaining:.0f}s ({len(pending)} pending, "
+                            f"{running_count} running)",
+                            every=max(30.0, args.poll_interval * 6),
+                        )
+                    else:
+                        state.daemon.last_fifo_check_time = (
+                            datetime.now().isoformat())
 
-                        # Find which GPUs were freed (from recently
-                        # completed/failed jobs that had gpu_ids)
-                        freed_gpus = []
-                        for j in state.jobs:
-                            if (j.status in ("completed", "failed")
-                                    and j.gpu_ids
-                                    and j.completed_at):
-                                freed_gpus.extend(j.gpu_ids)
-                        # Deduplicate, preserving order
-                        seen = set()
-                        unique_freed = []
-                        for g in freed_gpus:
-                            if g not in seen:
-                                seen.add(g)
-                                unique_freed.append(g)
-
-                        job = pending[0]
                         gpj = job.gpus_needed
+                        num_groups = max(1, num_gpus // max(gpj, 1))
+                        start_idx = state.daemon.fill_gpu_index
+                        selected_group = None
 
-                        # Pick GPU: prefer freed GPU(s), else round-robin group
-                        if unique_freed and len(unique_freed) >= gpj:
-                            pin_gpus = unique_freed[:gpj]
-                        else:
-                            fi = state.daemon.fill_gpu_index
-                            pin_gpus = [
-                                all_gpus[(fi + g) % num_gpus]
+                        for step in range(num_groups):
+                            probe_idx = (start_idx + step * gpj) % num_gpus
+                            probe_group = [
+                                all_gpus[(probe_idx + g) % num_gpus]
                                 for g in range(gpj)
                             ]
-                            state.daemon.fill_gpu_index = (
-                                (fi + gpj) % num_gpus
-                            )
-
-                        # Per-GPU-group memory check using profiled memory
-                        # for this pending job.
-                        group_ok = True
-                        group_reasons = []
-                        for _gid in pin_gpus:
-                            _fit, reason = (
-                                can_fit_another_job_on_gpu(
-                                    _gid, state, safety_margin,
+                            probe_ok = True
+                            probe_reasons = []
+                            for gid in probe_group:
+                                fit, reason = can_fit_another_job_on_gpu(
+                                    gid, state, safety_margin,
                                     gpus_needed=gpj,
-                                    job=job))
-                            group_reasons.append(f"GPU {_gid}: {reason}")
-                            if not _fit:
-                                group_ok = False
+                                    job=job)
+                                probe_reasons.append(f"GPU {gid}: {reason}")
+                                if not fit:
+                                    probe_ok = False
+                            if probe_ok:
+                                selected_group = probe_group
+                                state.daemon.fill_gpu_index = (
+                                    (probe_idx + gpj) % num_gpus
+                                )
+                                break
 
-                        if not group_ok:
-                            _log(f"🛑 FIFO: {job.name} blocked by memory — "
-                                 + "; ".join(group_reasons))
+                        if selected_group is None:
+                            _log_scheduler_event(
+                                "fifo_no_capacity",
+                                f"⏸ FIFO poll: no GPU group can fit {job.name} right now; "
+                                f"retrying in {fifo_interval:.0f}s",
+                                every=max(30.0, args.poll_interval * 6),
+                            )
+                            state.daemon.saturated = True
                             state.daemon.saturation_time = (
                                 datetime.now().isoformat())
                         else:
-                            _log(f"🔍 FIFO fit check for {job.name}: "
-                                 + "; ".join(group_reasons))
+                            _log_scheduler_event(
+                                f"fifo_capacity_{'-'.join(str(g) for g in selected_group)}",
+                                f"✅ FIFO capacity available: {job.name} can be queued on "
+                                f"GPU group {selected_group}",
+                                every=max(30.0, args.poll_interval * 6),
+                            )
                             state.daemon.overcommit_rr_index = (
-                                (all_gpus.index(pin_gpus[0]) + gpj)
+                                (all_gpus.index(selected_group[0]) + gpj)
                                 % num_gpus
                             )
 
@@ -2600,15 +2614,16 @@ def daemon_main(args: argparse.Namespace) -> None:
                                 port = allocate_port(state)
                                 wd = job.working_dir or args.working_dir
                                 launch_job(
-                                    job, pin_gpus, port,
+                                    job, selected_group, port,
                                     args.log_dir, wd)
                                 changed = True
                                 state.daemon.last_fifo_launch_time = (
                                     datetime.now().isoformat())
+                                state.daemon.saturated = False
                                 _log(
-                                    f"🚀 FIFO: Launched {job.name} on "
-                                    f"GPU {pin_gpus} (one-by-one, cooldown "
-                                    f"{fifo_cooldown:.0f}s)")
+                                    f"🚀 FIFO: Launched {job.name} on GPU "
+                                    f"{selected_group} after VRAM poll "
+                                    f"({fifo_interval:.0f}s interval)")
 
                                 # Quick verify
                                 time.sleep(2)
@@ -2628,7 +2643,8 @@ def daemon_main(args: argparse.Namespace) -> None:
                                     if is_oom:
                                         _log(
                                             f"🛑 FIFO: {job.name} OOM "
-                                            f"→ waiting for cooldown + memory")
+                                            f"→ waiting for next VRAM poll")
+                                        state.daemon.saturated = True
                                         state.daemon.saturation_time = (
                                             datetime.now().isoformat())
                                     else:
@@ -2641,7 +2657,7 @@ def daemon_main(args: argparse.Namespace) -> None:
                                 _log(f"Error launching {job.name}: {e}")
                                 job.error_snippet = str(e)
 
-                # Track running count for FIFO slot detection
+                # Track running count for legacy state compatibility
                 state.daemon.prev_running = sum(
                     1 for j in state.jobs if j.status == "running")
 
@@ -2649,10 +2665,15 @@ def daemon_main(args: argparse.Namespace) -> None:
         if changed:
             save_state(state)
 
-        # Step 5: Display
-        render_status(state, compact=True)
+        _log_scheduler_event(
+            "scheduler_summary",
+            f"📊 Scheduler: {sum(1 for j in state.jobs if j.status == 'pending')} pending, "
+            f"{sum(1 for j in state.jobs if j.status == 'running')} running, "
+            f"phase={'BURST' if state.daemon.burst_phase else 'FIFO'}",
+            every=max(60.0, args.poll_interval * 12),
+        )
 
-        # Step 6: Sleep
+        # Step 5: Sleep
         time.sleep(args.poll_interval)
 
 
@@ -2901,7 +2922,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"Seconds between consecutive burst launches "
                          f"(default: {DEFAULT_BURST_DELAY})")
     sp.add_argument("--fifo-launch-cooldown", type=float, default=DEFAULT_FIFO_LAUNCH_COOLDOWN,
-                    help=f"Seconds between FIFO one-by-one launches after burst "
+                    help=f"Seconds between FIFO VRAM polls / launch attempts after burst "
                          f"(default: {DEFAULT_FIFO_LAUNCH_COOLDOWN})")
     sp.add_argument("--gpu-check-delay", type=float, default=DEFAULT_GPU_CHECK_DELAY,
                     help=f"Grace period (seconds) before checking if PID is on GPU "
