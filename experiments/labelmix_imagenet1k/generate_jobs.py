@@ -1,43 +1,20 @@
 #!/usr/bin/env python3
-"""Generate jobs.yaml for the LabelMix ImageNet-1K experiment family.
+"""Generate jobs.yaml for the LabelMix ImageNet-1K model ablation sweep.
 
-Phase 1 — K-schedule × alpha × loss sweep on vit-wee
-=====================================================
-Goal: measure how LabelMix K curriculum shape interacts with fixed alpha
-and loss choice before broadening to additional architectures.
-
-Grid:
-    k_schedule          = [linear, cosine]
-    k_min               = [1]
-    k_max               = [4, 6, 8]
-    k_cooldown_epochs   = [0, 10]
-    alpha (fixed value) = [0.2, 0.6, 1.0, 1.5]
-    loss                = [pl_loss, soft_ce]
-    => 2 × 1 × 3 × 2 × 4 × 2 = 96 full training runs.
-
-All 10 baseline model configs are available under ``configs/`` but only
-vit-wee is active for this phase. Uncomment others when ready.
+This script expands a fixed set of candidate LabelMix configurations
+across the active model configs listed in ``MODEL_CONFIGS``.
 
 Usage::
 
-    # From the project root:
     python experiments/labelmix_imagenet1k/generate_jobs.py
-
-    # With options:
-    python experiments/labelmix_imagenet1k/generate_jobs.py \\
-        --gpus-per-job 8 \\
-        --output jobs.yaml \\
-        --output-root ./output_runs/daemon \\
-        --max-retries 3 \\
-        --model-filter vit-wee
-
-    # Then submit to the daemon:
-    python jobdaemon.py submit jobs.yaml
+    python experiments/labelmix_imagenet1k/generate_jobs.py \
+        --gpus-per-job 8 \
+        --output jobs.yaml \
+        --output-root ./output_runs/daemon
 """
 from __future__ import annotations
 
 import argparse
-import itertools
 import os
 import sys
 from typing import Any, Dict, List
@@ -56,30 +33,27 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(_THIS_DIR))
 # ---------------------------------------------------------------------------
 
 FAMILY_NAME = "labelmix_in1k"
+EXPERIMENT_NAME_PREFIX = "model_ablation"
 METRIC = "top1"
 MODE = "max"
 
 # ---------------------------------------------------------------------------
-# Model configs: each entry maps a short tag to a YAML config path
-# relative to this package's ``configs/`` directory.
-#
-# These are the full baseline configs from evaluation/baselines/configs.
-# Each YAML contains all model-specific defaults (model name, epochs,
-# lr_base, optimizer, weight_decay, augmentation strength, EMA, etc.).
+# Model configs: active model variants for this sweep.
 # ---------------------------------------------------------------------------
 
 MODEL_CONFIGS: Dict[str, str] = {
-    # --- Phase 1: K-scheduling study on vit-wee only ---
-    "vit-wee":           os.path.join(_CONFIGS_DIR, "vit-wee.yaml"),
-    # "vit-little":        os.path.join(_CONFIGS_DIR, "vit-little.yaml"),
-    # "vit-medium":        os.path.join(_CONFIGS_DIR, "vit-medium.yaml"),
-    # "vit-base":          os.path.join(_CONFIGS_DIR, "vit-base.yaml"),
-    # "mnv4-conv-medium":  os.path.join(_CONFIGS_DIR, "mnv4-conv-medium.yaml"),
-    # "mnv4-conv-large":   os.path.join(_CONFIGS_DIR, "mnv4-conv-large.yaml"),
+    # "vit-medium": os.path.join(_CONFIGS_DIR, "vit-medium.yaml"),
+    # "mobilenet_hybrid_large": os.path.join(_CONFIGS_DIR, "mnv4-hybrid-large.yaml"),
+    # "mobilenet_hybrid_conv": os.path.join(_CONFIGS_DIR, "mnv4-conv-large.yaml"),
+    # "vit-wee":            os.path.join(_CONFIGS_DIR, "vit-wee.yaml"),
+    # "vit-little":         os.path.join(_CONFIGS_DIR, "vit-little.yaml"),
+    # "vit-base":           os.path.join(_CONFIGS_DIR, "vit-base.yaml"),
+    # "mnv4-conv-medium":   os.path.join(_CONFIGS_DIR, "mnv4-conv-medium.yaml"),
     # "mnv4-hybrid-medium": os.path.join(_CONFIGS_DIR, "mnv4-hybrid-medium.yaml"),
-    # "mnv4-hybrid-large": os.path.join(_CONFIGS_DIR, "mnv4-hybrid-large.yaml"),
-    # "resnet-50":         os.path.join(_CONFIGS_DIR, "resnet-50.yaml"),
-    # "resnet-101":        os.path.join(_CONFIGS_DIR, "resnet-101.yaml"),
+    # "convnextv2-base":           os.path.join(_CONFIGS_DIR, "convnextv2-base.yaml"),
+    "convnextv2-tiny":      os.path.join(_CONFIGS_DIR, "convnextv2-tiny.yaml"),
+    # "resnet-50":          os.path.join(_CONFIGS_DIR, "resnet-50.yaml"),
+    # "resnet-101":         os.path.join(_CONFIGS_DIR, "resnet-101.yaml"),
 }
 
 # ---------------------------------------------------------------------------
@@ -203,33 +177,106 @@ def get_model_configs() -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Search space — Phase 1: K-schedule × alpha × loss sweep
+# Candidate trial configurations.
 #
-# Sweep dimensions:
-#   k_schedule        = [linear, cosine]
-#   k_min             = [1]
-#   k_max             = [4, 6, 8]
-#   k_cooldown_epochs = [0, 10]
-#   alpha             = [0.2, 0.6, 1.0, 1.5]  (fixed per trial via min=max)
-#   loss              = [pl_loss, soft_ce]
-#   => 2 × 1 × 3 × 2 × 4 × 2 = 96 runs per active model config.
+# Each entry below is derived from one of the user-provided successful
+# commands, with config / experiment / output path stripped so the generator
+# can supply those dynamically per model.
 # ---------------------------------------------------------------------------
-
-_K_SCHEDULE = ["linear", "cosine"]
-_K_MIN = [1]
-_K_MAX = [4, 6, 8]
-_K_COOLDOWN_EPOCHS = [0, 10]
-_ALPHA_VALUES = [0.2, 0.6, 1.0, 1.5]
-_LOSS = ["pl_loss", "soft_ce"]
-
-SEARCH_SPACE: Dict[str, Any] = {
-    "labelmix_k_schedule": _K_SCHEDULE,
-    "labelmix_k_min": _K_MIN,
-    "labelmix_k_max": _K_MAX,
-    "labelmix_k_cooldown_epochs": _K_COOLDOWN_EPOCHS,
-    "labelmix_alpha_min": _ALPHA_VALUES,
-    "labelmix_loss": _LOSS,
-}
+#
+CANDIDATE_TRIALS: List[Dict[str, Any]] = [
+    {
+        "labelmix_schedule": "linear",
+        "labelmix_k_schedule": "fixed",
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_mix_k": 4,
+        "labelmix_k_min": 4,
+        "labelmix_k_max": 4,
+        "labelmix_alpha_min": 0.1,
+        "labelmix_alpha_max": 0.5,
+        "labelmix_loss": "pl_loss",
+    },
+    {
+        "labelmix_schedule": "linear",
+        "labelmix_k_schedule": "fixed",
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_mix_k": 8,
+        "labelmix_k_min": 8,
+        "labelmix_k_max": 8,
+        "labelmix_alpha_min": 0.1,
+        "labelmix_alpha_max": 1.5,
+        "labelmix_loss": "pl_loss",
+    },
+    {
+        "labelmix_schedule": "fixed",
+        "labelmix_k_schedule": "fixed",
+        "labelmix_sampling": False,
+        "labelmix_mix_k": 4,
+        "labelmix_k_min": 4,
+        "labelmix_k_max": 4,
+        "labelmix_alpha_min": 1.5,
+        "labelmix_alpha_max": 1.5,
+        "labelmix_loss": "pl_loss",
+    },
+    {
+        "labelmix_schedule": "fixed",
+        "labelmix_k_schedule": "linear",
+        "labelmix_k_reverse": True,
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_k_min": 1,
+        "labelmix_k_max": 4,
+        "labelmix_alpha_min": 1.5,
+        "labelmix_alpha_max": 1.5,
+        "labelmix_loss": "pl_loss",
+    },
+    {
+        "labelmix_schedule": "fixed",
+        "labelmix_k_schedule": "fixed",
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_mix_k": 4,
+        "labelmix_k_min": 4,
+        "labelmix_k_max": 4,
+        "labelmix_alpha_min": 1.0,
+        "labelmix_alpha_max": 1.0,
+        "labelmix_loss": "soft_ce",
+        "labelmix_sampling_min_side_px": 8,
+        "labelmix_sampling_max_aspect": 2000.0,
+    },
+    {
+        "labelmix_schedule": "cosine",
+        "labelmix_k_schedule": "fixed",
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_mix_k": 4,
+        "labelmix_k_min": 4,
+        "labelmix_k_max": 4,
+        "labelmix_alpha_min": 0.1,
+        "labelmix_alpha_max": 0.5,
+        "labelmix_loss": "soft_ce",
+    },
+    {
+        "labelmix_schedule": "cosine",
+        "labelmix_k_schedule": "fixed",
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_mix_k": 6,
+        "labelmix_k_min": 6,
+        "labelmix_k_max": 6,
+        "labelmix_alpha_min": 0.1,
+        "labelmix_alpha_max": 0.5,
+        "labelmix_loss": "pl_loss",
+   },
+    {
+        "labelmix_schedule": "cosine",
+        "labelmix_k_schedule": "fixed",
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_reverse": True,
+        "labelmix_mix_k": 4,
+        "labelmix_k_min": 4,
+        "labelmix_k_max": 4,
+        "labelmix_alpha_min": 0.1,
+        "labelmix_alpha_max": 1.0,
+        "labelmix_loss": "soft_ce",
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +289,7 @@ def build_experiment_name(
 ) -> str:
     """Build a human-readable experiment name from trial hyperparameters.
 
-    Example output: ``k1-8_kcd10_ks-linear_a1_pl-loss_scheduling``
+    Example output: ``k1-8_kwu10_krev_ks-linear_a1_pl-loss_scheduling``
     """
     parts: List[str] = []
     labelmix_enabled = trial_overrides.get(
@@ -259,16 +306,42 @@ def build_experiment_name(
         elif "labelmix_mix_k" in trial_overrides:
             parts.append(f"k{trial_overrides['labelmix_mix_k']}")
 
-        if "labelmix_k_cooldown_epochs" in trial_overrides:
+        if "labelmix_k_warmup_epochs" in trial_overrides:
+            parts.append(f"kwu{trial_overrides['labelmix_k_warmup_epochs']}")
+        if "labelmix_k_cooldown_epochs" in trial_overrides and trial_overrides["labelmix_k_cooldown_epochs"] is not None:
             parts.append(f"kcd{trial_overrides['labelmix_k_cooldown_epochs']}")
 
-        alpha_value = None
-        if "labelmix_alpha_min" in trial_overrides:
-            alpha_value = trial_overrides["labelmix_alpha_min"]
-        elif "labelmix_alpha_max" in trial_overrides:
-            alpha_value = trial_overrides["labelmix_alpha_max"]
-        if alpha_value is not None:
-            parts.append(f"a{alpha_value:g}")
+        k_reverse = trial_overrides.get(
+            "labelmix_k_reverse",
+            common_overrides.get("labelmix_k_reverse", False),
+        )
+        if k_reverse:
+            parts.append("krev")
+
+        alpha_min = trial_overrides.get(
+            "labelmix_alpha_min",
+            common_overrides.get("labelmix_alpha_min"),
+        )
+        alpha_max = trial_overrides.get(
+            "labelmix_alpha_max",
+            common_overrides.get("labelmix_alpha_max"),
+        )
+        if alpha_min is not None and alpha_max is not None:
+            if alpha_min == alpha_max:
+                parts.append(f"a{alpha_min:g}")
+            else:
+                parts.append(f"a{alpha_min:g}-{alpha_max:g}")
+        elif alpha_min is not None:
+            parts.append(f"a{alpha_min:g}")
+        elif alpha_max is not None:
+            parts.append(f"a{alpha_max:g}")
+
+        alpha_reverse = trial_overrides.get(
+            "labelmix_reverse",
+            common_overrides.get("labelmix_reverse", False),
+        )
+        if alpha_reverse:
+            parts.append("arev")
 
         if "labelmix_loss" in trial_overrides:
             parts.append(str(trial_overrides["labelmix_loss"]).replace("_", "-"))
@@ -300,8 +373,9 @@ def build_experiment_name(
             parts.append(f"as-{a_sched}")
 
         # Include scheduling tag when LabelMix sampling is enabled
-        sampling = trial_overrides.get("labelmix_sampling") or common_overrides.get(
-            "labelmix_sampling"
+        sampling = trial_overrides.get(
+            "labelmix_sampling",
+            common_overrides.get("labelmix_sampling", False),
         )
         if sampling:
             parts.append("scheduling")
@@ -316,12 +390,15 @@ def build_experiment_name(
         "labelmix_alpha_max",
         "labelmix_loss",
         "labelmix_k_schedule",
+        "labelmix_k_reverse",
+        "labelmix_k_warmup_epochs",
         "labelmix_k_cooldown_epochs",
         "labelmix_schedule",
         "labelmix_sampling",
         "_sampling_config",
         "labelmix_sampling_min_side_px",
         "labelmix_sampling_max_aspect",
+        "labelmix_reverse",
     }
     for k, v in sorted(trial_overrides.items()):
         if k not in _covered and not k.startswith("_"):
@@ -384,17 +461,7 @@ def generate(
     # ---- Load experiment config -------------------------------------------
     model_configs = get_model_configs()
     common_overrides = build_common_overrides(nproc_per_experiment=gpus_per_job)
-
-    # ---- Expand search space into grid axes --------------------------------
-    grid_axes: Dict[str, List[Any]] = {}
-    for key, value in SEARCH_SPACE.items():
-        if isinstance(value, (list, tuple)):
-            grid_axes[key] = list(value)
-        else:
-            grid_axes[key] = [value]  # single fixed value
-
-    keys = list(grid_axes.keys())
-    combinations = list(itertools.product(*[grid_axes[k] for k in keys]))
+    candidate_trials = list(CANDIDATE_TRIALS)
 
     # ---- Apply model filter ------------------------------------------------
     if model_filter:
@@ -408,8 +475,8 @@ def generate(
     jobs: List[Dict[str, str]] = []
     seen_experiment_names: set[str] = set()
     for model_tag, config_path in model_configs.items():
-        for combo in combinations:
-            trial_overrides = dict(zip(keys, combo))
+        for trial_overrides in candidate_trials:
+            trial_overrides = dict(trial_overrides)
 
             if "_sampling_config" in trial_overrides:
                 min_side_px, max_aspect = trial_overrides.pop("_sampling_config")
@@ -422,16 +489,8 @@ def generate(
                 trial_overrides.setdefault("labelmix_k_min", k)
                 trial_overrides.setdefault("labelmix_k_max", k)
 
-            # Sync alpha: alpha_max == alpha_min (fixed alpha per trial)
-            if "labelmix_alpha_min" in trial_overrides:
-                trial_overrides.setdefault(
-                    "labelmix_alpha_max", trial_overrides["labelmix_alpha_min"]
-                )
-
-            # Include the model tag in the experiment name so job names and
-            # output directories stay unique even for single-model runs.
             base_exp_name = build_experiment_name(trial_overrides, common_overrides)
-            exp_name = f"{model_tag}__{base_exp_name}"
+            exp_name = f"{EXPERIMENT_NAME_PREFIX}_{model_tag}__{base_exp_name}"
             if exp_name in seen_experiment_names:
                 raise ValueError(
                     f"Duplicate experiment name generated: {exp_name}. "
@@ -475,10 +534,9 @@ def generate(
         yaml.safe_dump(output, f, default_flow_style=False, sort_keys=False)
 
     # ---- Summary -----------------------------------------------------------
-    grid_desc = " × ".join(f"{k}={len(v)}" for k, v in grid_axes.items())
     print(f"Generated {len(jobs)} job(s) -> {output_path}")
     print(f"  Models: {list(model_configs.keys())}")
-    print(f"  Grid:   {grid_desc}")
+    print(f"  Candidate configs/model: {len(candidate_trials)}")
     print(f"  GPUs/job: {gpus_per_job}")
     print(f"  Output root: {output_root}")
     print()
@@ -500,7 +558,8 @@ def main() -> None:
             "  python experiments/labelmix_imagenet1k/generate_jobs.py "
             "--gpus-per-job 8 -o jobs.yaml\n"
             "  python experiments/labelmix_imagenet1k/generate_jobs.py "
-            "--model-filter vit-wee vit-little\n"
+            "--model-filter vit-medium vit-wee\n"
+
         ),
     )
     parser.add_argument(
@@ -530,7 +589,7 @@ def main() -> None:
         "--model-filter",
         nargs="+",
         default=None,
-        help="Only generate jobs for these model config tags (e.g. vit-wee)",
+        help="Only generate jobs for these model config tags",
     )
     args = parser.parse_args()
 
