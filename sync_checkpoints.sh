@@ -11,9 +11,10 @@
 set -euo pipefail
 
 SRC_DIRS=(
-    "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/sampling"
-    "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/scheduling"
-    "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/important_data/ablation-study_1/ablation"
+#    "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/sampling"
+#    "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/scheduling"
+#    "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/important_data/ablation-study_1/ablation"
+    "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix/output_runs/reverse_k"
 )
 DST_BASE="/apdcephfs/private_ethangeng/konstantin-garbers/labelmix/output_runs"
 
