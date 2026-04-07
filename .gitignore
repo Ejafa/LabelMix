@@ -140,3 +140,5 @@ data/*
 HF_HOME
 miniconda3/*
 miniconda3
+
+old_jobs

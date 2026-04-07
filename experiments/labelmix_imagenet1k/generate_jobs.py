@@ -17,7 +17,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -37,20 +38,88 @@ EXPERIMENT_NAME_PREFIX = "model_ablation"
 METRIC = "top1"
 MODE = "max"
 
+# Seeds to sweep over — each trial is replicated once per seed.
+SEEDS: List[int] = [42, 43, 44]
+
+# ---------------------------------------------------------------------------
+# Dataset configs — add new datasets here; the active one is selected via
+# ACTIVE_DATASET.  Each entry maps a short identifier (used in experiment
+# names and wandb tags) to its training overrides.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DatasetConfig:
+    """All dataset-specific CLI overrides plus metadata."""
+    dataset_id: str                        # short tag embedded in exp name & wandb tags
+    dataset: str                           # --dataset value
+    data_dir: str                          # --data-dir value
+    train_split: str
+    val_split: str
+    input_key: str
+    target_key: str
+    num_classes: int
+    num_steps: int
+    warmup_steps: int
+    balanced_mode: int
+    extra: Dict[str, Any] = field(default_factory=dict)  # any additional overrides
+
+    def to_overrides(self) -> Dict[str, Any]:
+        """Return a flat dict of CLI overrides for this dataset."""
+        d: Dict[str, Any] = {
+            "dataset": self.dataset,
+            "data_dir": self.data_dir,
+            "train_split": self.train_split,
+            "val_split": self.val_split,
+            "input_key": self.input_key,
+            "target_key": self.target_key,
+            "balanced_mode": self.balanced_mode,
+            "num_classes": self.num_classes,
+            "num_steps": self.num_steps,
+            "warmup_steps": self.warmup_steps,
+        }
+        d.update(self.extra)
+        return d
+
+
+DATASET_CONFIGS: Dict[str, DatasetConfig] = {
+    "in1k": DatasetConfig(
+        dataset_id="in1k",
+        dataset="hfds/ILSVRC/imagenet-1k",
+        data_dir="/dev/shm/imagenet-1k",
+        train_split="train",
+        val_split="validation",
+        input_key="image",
+        target_key="label",
+        num_classes=1000,
+        num_steps=125000,
+        warmup_steps=12500,
+        balanced_mode=1280,
+    ),
+    # "in21k": DatasetConfig(
+    #     dataset_id="in21k",
+    #     dataset="hfds/...",
+    #     data_dir="/dev/shm/imagenet-21k",
+    #     ...
+    # ),
+}
+
+# The dataset used for this sweep.
+ACTIVE_DATASET: str = "in1k"
+
 # ---------------------------------------------------------------------------
 # Model configs: active model variants for this sweep.
 # ---------------------------------------------------------------------------
 
 MODEL_CONFIGS: Dict[str, str] = {
-    # "vit-medium": os.path.join(_CONFIGS_DIR, "vit-medium.yaml"),
+    "vit-medium": os.path.join(_CONFIGS_DIR, "vit-medium.yaml"),
     # "mobilenet_hybrid_large": os.path.join(_CONFIGS_DIR, "mnv4-hybrid-large.yaml"),
     # "mobilenet_hybrid_conv": os.path.join(_CONFIGS_DIR, "mnv4-conv-large.yaml"),
-    # "vit-wee":            os.path.join(_CONFIGS_DIR, "vit-wee.yaml"),
-    # "vit-little":         os.path.join(_CONFIGS_DIR, "vit-little.yaml"),
-    # "vit-base":           os.path.join(_CONFIGS_DIR, "vit-base.yaml"),
+    "vit-wee":            os.path.join(_CONFIGS_DIR, "vit-wee.yaml"),
+    "vit-little":         os.path.join(_CONFIGS_DIR, "vit-little.yaml"),
+    "vit-base":           os.path.join(_CONFIGS_DIR, "vit-base.yaml"),
     # "mnv4-conv-medium":   os.path.join(_CONFIGS_DIR, "mnv4-conv-medium.yaml"),
     # "mnv4-hybrid-medium": os.path.join(_CONFIGS_DIR, "mnv4-hybrid-medium.yaml"),
-    # "convnextv2-base":           os.path.join(_CONFIGS_DIR, "convnextv2-base.yaml"),
+    "convnextv2-base":           os.path.join(_CONFIGS_DIR, "convnextv2-base.yaml"),
     "convnextv2-tiny":      os.path.join(_CONFIGS_DIR, "convnextv2-tiny.yaml"),
     # "resnet-50":          os.path.join(_CONFIGS_DIR, "resnet-50.yaml"),
     # "resnet-101":         os.path.join(_CONFIGS_DIR, "resnet-101.yaml"),
@@ -67,7 +136,7 @@ MODEL_CONFIGS: Dict[str, str] = {
 BASE_BATCH_SIZE = 1024
 
 
-def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
+def build_common_overrides(nproc_per_experiment: int, dataset_cfg: Optional[DatasetConfig] = None) -> Dict[str, Any]:
     """Build the merged common-overrides dict for one experiment family.
 
     Parameters
@@ -81,6 +150,8 @@ def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
     Dict[str, Any]
         Merged overrides dict ready for CLI arg generation.
     """
+    if dataset_cfg is None:
+        dataset_cfg = DATASET_CONFIGS[ACTIVE_DATASET]
     if BASE_BATCH_SIZE % nproc_per_experiment != 0:
         raise ValueError(
             f"Base batch size {BASE_BATCH_SIZE} must be divisible by per-experiment "
@@ -100,28 +171,17 @@ def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
         "num_evals": 100,
         "num_saves": 20,
         "wandb_project": "labelmix",
+        "wandb_tags": dataset_cfg.dataset_id,
         "log_wandb": True,
-        "workers": 4,
+        "workers": 8,
         "loader_prefetch_factor": 2,
         "balanced_buffer_steps": 4,
         "balanced_cache_threshold_steps": 3,
         "pin_mem": True,
     }
 
-    # -- ImageNet-1K dataset args --
-    imagenet_args: Dict[str, Any] = {
-        "dataset": "hfds/ILSVRC/imagenet-1k",
-        #"data_dir": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k",
-        "data_dir":"/dev/shm/imagenet-1k",
-        "train_split": "train",
-        "val_split": "validation",
-        "input_key": "image",
-        "target_key": "label",
-        "balanced_mode": 1280,
-        "num_classes": 1000,
-        "num_steps": 125000,
-        "warmup_steps": 12500,
-    }
+    # -- Dataset args (sourced from DatasetConfig) --
+    imagenet_args: Dict[str, Any] = dataset_cfg.to_overrides()
 
     # -- LabelMix common args --
     labelmix_common_args: Dict[str, Any] = {
@@ -165,7 +225,7 @@ def build_common_overrides(nproc_per_experiment: int) -> Dict[str, Any]:
     # Merge all sections (later dicts override earlier ones)
     merged: Dict[str, Any] = {}
     merged.update(base_train_common)
-    merged.update(imagenet_args)
+    merged.update(imagenet_args)       # dataset overrides may override batch/logging defaults
     merged.update(labelmix_common_args)
     merged.update(checkpoint_args)
     return merged
@@ -185,63 +245,6 @@ def get_model_configs() -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 #
 CANDIDATE_TRIALS: List[Dict[str, Any]] = [
-    {
-        "labelmix_schedule": "linear",
-        "labelmix_k_schedule": "fixed",
-        "labelmix_k_warmup_epochs": 0,
-        "labelmix_mix_k": 4,
-        "labelmix_k_min": 4,
-        "labelmix_k_max": 4,
-        "labelmix_alpha_min": 0.1,
-        "labelmix_alpha_max": 0.5,
-        "labelmix_loss": "pl_loss",
-    },
-    {
-        "labelmix_schedule": "linear",
-        "labelmix_k_schedule": "fixed",
-        "labelmix_k_warmup_epochs": 0,
-        "labelmix_mix_k": 8,
-        "labelmix_k_min": 8,
-        "labelmix_k_max": 8,
-        "labelmix_alpha_min": 0.1,
-        "labelmix_alpha_max": 1.5,
-        "labelmix_loss": "pl_loss",
-    },
-    {
-        "labelmix_schedule": "fixed",
-        "labelmix_k_schedule": "fixed",
-        "labelmix_sampling": False,
-        "labelmix_mix_k": 4,
-        "labelmix_k_min": 4,
-        "labelmix_k_max": 4,
-        "labelmix_alpha_min": 1.5,
-        "labelmix_alpha_max": 1.5,
-        "labelmix_loss": "pl_loss",
-    },
-    {
-        "labelmix_schedule": "fixed",
-        "labelmix_k_schedule": "linear",
-        "labelmix_k_reverse": True,
-        "labelmix_k_warmup_epochs": 0,
-        "labelmix_k_min": 1,
-        "labelmix_k_max": 4,
-        "labelmix_alpha_min": 1.5,
-        "labelmix_alpha_max": 1.5,
-        "labelmix_loss": "pl_loss",
-    },
-    {
-        "labelmix_schedule": "fixed",
-        "labelmix_k_schedule": "fixed",
-        "labelmix_k_warmup_epochs": 0,
-        "labelmix_mix_k": 4,
-        "labelmix_k_min": 4,
-        "labelmix_k_max": 4,
-        "labelmix_alpha_min": 1.0,
-        "labelmix_alpha_max": 1.0,
-        "labelmix_loss": "soft_ce",
-        "labelmix_sampling_min_side_px": 8,
-        "labelmix_sampling_max_aspect": 2000.0,
-    },
     {
         "labelmix_schedule": "cosine",
         "labelmix_k_schedule": "fixed",
@@ -264,18 +267,6 @@ CANDIDATE_TRIALS: List[Dict[str, Any]] = [
         "labelmix_alpha_max": 0.5,
         "labelmix_loss": "pl_loss",
    },
-    {
-        "labelmix_schedule": "cosine",
-        "labelmix_k_schedule": "fixed",
-        "labelmix_k_warmup_epochs": 0,
-        "labelmix_reverse": True,
-        "labelmix_mix_k": 4,
-        "labelmix_k_min": 4,
-        "labelmix_k_max": 4,
-        "labelmix_alpha_min": 0.1,
-        "labelmix_alpha_max": 1.0,
-        "labelmix_loss": "soft_ce",
-    },
 ]
 
 
@@ -289,7 +280,7 @@ def build_experiment_name(
 ) -> str:
     """Build a human-readable experiment name from trial hyperparameters.
 
-    Example output: ``k1-8_kwu10_krev_ks-linear_a1_pl-loss_scheduling``
+    Example output: ``k1-8_krev_ks-linear_a1_pl-loss_scheduling``
     """
     parts: List[str] = []
     labelmix_enabled = trial_overrides.get(
@@ -306,8 +297,6 @@ def build_experiment_name(
         elif "labelmix_mix_k" in trial_overrides:
             parts.append(f"k{trial_overrides['labelmix_mix_k']}")
 
-        if "labelmix_k_warmup_epochs" in trial_overrides:
-            parts.append(f"kwu{trial_overrides['labelmix_k_warmup_epochs']}")
         if "labelmix_k_cooldown_epochs" in trial_overrides and trial_overrides["labelmix_k_cooldown_epochs"] is not None:
             parts.append(f"kcd{trial_overrides['labelmix_k_cooldown_epochs']}")
 
@@ -460,7 +449,8 @@ def generate(
     """
     # ---- Load experiment config -------------------------------------------
     model_configs = get_model_configs()
-    common_overrides = build_common_overrides(nproc_per_experiment=gpus_per_job)
+    dataset_cfg = DATASET_CONFIGS[ACTIVE_DATASET]
+    common_overrides = build_common_overrides(nproc_per_experiment=gpus_per_job, dataset_cfg=dataset_cfg)
     candidate_trials = list(CANDIDATE_TRIALS)
 
     # ---- Apply model filter ------------------------------------------------
@@ -474,47 +464,84 @@ def generate(
     # ---- Build job entries -------------------------------------------------
     jobs: List[Dict[str, str]] = []
     seen_experiment_names: set[str] = set()
+    expected_seeds: set[int] = set(SEEDS)
+    if len(expected_seeds) != len(SEEDS):
+        raise ValueError(f"SEEDS contains duplicate values: {SEEDS}")
+    if not expected_seeds:
+        raise ValueError("SEEDS must not be empty.")
+
+    # Ensure every (model, trial) emits exactly one run per configured seed.
+    seed_coverage: Dict[tuple[str, str], set[int]] = {}
+
     for model_tag, config_path in model_configs.items():
         for trial_overrides in candidate_trials:
-            trial_overrides = dict(trial_overrides)
+            for seed in SEEDS:
+                trial_overrides = dict(trial_overrides)
 
-            if "_sampling_config" in trial_overrides:
-                min_side_px, max_aspect = trial_overrides.pop("_sampling_config")
-                trial_overrides["labelmix_sampling_min_side_px"] = int(min_side_px)
-                trial_overrides["labelmix_sampling_max_aspect"] = float(max_aspect)
+                if "_sampling_config" in trial_overrides:
+                    min_side_px, max_aspect = trial_overrides.pop("_sampling_config")
+                    trial_overrides["labelmix_sampling_min_side_px"] = int(min_side_px)
+                    trial_overrides["labelmix_sampling_max_aspect"] = float(max_aspect)
 
-            # Sync k params: k_min == k_max == mix_k (fixed K per trial)
-            if "labelmix_mix_k" in trial_overrides:
-                k = trial_overrides["labelmix_mix_k"]
-                trial_overrides.setdefault("labelmix_k_min", k)
-                trial_overrides.setdefault("labelmix_k_max", k)
+                # Sync k params: k_min == k_max == mix_k (fixed K per trial)
+                if "labelmix_mix_k" in trial_overrides:
+                    k = trial_overrides["labelmix_mix_k"]
+                    trial_overrides.setdefault("labelmix_k_min", k)
+                    trial_overrides.setdefault("labelmix_k_max", k)
 
-            base_exp_name = build_experiment_name(trial_overrides, common_overrides)
-            exp_name = f"{EXPERIMENT_NAME_PREFIX}_{model_tag}__{base_exp_name}"
-            if exp_name in seen_experiment_names:
-                raise ValueError(
-                    f"Duplicate experiment name generated: {exp_name}. "
-                    "Ensure all active sweep axes are encoded in build_experiment_name()."
+                base_exp_name = build_experiment_name(trial_overrides, common_overrides)
+                exp_name = f"{EXPERIMENT_NAME_PREFIX}__{model_tag}__{dataset_cfg.dataset_id}__{base_exp_name}__seed={seed}"
+                if exp_name in seen_experiment_names:
+                    raise ValueError(
+                        f"Duplicate experiment name generated: {exp_name}. "
+                        "Ensure all active sweep axes are encoded in build_experiment_name()."
+                    )
+                seen_experiment_names.add(exp_name)
+
+                group_key = (model_tag, base_exp_name)
+                seen_group_seeds = seed_coverage.setdefault(group_key, set())
+                if seed in seen_group_seeds:
+                    raise ValueError(
+                        f"Duplicate seed run generated for {model_tag}/{base_exp_name}: seed={seed}"
+                    )
+                seen_group_seeds.add(seed)
+
+                # Merge all overrides (common < trial-specific < runtime)
+                all_overrides: Dict[str, Any] = {}
+                all_overrides.update(common_overrides)
+                all_overrides.update(trial_overrides)
+                all_overrides["seed"] = seed
+                all_overrides["experiment"] = exp_name
+                all_overrides["output"] = output_root
+
+                cli_args = dict_to_cli_args(all_overrides)
+
+                # {gpus} and {port} are resolved at launch time by the daemon
+                cmd = (
+                    f"torchrun --nproc_per_node={{gpus}} --master_port={{port}} "
+                    f"train.py --config {config_path} {cli_args}"
                 )
-            seen_experiment_names.add(exp_name)
 
-            # Merge all overrides (common < trial-specific < runtime)
-            all_overrides: Dict[str, Any] = {}
-            all_overrides.update(common_overrides)
-            all_overrides.update(trial_overrides)
-            all_overrides["experiment"] = exp_name
-            all_overrides["output"] = output_root
+                if f"--seed {seed}" not in cmd:
+                    raise ValueError(
+                        f"Internal error: generated command for {exp_name} is missing '--seed {seed}'."
+                    )
 
-            cli_args = dict_to_cli_args(all_overrides)
+                jobs.append({"name": exp_name, "cmd": cmd})
 
-            # {gpus} and {port} are resolved at launch time by the daemon
-            cmd = (
-                f"torchrun --nproc_per_node={{gpus}} --master_port={{port}} "
-                f"train.py --config {config_path} {cli_args}"
+    missing_seed_errors: List[str] = []
+    for (model_tag, base_exp_name), seen_seeds in sorted(seed_coverage.items()):
+        missing = sorted(expected_seeds - seen_seeds)
+        if missing:
+            missing_seed_errors.append(
+                f"{model_tag}/{base_exp_name}: missing seeds {missing}"
             )
 
-            name = exp_name
-            jobs.append({"name": name, "cmd": cmd})
+    if missing_seed_errors:
+        raise ValueError(
+            "Seed coverage check failed. Each model/trial must include one run per seed in SEEDS.\n"
+            + "\n".join(missing_seed_errors)
+        )
 
     # ---- Write output YAML -------------------------------------------------
     output: Dict[str, Any] = {

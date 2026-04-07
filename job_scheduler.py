@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Smart job scheduler with memory profiling and fair per-node split.
+"""Smart job scheduler with memory profiling and class-balanced distribution.
 
 This scheduler keeps responsibilities minimal and explicit:
 
-1. Analyze all jobs and identify unique model configurations.
+1. Analyze all jobs and identify unique model configurations (VRAM classes).
 2. Profile each unique model for peak GPU memory (with cache reuse).
-3. Split jobs fairly across nodes by available free GPU memory.
+3. Distribute jobs class-balanced round-robin across nodes so each node
+   gets the same number of jobs per VRAM class (±1).  With 3 seeds per
+   (model, trial), each node naturally handles ~1 seed.
 4. Attach model/memory metadata to each job in per-node YAML output.
 5. Leave GPU placement and runtime admission control to ``jobdaemon.py``.
 
@@ -55,7 +57,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import shlex
 import shutil
@@ -191,55 +192,6 @@ def query_node_memory(host: str) -> Tuple[int, int, List[Tuple[int, int, int]]]:
 
     total_free = sum(free for _, _, free in info)
     return len(info), total_free, info
-
-
-# ---------------------------------------------------------------------------
-# Job distribution (Hamilton's largest-remainder method)
-# ---------------------------------------------------------------------------
-
-def distribute_jobs_proportionally(
-    total_jobs: int,
-    node_weights: List[float],
-) -> List[int]:
-    """Distribute total_jobs across nodes proportionally to their weights.
-
-    Uses Hamilton's largest-remainder method for fair integer allocation:
-    1. Compute ideal (fractional) allocation per node.
-    2. Give each node floor(ideal) jobs.
-    3. Distribute remaining jobs to nodes with the largest remainders.
-
-    This ensures no jobs are dropped and the split closely follows the
-    memory proportions.
-    """
-    if not node_weights or total_jobs == 0:
-        return [0] * len(node_weights)
-
-    total_weight = sum(node_weights)
-    if total_weight == 0:
-        # Equal split if all weights are zero
-        base = total_jobs // len(node_weights)
-        remainder = total_jobs % len(node_weights)
-        result = [base] * len(node_weights)
-        for i in range(remainder):
-            result[i] += 1
-        return result
-
-    # Step 1: Compute fractional allocations
-    fractions = [(w / total_weight) * total_jobs for w in node_weights]
-
-    # Step 2: Floor allocations
-    floors = [int(f) for f in fractions]
-    remainders = [f - int(f) for f in fractions]
-
-    # Step 3: Distribute leftovers to largest remainders
-    leftover = total_jobs - sum(floors)
-    # Get indices sorted by remainder (descending)
-    sorted_indices = sorted(range(len(remainders)),
-                            key=lambda i: remainders[i], reverse=True)
-    for i in range(leftover):
-        floors[sorted_indices[i]] += 1
-
-    return floors
 
 
 # ---------------------------------------------------------------------------
@@ -976,54 +928,64 @@ def schedule(
                 "gpus_needed": representative.get("gpus", 1),
             }
 
-    # ── Step 4: Distribute jobs across nodes (by free memory weight) ─
-    weights = [n["total_free_mib"] for n in node_info]
-    allocation = distribute_jobs_proportionally(total_jobs, weights)
-
-    # Split jobs into per-node lists (preserving order)
-    splits: List[List[Dict[str, Any]]] = []
-    offset = 0
-    for count in allocation:
-        splits.append(jobs[offset:offset + count])
-        offset += count
-
-    # ── Step 5: Annotate each node's jobs with profile metadata ─────
-    node_jobs: List[List[Dict[str, Any]]] = []
+    # ── Step 4: Class-balanced round-robin distribution ────────────
+    #
+    # Strategy: group jobs by VRAM class (model_key), then deal each
+    # class's jobs round-robin across nodes.  This ensures every node
+    # gets the same number of jobs per class (±1 when not evenly
+    # divisible).  Because generate_jobs.py emits N seeds per
+    # (model, trial), each node naturally ends up owning ~1 seed per
+    # configuration — giving a balanced workload without bin-packing.
+    #
+    num_nodes = len(nodes)
     conservative_fallback = gpu_total_mib // 2
-    for i, (info, split) in enumerate(zip(node_info, splits)):
-        if not split:
-            node_jobs.append([])
-            continue
 
-        annotated = annotate_jobs_with_profile_metadata(
-            split,
-            model_profiles,
-            fallback_memory_mib=conservative_fallback,
-        )
-        node_jobs.append(annotated)
+    # First annotate ALL jobs with profile metadata so we can group them.
+    all_annotated = annotate_jobs_with_profile_metadata(
+        jobs, model_profiles, fallback_memory_mib=conservative_fallback,
+    )
 
+    # Group by VRAM class (model_key).
+    class_buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for job in all_annotated:
+        mk = job.get("model_key", "unknown")
+        class_buckets.setdefault(mk, []).append(job)
+
+    # Round-robin each class across nodes.
+    node_jobs: List[List[Dict[str, Any]]] = [[] for _ in range(num_nodes)]
+    print(f"\n🔄 Class-balanced round-robin distribution across {num_nodes} node(s):")
+    for mk in sorted(class_buckets):
+        bucket = class_buckets[mk]
+        mem = bucket[0].get("memory_mib_per_gpu", "?")
+        per_node_counts = [0] * num_nodes
+        for idx, job in enumerate(bucket):
+            target = idx % num_nodes
+            node_jobs[target].append(job)
+            per_node_counts[target] += 1
+        print(f"   {mk} ({len(bucket)} jobs, ~{mem} MiB/GPU): "
+              f"per-node → {per_node_counts}")
+
+    # Summary per node
+    for i, info in enumerate(node_info):
         model_summary: Dict[str, int] = {}
-        for j in annotated:
+        for j in node_jobs[i]:
             mk = j.get("model_key", "unknown")
             model_summary[mk] = model_summary.get(mk, 0) + 1
-
         node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
-        print(f"\n  {node_label} ({info['host']}): {len(annotated)} jobs")
+        print(f"\n  {node_label} ({info['host']}): {len(node_jobs[i])} jobs")
         print(f"    Models: {model_summary}")
 
-    # ── Step 6: Print plan ──────────────────────────────────────────
+    # ── Step 5: Print plan ──────────────────────────────────────────
+    weights = [n["total_free_mib"] for n in node_info]
     print(f"\n📊 Job Distribution Plan:")
     print(f"{'─' * 65}")
-    print(f"{'Node':<25} {'Free Memory':>15} {'Jobs':>8} {'Weight':>10}")
+    print(f"{'Node':<25} {'Free Memory':>15} {'Jobs':>8}")
     print(f"{'─' * 65}")
-    total_weight = sum(weights) or 1
     for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
-        pct = (info['total_free_mib'] / total_weight) * 100 if total_weight else 0
         node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
         print(f"  {node_label} ({info['host']:<15}) "
               f"{info['total_free_mib']:>10,} MiB "
-              f"{len(node_list):>6} "
-              f"{pct:>8.1f}%")
+              f"{len(node_list):>6}")
     print(f"{'─' * 65}")
     total_split = sum(len(p) for p in node_jobs)
     print(f"  {'TOTAL':<25} {sum(weights):>10,} MiB {total_split:>6}")
@@ -1032,7 +994,7 @@ def schedule(
         print(f"\n⚠️  WARNING: split total ({total_split}) != "
               f"total jobs ({total_jobs})")
 
-    # ── Step 7: Write output files ──────────────────────────────────
+    # ── Step 6: Write output files ──────────────────────────────────
     if dry_run:
         print(f"\n🔍 DRY RUN — no files written.")
         for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
@@ -1153,7 +1115,7 @@ def schedule(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Smart job scheduler with profiling cache and fair per-node splitting",
+        description="Smart job scheduler with profiling cache and class-balanced round-robin splitting",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
