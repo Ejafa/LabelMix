@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Copy ImageNet-1K HuggingFace Arrow dataset to /dev/shm (RAM-backed tmpfs).
+"""Copy HuggingFace datasets to /dev/shm (RAM-backed tmpfs) for fast I/O.
 
 This eliminates filesystem I/O bottlenecks by serving data directly from RAM.
 Run once before starting the daemon. The script prints the data-dir path to
 use in generate_jobs.py or as --data-dir.
 
+For places365, run ``convert_places365_to_arrow.py`` first to pre-convert the
+parquet source into Arrow datasets on disk. Then this script simply copies the
+pre-built Arrow directories to /dev/shm — just like imagenet-1k.
+
 Usage::
 
-    python copy_data_to_ram.py                    # copy with defaults
-    python copy_data_to_ram.py --dry-run           # show what would be copied
-    python copy_data_to_ram.py --verify            # verify existing copy
-    python copy_data_to_ram.py --cleanup           # remove the RAM copy
+    python copy_data_to_ram.py                          # copy imagenet-1k (default)
+    python copy_data_to_ram.py --dataset places365      # copy places365
+    python copy_data_to_ram.py --dry-run                # show what would be copied
+    python copy_data_to_ram.py --verify                 # verify existing copy
+    python copy_data_to_ram.py --cleanup                # remove the RAM copy
 
-The default source is:
-    /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k
+Supported datasets and their default paths:
 
-The default destination is:
-    /dev/shm/imagenet-1k
+    imagenet-1k:
+      src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k
+      dst: /dev/shm/imagenet-1k
+
+    places365:
+      src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/places365/arrow
+      dst: /dev/shm/places365/arrow
 """
 from __future__ import annotations
 
@@ -30,11 +39,24 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Defaults
+# Dataset registry — add new datasets here
 # ---------------------------------------------------------------------------
 
-DEFAULT_SRC = "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k"
-DEFAULT_DST = "/dev/shm/imagenet-1k"
+DATASETS: dict[str, dict[str, str]] = {
+    "imagenet-1k": {
+        "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k",
+        "dst": "/dev/shm/imagenet-1k",
+    },
+    "places365": {
+        # Pre-converted Arrow datasets (run convert_places365_to_arrow.py first).
+        # Source is the arrow/ subdirectory; destination mirrors the structure so
+        # that reader_hfds.py finds <data_dir>/arrow/<split>/ at runtime.
+        "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/places365/arrow",
+        "dst": "/dev/shm/places365/arrow",
+    },
+}
+
+DEFAULT_DATASET = "imagenet-1k"
 CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB read chunks for progress reporting
 
 
@@ -110,8 +132,8 @@ def copy_with_progress(src: str, dst: str, total_bytes: int, copied_so_far: int)
 # Commands
 # ---------------------------------------------------------------------------
 
-def cmd_copy(src: str, dst: str, dry_run: bool = False, force: bool = False) -> None:
-    """Copy dataset from src to dst (/dev/shm)."""
+def cmd_copy(src: str, dst: str, dry_run: bool = False, force: bool = False) -> bool:
+    """Copy dataset from src to dst (/dev/shm). Returns True if a fresh copy was made."""
     print(f"Source:      {src}")
     print(f"Destination: {dst}")
     print()
@@ -141,7 +163,7 @@ def cmd_copy(src: str, dst: str, dry_run: bool = False, force: bool = False) -> 
     if dry_run:
         print("🔍 DRY RUN — nothing copied.")
         print(f"\nWould copy {total_count} files ({fmt_size(total_bytes)}) to {dst}")
-        return
+        return False
 
     # Check for existing copy
     if os.path.exists(dst) and not force:
@@ -159,7 +181,7 @@ def cmd_copy(src: str, dst: str, dry_run: bool = False, force: bool = False) -> 
                     print(f"DATA DIR (use in generate_jobs.py or --data-dir):")
                     print(f"  {dst}")
                     print(f"{'='*60}")
-                    return
+                    return False
             print("   Existing copy is incomplete/mismatched. Use --force to overwrite.")
             print("   Or run with --cleanup first.")
             sys.exit(1)
@@ -194,6 +216,8 @@ def cmd_copy(src: str, dst: str, dry_run: bool = False, force: bool = False) -> 
     print(f"DATA DIR (use in generate_jobs.py or --data-dir):")
     print(f"  {dst}")
     print(f"{'='*60}")
+
+    return True  # signal success for post-copy steps
 
 
 def cmd_verify(src: str, dst: str) -> None:
@@ -306,29 +330,35 @@ def cmd_status(src: str, dst: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Copy ImageNet-1K data to /dev/shm for RAM-speed I/O",
+        description="Copy dataset to /dev/shm for RAM-speed I/O",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python copy_data_to_ram.py               # copy to /dev/shm\n"
-            "  python copy_data_to_ram.py --dry-run      # preview without copying\n"
-            "  python copy_data_to_ram.py --verify        # verify existing copy\n"
-            "  python copy_data_to_ram.py --cleanup       # remove RAM copy\n"
-            "  python copy_data_to_ram.py --status        # show current state\n"
+            "  python copy_data_to_ram.py                         # copy imagenet-1k to /dev/shm\n"
+            "  python copy_data_to_ram.py --dataset places365     # copy places365 to /dev/shm\n"
+            "  python copy_data_to_ram.py --dry-run               # preview without copying\n"
+            "  python copy_data_to_ram.py --verify                # verify existing copy\n"
+            "  python copy_data_to_ram.py --cleanup               # remove RAM copy\n"
+            "  python copy_data_to_ram.py --status                # show current state\n"
             "\n"
-            "After copying, update generate_jobs.py data_dir to:\n"
-            f"  {DEFAULT_DST}\n"
+            "Available datasets: " + ", ".join(DATASETS.keys()) + "\n"
         ),
     )
     parser.add_argument(
+        "--dataset",
+        default=DEFAULT_DATASET,
+        choices=list(DATASETS.keys()),
+        help=f"Dataset to copy (default: {DEFAULT_DATASET})",
+    )
+    parser.add_argument(
         "--src",
-        default=DEFAULT_SRC,
-        help=f"Source data directory (default: {DEFAULT_SRC})",
+        default=None,
+        help="Override source data directory",
     )
     parser.add_argument(
         "--dst",
-        default=DEFAULT_DST,
-        help=f"Destination in RAM (default: {DEFAULT_DST})",
+        default=None,
+        help="Override destination in RAM",
     )
     parser.add_argument(
         "--dry-run",
@@ -357,14 +387,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Resolve src/dst: explicit overrides take priority, then dataset registry
+    dataset_defaults = DATASETS[args.dataset]
+    src = args.src or dataset_defaults["src"]
+    dst = args.dst or dataset_defaults["dst"]
+
     if args.cleanup:
-        cmd_cleanup(args.dst)
+        cmd_cleanup(dst)
     elif args.verify:
-        cmd_verify(args.src, args.dst)
+        cmd_verify(src, dst)
     elif args.status:
-        cmd_status(args.src, args.dst)
+        cmd_status(src, dst)
     else:
-        cmd_copy(args.src, args.dst, dry_run=args.dry_run, force=args.force)
+        cmd_copy(src, dst, dry_run=args.dry_run, force=args.force)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ aa: rand-m6-inc1-mstd1.0-n3
 amp: true
 amp_dtype: float16
 amp_impl: native
-aug_repeats: 3.0
+aug_repeats: 0.0
 aug_splits: 0
 batch_size: 1024
 bce_loss: false
@@ -91,6 +91,7 @@ model_ema_force_cpu: false
 model_ema_warmup: false
 model_kwargs:
   fix_init: true
+  img_size: 256
 momentum: 0.9
 no_aug: false
 no_ddp_bb: false

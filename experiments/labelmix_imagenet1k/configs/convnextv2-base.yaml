@@ -61,12 +61,12 @@ input_key: null
 input_size: null
 interpolation: ''
 jsd_loss: false
-layer_decay: 0.6
+layer_decay: 0.9
 local_rank: 0
 log_interval: 50
 log_wandb: false
 lr: null
-lr_base: 1e-3
+lr_base: 2.5e-3
 lr_base_scale: ''
 lr_base_size: 1024
 lr_cycle_decay: 0.5

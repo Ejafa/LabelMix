@@ -81,6 +81,7 @@ model_ema_decay: 0.9998
 model_ema_force_cpu: false
 model_kwargs:
   fix_init: true
+  img_size: 256
 momentum: 0.9
 no_aug: false
 no_ddp_bb: false

@@ -4,6 +4,7 @@ Hacked together by / Copyright 2022 Ross Wightman
 """
 import io
 import math
+import os
 from typing import Optional
 
 import torch
@@ -17,6 +18,22 @@ except ImportError as e:
     raise e
 from .class_map import load_class_map
 from .reader import Reader
+
+
+def _try_load_arrow_disk(root: Optional[str], split: str):
+    """Try to load a pre-saved Arrow dataset from ``<root>/arrow/<split>/``.
+
+    Returns the loaded dataset or *None* if the directory does not exist.
+    These directories are created by ``copy_data_to_ram.py`` via
+    ``datasets.save_to_disk()`` and can be loaded instantly with
+    ``datasets.load_from_disk()`` — no fingerprint matching required.
+    """
+    if root is None:
+        return None
+    arrow_dir = os.path.join(root, "arrow", split)
+    if not os.path.isdir(arrow_dir):
+        return None
+    return datasets.load_from_disk(arrow_dir)
 
 
 def get_class_labels(info, label_key='label'):
@@ -39,19 +56,25 @@ class ReaderHfds(Reader):
             target_key: str = 'label',
             additional_features: Optional[list[str]] = None,
             download: bool = False,
-            trust_remote_code: bool = False
+            trust_remote_code: bool = False,
     ):
-        """
-        """
         super().__init__()
         self.root = root
         self.split = split
-        self.dataset = datasets.load_dataset(
-            name,  # 'name' maps to path arg in hf datasets
-            split=split,
-            cache_dir=self.root,  # timm doesn't expect hidden cache dir for datasets, specify a path if root set
-            trust_remote_code=trust_remote_code
-        )
+
+        # Prefer pre-saved Arrow datasets (created by copy_data_to_ram.py)
+        # which bypass HF's fingerprint-based cache and load instantly.
+        ds = _try_load_arrow_disk(self.root, split)
+        if ds is not None:
+            self.dataset = ds
+        else:
+            self.dataset = datasets.load_dataset(
+                name,  # 'name' maps to path arg in hf datasets
+                split=split,
+                cache_dir=self.root,
+                trust_remote_code=trust_remote_code
+            )
+
         # leave decode for caller, plus we want easy access to original path names...
         self.dataset = self.dataset.cast_column(input_key, datasets.Image(decode=False))
 
@@ -63,8 +86,15 @@ class ReaderHfds(Reader):
             self.remap_class = True
         else:
             self.class_to_idx = get_class_labels(self.dataset.info, self.label_key)
-        self.split_info = self.dataset.info.splits[split]
-        self.num_samples = self.split_info.num_examples
+
+        # load_from_disk datasets may not have split metadata in info.splits,
+        # so fall back to len(dataset) for num_samples.
+        self.split_info = None
+        if self.dataset.info.splits and split in self.dataset.info.splits:
+            self.split_info = self.dataset.info.splits[split]
+            self.num_samples = self.split_info.num_examples
+        else:
+            self.num_samples = len(self.dataset)
 
         if additional_features is not None:
             if isinstance(additional_features, list):
