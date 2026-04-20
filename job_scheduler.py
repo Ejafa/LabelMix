@@ -778,7 +778,7 @@ def schedule(
     # Load jobs
     defaults, jobs = load_jobs_yaml(input_path)
     total_jobs = len(jobs)
-    default_gpus = defaults.get("gpus", 1)
+    default_gpus = defaults.get("gpus", 2)
 
     # Apply defaults to jobs
     for job in jobs:

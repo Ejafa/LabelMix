@@ -2,7 +2,7 @@ aa: rand-m7-inc1-mstd1.0-n3
 amp: true
 amp_dtype: float16
 amp_impl: native
-aug_repeats: 3.0
+aug_repeats: 0.0
 aug_splits: 0
 batch_size: 1024
 bce_loss: false

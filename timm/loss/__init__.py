@@ -6,4 +6,5 @@ from .cross_entropy import (
     LabelMixSoftTargetCrossEntropy,
 )
 from .plackett_luce import LabelMixPlackettLuceLoss
+from .mixup_loss import LabelMixMixupLoss
 from .jsd import JsdCrossEntropy

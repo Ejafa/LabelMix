@@ -48,6 +48,7 @@ from timm.loss import (
     SoftTargetCrossEntropy,
     LabelMixSoftTargetCrossEntropy,
     LabelMixPlackettLuceLoss,
+    LabelMixMixupLoss,
     BinaryCrossEntropy,
     LabelSmoothingCrossEntropy,
 )
@@ -164,8 +165,12 @@ group.add_argument('--balanced-target-key', default=None, type=str,
 group.add_argument('--labelmix', action='store_true', default=False,
                    help='Enable LabelMix augmentation for balanced loading.')
 group.add_argument('--labelmix-loss', default='soft_ce', type=str,
-                   choices=['soft_ce', 'pl_loss'],
-                   help='Loss for LabelMix targets: "soft_ce" or "pl_loss".')
+                   choices=['soft_ce', 'pl_loss', 'mixed'],
+                   help='Loss for LabelMix targets: "soft_ce", "pl_loss" or "mixed" '
+                        '(convex combination of the two, controlled by --labelmix-mixed-alpha).')
+group.add_argument('--labelmix-mixed-alpha', default=0.5, type=float,
+                   help='Mixing coefficient alpha in [0, 1] for --labelmix-loss=mixed: '
+                        'loss = (1 - alpha) * soft_ce + alpha * pl_loss.')
 group.add_argument('--labelmix-mix-k', default=5, type=int,
                    help='LabelMix K (number of source images per output, >= 1).')
 group.add_argument('--labelmix-k-min', default=None, type=int,
@@ -1959,6 +1964,8 @@ def run_training(args=None, args_text=None):
     if args.labelmix:
         if args.labelmix_loss == 'pl_loss':
             train_loss_fn = LabelMixPlackettLuceLoss()
+        elif args.labelmix_loss == 'mixed':
+            train_loss_fn = LabelMixMixupLoss(alpha=args.labelmix_mixed_alpha)
         else:
             train_loss_fn = LabelMixSoftTargetCrossEntropy()
     elif args.jsd_loss:

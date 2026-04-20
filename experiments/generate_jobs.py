@@ -13,6 +13,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import itertools
 import os
 import sys
 from dataclasses import dataclass, field
@@ -32,20 +33,40 @@ _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 # ---------------------------------------------------------------------------
 
 FAMILY_NAME = "labelmix"
-EXPERIMENT_NAME_PREFIX = "model_ablation"
+EXPERIMENT_NAME_PREFIX = ""
 METRIC = "top1"
 MODE = "max"
 
 # Seeds to sweep over — each trial is replicated once per seed.
-# SEEDS: List[int] = [42, 43, 44]
-SEEDS: List[int] = [42, 43]
+SEEDS: List[int] = [42]
 
 # Image sizes to sweep over — each trial is replicated once per image size.
 IMAGE_SIZES: List[int] = [256]
 
 # Extra tags to include in experiment names (e.g. ["v2", "debug"]).
 # Leave empty for no extra tags.
-TAGS: List[str] = []
+# Note: when --baseline is passed, the tag "baseline" is automatically
+# appended regardless of this list.
+TAGS: List[str] = ["mixed_loss"]
+
+# Learning rates to sweep over — each trial is replicated once per LR.
+# If empty, the default lr_base from the config file is used and no LR tag
+# is added to the experiment name.
+LEARNING_RATES: List[float] = []
+
+# Layer-wise LR decay values to sweep over — each trial is replicated once
+# per value.  If empty, the default from the config file (or train.py) is
+# used and no layer-decay tag is added to the experiment name.
+LAYER_DECAYS: List[float] = []
+
+# Mixing coefficients (alpha) to sweep over for `labelmix_loss=mixed`.
+# For each trial in CANDIDATE_TRIALS whose `labelmix_loss == "mixed"`, the
+# generator expands it once per alpha in this list (setting
+# `labelmix_mixed_alpha` accordingly).  Trials using other losses ignore
+# this list.  If empty and a trial requests `mixed`, the trial is used as-is
+# (with whatever `labelmix_mixed_alpha` is explicitly set, or the train.py
+# default).
+LABELMIX_MIXED_ALPHAS: List[float] = [0.1, 0.3, 0.5, 0.7, 0.9]
 
 # ---------------------------------------------------------------------------
 # Dataset configs — add new datasets here; the active one is selected via
@@ -125,14 +146,14 @@ DATASET_CONFIGS: Dict[str, DatasetConfig] = {
 # ---------------------------------------------------------------------------
 
 MODEL_CONFIGS: Dict[str, str] = {
-    # "vit-medium": os.path.join(_CONFIGS_DIR, "vit-medium.yaml"),
-    # "vit-wee": os.path.join(_CONFIGS_DIR, "vit-wee.yaml"),
-    # "vit-little": os.path.join(_CONFIGS_DIR, "vit-little.yaml"),
-    # "vit-base": os.path.join(_CONFIGS_DIR, "vit-base.yaml"),
-    "vit-betwixt": os.path.join(_CONFIGS_DIR, "vit-betwixt"),
-    "vit-betwixt-rope": os.path.join(_CONFIGS_DIR, "vit-betwixt-rope.yaml"),
-    # "convnextv2-base": os.path.join(_CONFIGS_DIR, "convnextv2-base.yaml"),
-    # "convnextv2-tiny": os.path.join(_CONFIGS_DIR, "convnextv2-tiny.yaml"),
+#    "vit-medium": os.path.join(_CONFIGS_DIR, "vit-medium.yaml"),
+#    "vit-wee": os.path.join(_CONFIGS_DIR, "vit-wee.yaml"),
+#    "vit-little": os.path.join(_CONFIGS_DIR, "vit-little.yaml"),
+#    "vit-betwixt": os.path.join(_CONFIGS_DIR, "vit-betwixt.yaml"),
+#    "convnextv2-base": os.path.join(_CONFIGS_DIR, "convnextv2-base.yaml"),
+    "convnextv2-tiny": os.path.join(_CONFIGS_DIR, "convnextv2-tiny.yaml"),
+#    "resnet50": os.path.join(_CONFIGS_DIR, "resnet-50.yaml"),
+#    "resnet101": os.path.join(_CONFIGS_DIR, "resnet-101.yaml"),
 }
 
 # Models whose constructors require img_size to be passed explicitly via
@@ -221,10 +242,6 @@ def build_common_overrides(nproc_per_experiment: int, dataset_cfg: Optional[Data
         # Producer params
         "labelmix_producer_rank": -1,
         "labelmix_producer_workers": 0,
-        # Disable timm mixup/cutmix (LabelMix replaces these)
-        "mixup": 0,
-        "cutmix": 0,
-        "mixup_prob": 0.0,
     }
 
     # Checkpoint / resume
@@ -252,7 +269,29 @@ def get_model_configs() -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 CANDIDATE_TRIALS: List[Dict[str, Any]] = [
-    {
+#    {
+#        "labelmix_schedule": "cosine",
+#        "labelmix_k_schedule": "fixed",
+#        "labelmix_k_warmup_epochs": 0,
+#        "labelmix_mix_k": 4,
+#        "labelmix_k_min": 4,
+#        "labelmix_k_max": 4,
+#        "labelmix_alpha_min": 0.1,
+#        "labelmix_alpha_max": 0.5,
+#        "labelmix_loss": "soft_ce",
+#    },
+#    {
+#        "labelmix_schedule": "cosine",
+#        "labelmix_k_schedule": "fixed",
+#        "labelmix_k_warmup_epochs": 0,
+#        "labelmix_mix_k": 6,
+#        "labelmix_k_min": 6,
+#        "labelmix_k_max": 6,
+#        "labelmix_alpha_min": 0.1,
+#        "labelmix_alpha_max": 0.5,
+#        "labelmix_loss": "pl_loss",
+#    },
+        {
         "labelmix_schedule": "cosine",
         "labelmix_k_schedule": "fixed",
         "labelmix_k_warmup_epochs": 0,
@@ -261,7 +300,7 @@ CANDIDATE_TRIALS: List[Dict[str, Any]] = [
         "labelmix_k_max": 4,
         "labelmix_alpha_min": 0.1,
         "labelmix_alpha_max": 0.5,
-        "labelmix_loss": "soft_ce",
+        "labelmix_loss": "mixed",
     },
     {
         "labelmix_schedule": "cosine",
@@ -272,7 +311,7 @@ CANDIDATE_TRIALS: List[Dict[str, Any]] = [
         "labelmix_k_max": 6,
         "labelmix_alpha_min": 0.1,
         "labelmix_alpha_max": 0.5,
-        "labelmix_loss": "pl_loss",
+        "labelmix_loss": "mixed",
     },
 ]
 
@@ -339,6 +378,9 @@ def build_experiment_name(
         if "labelmix_loss" in trial_overrides:
             parts.append(str(trial_overrides["labelmix_loss"]).replace("_", "-"))
 
+        if "labelmix_mixed_alpha" in trial_overrides:
+            parts.append(f"ma{trial_overrides['labelmix_mixed_alpha']:g}")
+
         # Include schedule info only when it differs from the default ("fixed")
         k_sched = trial_overrides.get("labelmix_k_schedule") or common_overrides.get(
             "labelmix_k_schedule"
@@ -369,6 +411,7 @@ def build_experiment_name(
         "labelmix_alpha_min",
         "labelmix_alpha_max",
         "labelmix_loss",
+        "labelmix_mixed_alpha",
         "labelmix_k_schedule",
         "labelmix_k_reverse",
         "labelmix_k_warmup_epochs",
@@ -464,6 +507,20 @@ def generate(
         candidate_trials = [{"labelmix": False}]
         print("Generating baseline jobs with labelmix=false")
 
+    # Expand trials with `labelmix_loss == "mixed"` across LABELMIX_MIXED_ALPHAS.
+    # A trial that already has `labelmix_mixed_alpha` set is used as-is.
+    if LABELMIX_MIXED_ALPHAS:
+        expanded_trials: List[Dict[str, Any]] = []
+        for trial in candidate_trials:
+            if trial.get("labelmix_loss") == "mixed" and "labelmix_mixed_alpha" not in trial:
+                for mixed_alpha in LABELMIX_MIXED_ALPHAS:
+                    new_trial = dict(trial)
+                    new_trial["labelmix_mixed_alpha"] = float(mixed_alpha)
+                    expanded_trials.append(new_trial)
+            else:
+                expanded_trials.append(trial)
+        candidate_trials = expanded_trials
+
     # Apply model filter
     if model_filter:
         model_configs = {k: v for k, v in model_configs.items() if k in model_filter}
@@ -489,97 +546,133 @@ def generate(
     if not image_sizes:
         raise ValueError("IMAGE_SIZES must not be empty.")
 
-    tags_suffix = "__".join(TAGS) if TAGS else ""
+    learning_rates: List[Optional[float]] = list(LEARNING_RATES) if LEARNING_RATES else [None]
+    layer_decays: List[Optional[float]] = list(LAYER_DECAYS) if LAYER_DECAYS else [None]
+
+    # Compose tag list; when --baseline is set, always include "baseline" tag.
+    effective_tags = list(TAGS)
+    if baseline and "baseline" not in effective_tags:
+        effective_tags.append("baseline")
+    tags_suffix = "__".join(effective_tags) if effective_tags else ""
 
     for model_tag, config_path in model_configs.items():
         for trial_overrides in candidate_trials:
             for img_size in image_sizes:
-                for seed in SEEDS:
-                    trial_overrides = dict(trial_overrides)
+                for lr, layer_decay in itertools.product(learning_rates, layer_decays):
+                    for seed in SEEDS:
+                        trial_overrides = dict(trial_overrides)
 
-                    # Sync k params: k_min == k_max == mix_k (fixed K per trial)
-                    if "labelmix_mix_k" in trial_overrides:
-                        k = trial_overrides["labelmix_mix_k"]
-                        trial_overrides.setdefault("labelmix_k_min", k)
-                        trial_overrides.setdefault("labelmix_k_max", k)
+                        # Sync k params: k_min == k_max == mix_k (fixed K per trial)
+                        if "labelmix_mix_k" in trial_overrides:
+                            k = trial_overrides["labelmix_mix_k"]
+                            trial_overrides.setdefault("labelmix_k_min", k)
+                            trial_overrides.setdefault("labelmix_k_max", k)
 
-                    base_exp_name = build_experiment_name(trial_overrides, common_overrides)
-                    # Build experiment name: prefix__model__dataset__img{size}[__tags]__trial__seed=N
-                    name_parts = [
-                        EXPERIMENT_NAME_PREFIX,
-                        model_tag,
-                        dataset_cfg.dataset_id,
-                        f"img{img_size}",
-                    ]
-                    if tags_suffix:
-                        name_parts.append(tags_suffix)
-                    name_parts.append(base_exp_name)
-                    name_parts.append(f"seed={seed}")
-                    exp_name = "__".join(name_parts)
+                        base_exp_name = build_experiment_name(trial_overrides, common_overrides)
+                        # Build experiment name: [prefix__]model__dataset__img{size}[__tags][__lr=X]__trial__seed=N
+                        name_parts: List[str] = []
+                        if EXPERIMENT_NAME_PREFIX:
+                            name_parts.append(EXPERIMENT_NAME_PREFIX)
+                        name_parts.extend([
+                            model_tag,
+                            dataset_cfg.dataset_id,
+                            f"img{img_size}",
+                        ])
+                        if tags_suffix:
+                            name_parts.append(tags_suffix)
+                        if lr is not None:
+                            name_parts.append(f"lr={lr:g}")
+                        if layer_decay is not None:
+                            name_parts.append(f"ld={layer_decay:g}")
+                        name_parts.append(base_exp_name)
+                        name_parts.append(f"seed={seed}")
+                        exp_name = "__".join(name_parts)
 
-                    if exp_name in seen_experiment_names:
-                        raise ValueError(
-                            f"Duplicate experiment name generated: {exp_name}. "
-                            "Ensure all active sweep axes are encoded in build_experiment_name()."
+                        if exp_name in seen_experiment_names:
+                            raise ValueError(
+                                f"Duplicate experiment name generated: {exp_name}. "
+                                "Ensure all active sweep axes are encoded in build_experiment_name()."
+                            )
+                        seen_experiment_names.add(exp_name)
+
+                        group_key = (model_tag, base_exp_name, img_size, lr, layer_decay)
+                        seen_group_seeds = seed_coverage.setdefault(group_key, set())
+                        if seed in seen_group_seeds:
+                            raise ValueError(
+                                f"Duplicate seed run generated for {model_tag}/{base_exp_name}/img{img_size}/lr={lr}/ld={layer_decay}: seed={seed}"
+                            )
+                        seen_group_seeds.add(seed)
+
+                        # Merge all overrides (common < trial-specific < runtime)
+                        all_overrides: Dict[str, Any] = {}
+                        all_overrides.update(common_overrides)
+                        all_overrides.update(trial_overrides)
+                        
+                        # Conditionally disable timm mixup/cutmix when LabelMix is active
+                        labelmix_enabled = trial_overrides.get(
+                            "labelmix", 
+                            common_overrides.get("labelmix", True)
                         )
-                    seen_experiment_names.add(exp_name)
+                        if labelmix_enabled:
+                            all_overrides["mixup"] = 0
+                            all_overrides["cutmix"] = 0
+                            all_overrides["mixup_prob"] = 0.0
+                        
+                        all_overrides["img_size"] = img_size
+                        all_overrides["seed"] = seed
+                        all_overrides["experiment"] = exp_name
+                        all_overrides["output"] = output_root
+                        if lr is not None:
+                            all_overrides["lr_base"] = lr
+                        if layer_decay is not None:
+                            all_overrides["layer_decay"] = layer_decay
 
-                    group_key = (model_tag, base_exp_name, img_size)
-                    seen_group_seeds = seed_coverage.setdefault(group_key, set())
-                    if seed in seen_group_seeds:
-                        raise ValueError(
-                            f"Duplicate seed run generated for {model_tag}/{base_exp_name}/img{img_size}: seed={seed}"
-                        )
-                    seen_group_seeds.add(seed)
+                        cli_args = dict_to_cli_args(all_overrides)
 
-                    # Merge all overrides (common < trial-specific < runtime)
-                    all_overrides: Dict[str, Any] = {}
-                    all_overrides.update(common_overrides)
-                    all_overrides.update(trial_overrides)
-                    all_overrides["img_size"] = img_size
-                    all_overrides["seed"] = seed
-                    all_overrides["experiment"] = exp_name
-                    all_overrides["output"] = output_root
+                        # For ViT / Eva models the constructor needs img_size via
+                        # --model-kwargs so the patch-embed grid and positional
+                        # embeddings match the actual input resolution.  The CLI
+                        # --img-size only affects the data pipeline.
+                        #
+                        # IMPORTANT: --model-kwargs on the CLI *replaces* (not
+                        # merges with) the model_kwargs from the YAML config.
+                        # We therefore read the config's existing model_kwargs,
+                        # merge in the runtime img_size, and emit the full set
+                        # so nothing (e.g. fix_init) is lost.
+                        model_kwargs_args = ""
+                        if model_tag in MODELS_REQUIRING_IMG_SIZE_KWARG:
+                            cfg_model_kwargs = _read_config_model_kwargs(config_path)
+                            cfg_model_kwargs["img_size"] = img_size
+                            kw_parts = [f"{k}={v}" for k, v in cfg_model_kwargs.items()]
+                            model_kwargs_args = " --model-kwargs " + " ".join(kw_parts)
 
-                    cli_args = dict_to_cli_args(all_overrides)
-
-                    # For ViT / Eva models the constructor needs img_size via
-                    # --model-kwargs so the patch-embed grid and positional
-                    # embeddings match the actual input resolution.  The CLI
-                    # --img-size only affects the data pipeline.
-                    #
-                    # IMPORTANT: --model-kwargs on the CLI *replaces* (not
-                    # merges with) the model_kwargs from the YAML config.
-                    # We therefore read the config's existing model_kwargs,
-                    # merge in the runtime img_size, and emit the full set
-                    # so nothing (e.g. fix_init) is lost.
-                    model_kwargs_args = ""
-                    if model_tag in MODELS_REQUIRING_IMG_SIZE_KWARG:
-                        cfg_model_kwargs = _read_config_model_kwargs(config_path)
-                        cfg_model_kwargs["img_size"] = img_size
-                        kw_parts = [f"{k}={v}" for k, v in cfg_model_kwargs.items()]
-                        model_kwargs_args = " --model-kwargs " + " ".join(kw_parts)
-
-                    # {gpus} and {port} are resolved at launch time by the daemon
-                    cmd = (
-                        f"torchrun --nproc_per_node={{gpus}} --master_port={{port}} "
-                        f"train.py --config {config_path} {cli_args}{model_kwargs_args}"
-                    )
-
-                    if f"--seed {seed}" not in cmd:
-                        raise ValueError(
-                            f"Internal error: generated command for {exp_name} is missing '--seed {seed}'."
+                        # {gpus} and {port} are resolved at launch time by the daemon
+                        cmd = (
+                            f"torchrun --nproc_per_node={{gpus}} --master_port={{port}} "
+                            f"train.py --config {config_path} {cli_args}{model_kwargs_args}"
                         )
 
-                    jobs.append({"name": exp_name, "cmd": cmd})
+                        if f"--seed {seed}" not in cmd:
+                            raise ValueError(
+                                f"Internal error: generated command for {exp_name} is missing '--seed {seed}'."
+                            )
+
+                        jobs.append({"name": exp_name, "cmd": cmd})
 
     # Check seed coverage
     missing_seed_errors: List[str] = []
-    for (model_tag, base_exp_name, img_size), seen_seeds in sorted(seed_coverage.items()):
+    for (model_tag, base_exp_name, img_size, lr, layer_decay), seen_seeds in sorted(
+        seed_coverage.items(),
+        key=lambda kv: (kv[0][0], kv[0][1], kv[0][2],
+                        (kv[0][3] is None, kv[0][3]),
+                        (kv[0][4] is None, kv[0][4])),
+    ):
         missing = sorted(expected_seeds - seen_seeds)
         if missing:
+            lr_tag = f"/lr={lr:g}" if lr is not None else ""
+            ld_tag = f"/ld={layer_decay:g}" if layer_decay is not None else ""
             missing_seed_errors.append(
-                f"{model_tag}/{base_exp_name}/img{img_size}: missing seeds {missing}"
+                f"{model_tag}/{base_exp_name}/img{img_size}{lr_tag}{ld_tag}: missing seeds {missing}"
             )
 
     if missing_seed_errors:
@@ -611,7 +704,7 @@ def generate(
     print(f"  Models: {list(model_configs.keys())}")
     print(f"  Image sizes: {image_sizes}")
     print(f"  Candidate configs/model: {len(candidate_trials)}")
-    print(f"  Tags: {TAGS if TAGS else '(none)'}")
+    print(f"  Tags: {effective_tags if effective_tags else '(none)'}")
     print(f"  GPUs/job: {gpus_per_job}")
     print(f"  Output root: {output_root}")
     print()
