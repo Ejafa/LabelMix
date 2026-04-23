@@ -37,7 +37,7 @@ import torch.nn as nn
 import torchvision.utils
 import yaml
 
-from timm.data import BalancedBucketDataset
+from timm.data import BalancedBucketDataset, MosaicDataset
 from timm import utils
 from timm.data import create_dataset, create_loader, create_naflex_loader, resolve_data_config, \
     create_transform, Mixup, FastCollateMixup, AugMixDataset
@@ -226,6 +226,25 @@ group.add_argument('--labelmix-producer-rank', default=-1, type=int,
 group.add_argument('--labelmix-producer-workers', default=0, type=int,
                    help='Num DataLoader workers for centralized LabelMix producer. '
                         'If <=0, falls back to --workers.')
+
+# ---------------- Mosaic augmentation ----------------
+group.add_argument('--mosaic', action='store_true', default=False,
+                   help='Enable Mosaic augmentation (requires --balanced-mode, mutually exclusive with --labelmix).')
+group.add_argument('--mosaic-prob', type=float, default=1.0,
+                   help='Probability of applying Mosaic per sample (default: 1.0).')
+group.add_argument('--mosaic-center-ratio', type=float, nargs=2, default=[0.5, 1.5],
+                   metavar=('LO', 'HI'),
+                   help='Center-ratio range for Mosaic quadrant boundary. '
+                        'Default (0.5, 1.5) matches YOLOv5 with '
+                        'mosaic_border=-s//2, i.e. xc ~ U(s/2, 3s/2).')
+group.add_argument('--mosaic-scale-range', type=float, nargs=2, default=None,
+                   metavar=('LO', 'HI'),
+                   help='Optional post-mosaic affine zoom range, e.g. 0.8 1.2. '
+                        'Applied to the full 2S x 2S canvas around the sampled '
+                        'center BEFORE the S x S crop (YOLOv5 / MMYOLO style). '
+                        'Disabled if not set.')
+group.add_argument('--mosaic-close-epochs', type=int, default=0,
+                   help='Disable Mosaic during the last N epochs (close-mosaic schedule, default: 0).')
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
@@ -1252,6 +1271,10 @@ def run_training(args=None, args_text=None):
         _logger.info('Disabling prefetcher for LabelMix (target format not supported).')
         args.prefetcher = False
 
+    if args.mosaic and args.prefetcher:
+        _logger.info('Disabling prefetcher for Mosaic (target format not supported).')
+        args.prefetcher = False
+
     if args.labelmix_total_steps is None and args.num_steps:
         args.labelmix_total_steps = args.num_steps
 
@@ -1308,6 +1331,29 @@ def run_training(args=None, args_text=None):
             parser.error('--labelmix-step-mode=total requires --labelmix-total-epochs or --labelmix-total-steps')
     elif args.labelmix_producer_rank >= 0:
         parser.error('--labelmix-producer-rank requires --labelmix')
+
+    # ---------------- Mosaic validation ----------------
+    if args.mosaic:
+        if not args.balanced_mode:
+            parser.error('--mosaic requires --balanced-mode to be set')
+        if args.labelmix:
+            parser.error('--mosaic is not compatible with --labelmix (disable one).')
+        mixup_is_on = args.mixup > 0 or args.cutmix > 0 or args.cutmix_minmax is not None
+        if mixup_is_on:
+            parser.error(
+                'Mosaic is incompatible with Mixup/CutMix. Please set '
+                '--mixup 0 --cutmix 0 --mixup-prob 0 (and omit --cutmix-minmax).'
+            )
+        if not (0.0 <= args.mosaic_prob <= 1.0):
+            parser.error('--mosaic-prob must be in [0, 1]')
+        if len(args.mosaic_center_ratio) != 2 or args.mosaic_center_ratio[0] > args.mosaic_center_ratio[1]:
+            parser.error('--mosaic-center-ratio must be "LO HI" with LO <= HI')
+        if args.mosaic_scale_range is not None:
+            if (len(args.mosaic_scale_range) != 2 or args.mosaic_scale_range[0] <= 0
+                    or args.mosaic_scale_range[0] > args.mosaic_scale_range[1]):
+                parser.error('--mosaic-scale-range must be "LO HI" with 0 < LO <= HI')
+        if args.mosaic_close_epochs < 0:
+            parser.error('--mosaic-close-epochs must be >= 0')
 
     if args.balanced_mode and args.naflex_loader:
         parser.error('--balanced-mode is not compatible with --naflex-loader')
@@ -1837,6 +1883,28 @@ def run_training(args=None, args_text=None):
             )
             labelmix_train_dataset = dataset_train if args.labelmix else None
 
+            # Wrap with Mosaic if requested (consumes single samples, emits mosaic).
+            if args.mosaic:
+                _mosaic_input_h, _mosaic_input_w = data_config['input_size'][-2], data_config['input_size'][-1]
+                _mosaic_total_epochs = args.epochs if getattr(args, 'epochs', None) else None
+                dataset_train = MosaicDataset(
+                    base_dataset=dataset_train,
+                    output_size=(_mosaic_input_h, _mosaic_input_w),
+                    prob=args.mosaic_prob,
+                    center_ratio_range=tuple(args.mosaic_center_ratio),
+                    post_scale_range=tuple(args.mosaic_scale_range) if args.mosaic_scale_range else None,
+                    close_epochs=args.mosaic_close_epochs,
+                    total_epochs=_mosaic_total_epochs,
+                    seed=args.seed,
+                )
+                if utils.is_primary(args):
+                    _logger.info(
+                        'Mosaic enabled: prob=%.3f center_ratio=%s scale=%s close_epochs=%d (total_epochs=%s)',
+                        args.mosaic_prob, tuple(args.mosaic_center_ratio),
+                        tuple(args.mosaic_scale_range) if args.mosaic_scale_range else None,
+                        args.mosaic_close_epochs, _mosaic_total_epochs,
+                    )
+
             if collate_fn is None:
                 collate_fn = fast_collate if args.prefetcher else torch.utils.data.dataloader.default_collate
 
@@ -1968,6 +2036,9 @@ def run_training(args=None, args_text=None):
             train_loss_fn = LabelMixMixupLoss(alpha=args.labelmix_mixed_alpha)
         else:
             train_loss_fn = LabelMixSoftTargetCrossEntropy()
+    elif args.mosaic:
+        # Mosaic emits (labels[K], weights[K]) soft targets.
+        train_loss_fn = LabelMixSoftTargetCrossEntropy()
     elif args.jsd_loss:
         assert num_aug_splits > 1  # JSD only valid with aug splits set
         train_loss_fn = JsdCrossEntropy(num_splits=num_aug_splits, smoothing=args.smoothing)
@@ -2546,7 +2617,7 @@ def train_step(
 
         if not args.prefetcher:
             input = input.to(device=device, dtype=model_dtype)
-            if args.labelmix and isinstance(target, (tuple, list)) and len(target) == 2:
+            if (args.labelmix or args.mosaic) and isinstance(target, (tuple, list)) and len(target) == 2:
                 target = (
                     target[0].to(device=device),
                     target[1].to(device=device),
@@ -2646,7 +2717,7 @@ def train_step(
         train_state.update_sample_count += global_batch_size
 
         with torch.no_grad():
-            if args.labelmix and isinstance(target, (tuple, list)) and len(target) == 2:
+            if (args.labelmix or args.mosaic) and isinstance(target, (tuple, list)) and len(target) == 2:
                 labels, weights = target
                 if labels.ndim == 1:
                     labels = labels.unsqueeze(0)

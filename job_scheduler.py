@@ -4,18 +4,28 @@
 This scheduler keeps responsibilities minimal and explicit:
 
 1. Analyze all jobs and identify unique model configurations (VRAM classes).
-2. Profile each unique model for peak GPU memory (with cache reuse).
-3. Distribute jobs class-balanced round-robin across nodes so each node
-   gets the same number of jobs per VRAM class (±1).  With 3 seeds per
-   (model, trial), each node naturally handles ~1 seed.
+2. Profile each unique model for peak GPU memory on the LOCAL node
+   (with cache reuse).
+3. Statically distribute jobs class-balanced round-robin across ``N`` nodes
+   so each node gets the same number of jobs per VRAM class (±1).  With
+   3 seeds per (model, trial), each node naturally handles ~1 seed.
 4. Attach model/memory metadata to each job in per-node YAML output.
 5. Leave GPU placement and runtime admission control to ``jobdaemon.py``.
 
+The scheduler does NOT talk to remote nodes: it only needs a node *count*.
+The count is taken from ``--num-nodes`` or, if omitted, from the
+``$HOST_NUM`` environment variable (falling back to 1).  Profiling is
+always done on whichever machine runs the scheduler; the resulting
+per-node YAML files are then copied/submitted to the individual nodes by
+the user.
+
 Generated artifacts (explicit contract)::
 
-    1) <output-dir>/<schedule>_node_<idx>_jobs.yaml
+    1) <output-dir>/<input-basename>_node_<idx>_jobs.yaml
        - Purpose: runtime input for ``jobdaemon.py submit``.
        - Consumed by: ``jobdaemon.py`` (inbox ingestion path).
+       - Filename is derived from the INPUT yaml's basename, so
+         ``--input vit.yaml`` produces ``vit_node_0_jobs.yaml`` etc.
 
     2) schedules/<schedule>/memory_profile.yaml
        - Purpose: scheduler cache for model peak-memory profiling.
@@ -27,32 +37,25 @@ Generated artifacts (explicit contract)::
        - Consumed by: nothing in runtime pipeline (debug-only metadata).
        - Not required for daemon ``start/submit/status``.
 
-    4) /tmp/profile_<model_key>.log
+    4) schedules/<schedule>/debug/profile_logs/profile_<model_key>.log
        - Purpose: profiler stdout/stderr logs for troubleshooting.
        - Consumed by: humans only (debug-only).
 
 Usage::
 
-    # Profile models and generate per-node YAML files
-    python job_scheduler.py --input jobs.yaml \\
-        --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\
-        --schedule-name imagenet_sweep \\
-        --profile-steps 200
+    # Explicit node count:
+    python job_scheduler.py --input vit.yaml --num-nodes 3 --schedule-name in1k_main
 
-    # Reuse cached profile (skip profiling)
-    python job_scheduler.py --input jobs.yaml \\
-        --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\
-        --schedule-name imagenet_sweep
+    # Pick up $HOST_NUM from the environment (defaults to 1 if unset):
+    HOST_NUM=3 python job_scheduler.py --input vit.yaml --schedule-name in1k_main
 
     # Preview without writing files
-    python job_scheduler.py --input jobs.yaml \\
-        --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\
-        --schedule-name imagenet_sweep \\
-        --dry-run
+    python job_scheduler.py --input vit.yaml --num-nodes 3 \\
+        --schedule-name in1k_main --dry-run
 
     # Then on each node, start daemon (dynamic GPU scheduling):
-    #   python jobdaemon.py -s imagenet_sweep --node-index 0 start --gpus 0,1,...,7
-    #   python jobdaemon.py -s imagenet_sweep --node-index 0 submit imagenet_sweep_node_0_jobs.yaml
+    #   python jobdaemon.py -s in1k_main --node-index 0 start --gpus 0,1,...,7
+    #   python jobdaemon.py -s in1k_main --node-index 0 submit vit_node_0_jobs.yaml
 """
 from __future__ import annotations
 
@@ -119,75 +122,19 @@ def get_local_gpu_free_memory() -> List[Tuple[int, int, int]]:
         return []
 
 
-def get_remote_gpu_free_memory(host: str, timeout: int = 30) -> List[Tuple[int, int, int]]:
-    """Query GPU memory on a remote node via SSH + nvidia-smi.
+def query_local_node_memory() -> Tuple[int, int, List[Tuple[int, int, int]]]:
+    """Query the LOCAL node's GPU memory.
 
-    Returns list of (gpu_index, total_mib, free_mib).
+    Returns (num_gpus, total_free_mib, per_gpu_info).  The scheduler only
+    ever needs to know about the local machine's GPUs (because profiling
+    is local); remote node introspection has been removed intentionally
+    — the user supplies a node *count*, not addresses.
     """
-    cmd = (
-        f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout={timeout} "
-        f"root@{host} "
-        f"\"nvidia-smi --query-gpu=index,memory.total,memory.free "
-        f"--format=csv,noheader,nounits\""
-    )
-    try:
-        r = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout + 10,
-        )
-        if r.returncode != 0:
-            print(f"  ⚠️  SSH to {host} failed: {r.stderr.strip()}")
-            return []
-        result = []
-        for line in r.stdout.strip().splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) == 3:
-                result.append((int(parts[0]), int(parts[1]), int(parts[2])))
-        return result
-    except subprocess.TimeoutExpired:
-        print(f"  ⚠️  SSH to {host} timed out after {timeout}s")
-        return []
-    except Exception as e:
-        print(f"  ⚠️  SSH to {host} error: {e}")
-        return []
-
-
-def is_local(host: str) -> bool:
-    """Check if a hostname/IP refers to this machine."""
-    local_hostname = socket.gethostname()
-    try:
-        local_ips = set()
-        for info in socket.getaddrinfo(local_hostname, None):
-            local_ips.add(info[4][0])
-        # Also add common loopback
-        local_ips.add("127.0.0.1")
-        local_ips.add("::1")
-        local_ips.add(local_hostname)
-
-        # Resolve the target host
-        target_ips = set()
-        for info in socket.getaddrinfo(host, None):
-            target_ips.add(info[4][0])
-        target_ips.add(host)
-
-        return bool(local_ips & target_ips)
-    except Exception:
-        return host in ("localhost", "127.0.0.1", local_hostname)
-
-
-def query_node_memory(host: str) -> Tuple[int, int, List[Tuple[int, int, int]]]:
-    """Query a node's GPU memory.
-
-    Returns (num_gpus, total_free_mib, per_gpu_info).
-    """
-    if is_local(host):
-        print(f"  📡 {host} (local) — querying GPU memory...")
-        info = get_local_gpu_free_memory()
-    else:
-        print(f"  📡 {host} (remote) — querying GPU memory via SSH...")
-        info = get_remote_gpu_free_memory(host)
+    print(f"  📡 local node — querying GPU memory...")
+    info = get_local_gpu_free_memory()
 
     if not info:
-        print(f"  ❌ {host}: could not query GPU memory")
+        print(f"  ❌ local node: could not query GPU memory")
         return 0, 0, []
 
     total_free = sum(free for _, _, free in info)
@@ -736,10 +683,8 @@ def write_node_yaml(
 
 def schedule(
     input_path: str,
-    nodes: List[str],
+    num_nodes: int,
     output_dir: str = ".",
-    output_prefix: str = "node",
-    free_memory_override: Optional[List[int]] = None,
     dry_run: bool = False,
     schedule_name: Optional[str] = None,
     profile_steps: int = 20,
@@ -747,20 +692,20 @@ def schedule(
     working_dir: str = ".",
     skip_profile: bool = False,
 ) -> None:
-    """Profile models, annotate jobs with memory metadata, and split across nodes.
+    """Profile models locally, annotate jobs, and split across ``num_nodes``.
 
     Parameters
     ----------
     input_path : str
-        Path to the input jobs.yaml.
-    nodes : list[str]
-        List of node IPs/hostnames.
+        Path to the input jobs.yaml.  Its basename (without the ``.yaml``
+        / ``.yml`` extension) is used as the prefix for every output file
+        so ``--input vit.yaml`` produces ``vit_node_0_jobs.yaml`` etc.
+    num_nodes : int
+        Number of nodes the job set should be split across.  The scheduler
+        does NOT contact these nodes — it only needs the count to perform
+        the round-robin distribution.
     output_dir : str
         Directory to write per-node YAML files.
-    output_prefix : str
-        Prefix for output files (e.g. "node" → node_0_jobs.yaml).
-    free_memory_override : list[int] | None
-        If provided, skip GPU queries and use these values (MiB per node).
     dry_run : bool
         If True, print the plan but don't write files.
     schedule_name : str | None
@@ -775,6 +720,18 @@ def schedule(
     skip_profile : bool
         If True, skip profiling even if no cache exists (use conservative estimates).
     """
+    if num_nodes < 1:
+        print(f"Error: num_nodes must be >= 1, got {num_nodes}")
+        sys.exit(1)
+
+    # Derive the output filename prefix from the input YAML's basename so
+    # ``--input vit.yaml`` -> ``vit_node_<i>_jobs.yaml``.  We strip any
+    # ``.yaml`` / ``.yml`` extension but keep the rest of the basename
+    # verbatim (hyphens and underscores alike), so e.g.
+    # ``vit-wee-jobs.yaml`` -> ``vit-wee-jobs_node_<i>_jobs.yaml``.
+    input_stem = os.path.splitext(os.path.basename(input_path))[0]
+    file_prefix = input_stem
+
     # Load jobs
     defaults, jobs = load_jobs_yaml(input_path)
     total_jobs = len(jobs)
@@ -788,8 +745,9 @@ def schedule(
     print(f"\n📋 Loaded {total_jobs} job(s) from {input_path}")
     print(f"   Defaults: gpus={default_gpus}, "
           f"max_retries={defaults.get('max_retries', 3)}")
+    print(f"   Output prefix: {file_prefix}_node_<i>_jobs.yaml")
 
-    # ── Step 1: Identify unique models ──────────────────────────────
+    # ── Step 1: Identify unique models ──────────────────
     model_jobs: Dict[str, List[Dict[str, Any]]] = {}
     for job in jobs:
         key = extract_model_key(job)
@@ -802,48 +760,38 @@ def schedule(
         print(f"   {key}: {len(mjobs)} job(s), "
               f"{mjobs[0].get('gpus', 1)} GPU(s)/job{steps_str}")
 
-    # ── Step 2: Query GPU memory on nodes ───────────────────────────
-    print(f"\n🖥️  Querying {len(nodes)} node(s)...")
-    node_info: List[Dict[str, Any]] = []
-    for i, host in enumerate(nodes):
-        if free_memory_override and i < len(free_memory_override):
-            total_free = free_memory_override[i]
-            node_info.append({
-                "host": host,
-                "num_gpus": 8,  # assume 8 GPUs when overriding
-                "total_free_mib": total_free,
-                "per_gpu": [],
-                "gpu_total_mib": total_free // 8,
-            })
-            print(f"  📡 {host} — using override: {total_free:,} MiB free")
-        else:
-            num_gpus, total_free, per_gpu = query_node_memory(host)
-            gpu_total = per_gpu[0][1] if per_gpu else 0  # total per GPU
-            node_info.append({
-                "host": host,
-                "num_gpus": num_gpus,
-                "total_free_mib": total_free,
-                "per_gpu": per_gpu,
-                "gpu_total_mib": gpu_total,
-            })
-            if per_gpu:
-                gpu_strs = [f"GPU {idx}: {free:,}/{total:,} MiB"
-                            for idx, total, free in per_gpu]
-                print(f"  ✅ {host}: {num_gpus} GPUs, "
-                      f"{total_free:,} MiB total free")
-                for gs in gpu_strs:
-                    print(f"       {gs}")
-            else:
-                print(f"  ❌ {host}: no GPU info (will get 0 jobs)")
+    # ── Step 2: Query LOCAL GPU memory (once) ──────────────
+    # The scheduler profiles only on the local node.  All target nodes are
+    # assumed to have identical hardware to the local node, so we
+    # replicate the locally-observed GPU info across ``num_nodes`` slots
+    # purely for reporting/debug purposes.  No remote SSH queries are
+    # performed and no node addresses are required.
+    print(f"\n�️  Querying local node GPU memory (will replicate across {num_nodes} logical node(s))...")
+    local_num_gpus, local_total_free, local_per_gpu = query_local_node_memory()
+    local_gpu_total = local_per_gpu[0][1] if local_per_gpu else 0
 
-    # Determine gpu_total_mib (from first node that has info)
-    gpu_total_mib = 0
-    for ni in node_info:
-        if ni["gpu_total_mib"] > 0:
-            gpu_total_mib = ni["gpu_total_mib"]
-            break
+    if local_per_gpu:
+        print(f"  ✅ local: {local_num_gpus} GPUs, "
+              f"{local_total_free:,} MiB total free")
+        for idx, total, free in local_per_gpu:
+            print(f"       GPU {idx}: {free:,}/{total:,} MiB")
+    else:
+        print(f"  ❌ local: no GPU info detected")
+
+    node_info: List[Dict[str, Any]] = [
+        {
+            "num_gpus": local_num_gpus,
+            "total_free_mib": local_total_free,
+            "per_gpu": local_per_gpu,
+            "gpu_total_mib": local_gpu_total,
+        }
+        for _ in range(num_nodes)
+    ]
+
+    # Determine gpu_total_mib (from the local query)
+    gpu_total_mib = local_gpu_total
     if gpu_total_mib == 0:
-        print("❌ Could not determine GPU total memory from any node")
+        print("❌ Could not determine local GPU total memory")
         sys.exit(1)
 
     # ── Step 3: Memory profiling ────────────────────────────────────
@@ -937,7 +885,6 @@ def schedule(
     # (model, trial), each node naturally ends up owning ~1 seed per
     # configuration — giving a balanced workload without bin-packing.
     #
-    num_nodes = len(nodes)
     conservative_fallback = gpu_total_mib // 2
 
     # First annotate ALL jobs with profile metadata so we can group them.
@@ -971,35 +918,35 @@ def schedule(
         for j in node_jobs[i]:
             mk = j.get("model_key", "unknown")
             model_summary[mk] = model_summary.get(mk, 0) + 1
-        node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
-        print(f"\n  {node_label} ({info['host']}): {len(node_jobs[i])} jobs")
+        node_label = f"{file_prefix}_node_{i}"
+        print(f"\n  {node_label}: {len(node_jobs[i])} jobs")
         print(f"    Models: {model_summary}")
 
-    # ── Step 5: Print plan ──────────────────────────────────────────
+    # ── Step 5: Print plan ──────────────────────────────────
     weights = [n["total_free_mib"] for n in node_info]
     print(f"\n📊 Job Distribution Plan:")
     print(f"{'─' * 65}")
-    print(f"{'Node':<25} {'Free Memory':>15} {'Jobs':>8}")
+    print(f"{'Node':<30} {'Free Memory':>15} {'Jobs':>8}")
     print(f"{'─' * 65}")
     for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
-        node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
-        print(f"  {node_label} ({info['host']:<15}) "
+        node_label = f"{file_prefix}_node_{i}"
+        print(f"  {node_label:<28} "
               f"{info['total_free_mib']:>10,} MiB "
               f"{len(node_list):>6}")
     print(f"{'─' * 65}")
     total_split = sum(len(p) for p in node_jobs)
-    print(f"  {'TOTAL':<25} {sum(weights):>10,} MiB {total_split:>6}")
+    print(f"  {'TOTAL':<28} {sum(weights):>10,} MiB {total_split:>6}")
 
     if total_split != total_jobs:
         print(f"\n⚠️  WARNING: split total ({total_split}) != "
               f"total jobs ({total_jobs})")
 
-    # ── Step 6: Write output files ──────────────────────────────────
+    # ── Step 6: Write output files ──────────────────────────
     if dry_run:
         print(f"\n🔍 DRY RUN — no files written.")
         for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
-            node_label = f"{schedule_name}_node_{i}" if schedule_name else f"node_{i}"
-            print(f"\n  {node_label} ({info['host']}): {len(node_list)} job(s)")
+            node_label = f"{file_prefix}_node_{i}"
+            print(f"\n  {node_label}: {len(node_list)} job(s)")
             for j in node_list[:5]:
                 print(
                     f"    - {j['name']} "
@@ -1010,20 +957,17 @@ def schedule(
         return
 
     os.makedirs(output_dir, exist_ok=True)
-    file_prefix = output_prefix
-    if schedule_name:
-        file_prefix = f"{schedule_name}_{output_prefix}"
 
     written_files = []
     for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
-        fname = f"{file_prefix}_{i}_jobs.yaml"
+        fname = f"{file_prefix}_node_{i}_jobs.yaml"
         fpath = os.path.join(output_dir, fname)
         write_node_yaml(
             fpath,
             defaults,
             node_list,
         )
-        written_files.append((fpath, info["host"], len(node_list), i))
+        written_files.append((fpath, len(node_list), i))
 
     # Also save schedule debug metadata if schedule context is set
     if schedule_dir:
@@ -1033,12 +977,12 @@ def schedule(
             "total_jobs": total_jobs,
             "profile_steps": profile_steps,
             "model_profiles": model_profiles,
+            "num_nodes": num_nodes,
             "nodes": [],
         }
         for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
             node_entry = {
                 "index": i,
-                "host": info["host"],
                 "num_gpus": info["num_gpus"],
                 "total_free_mib": info["total_free_mib"],
                 "num_jobs": len(node_list),
@@ -1063,12 +1007,12 @@ def schedule(
 
     # Print summary and next steps
     print(f"\n✅ Written {len(written_files)} runtime file(s):")
-    for fpath, host, count, node_index in written_files:
-        print(f"   {fpath}  ({count} jobs for {host}, node_index={node_index})")
+    for fpath, count, node_index in written_files:
+        print(f"   {fpath}  ({count} jobs, node_index={node_index})")
 
     print(f"\n📁 Scheduler artifacts generated:")
     print("   Runtime-consumed (required):")
-    for fpath, _host, _count, _node_index in written_files:
+    for fpath, _count, _node_index in written_files:
         print(f"   - {fpath}  # submit this file to jobdaemon")
 
     if schedule_name:
@@ -1085,29 +1029,19 @@ def schedule(
     print(f"\n🚀 Next steps — on each node, run daemon with matching --node-index:")
     print(f"{'─' * 70}")
     sched_flag = f" -s {schedule_name}" if schedule_name else ""
-    for fpath, host, count, node_index in written_files:
+    for fpath, count, node_index in written_files:
+        node_label = f"{file_prefix}_node_{node_index}"
         if count == 0:
-            node_label = f"{schedule_name}_node_{node_index}" if schedule_name else f"node_{node_index}"
-            print(f"\n  # {node_label} ({host}): 0 jobs — skip")
+            print(f"\n  # {node_label}: 0 jobs — skip")
             continue
         fname = os.path.basename(fpath)
-        node_label = f"{schedule_name}_node_{node_index}" if schedule_name else f"node_{node_index}"
-        if is_local(host):
-            print(f"\n  # {node_label} ({host}) — LOCAL:")
-            print(f"  tmux new -s daemon")
-            print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} start --gpus 0,1,2,3,4,5,6,7")
-            print(f"  # (in another terminal)")
-            print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} submit {fname}")
-        else:
-            print(f"\n  # {node_label} ({host}) — REMOTE:")
-            print(f"  ssh root@{host}")
-            print(f"  cd {os.getcwd()}")
-            print(f"  tmux new -s daemon")
-            print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} start --gpus 0,1,2,3,4,5,6,7")
-            print(f"  # (in another terminal)")
-            print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} submit {fname}")
+        print(f"\n  # {node_label}:")
+        print(f"  # (copy {fname} to node {node_index} if running remotely)")
+        print(f"  tmux new -s daemon")
+        print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} start --gpus 0,1,2,3,4,5,6,7")
+        print(f"  # (in another terminal)")
+        print(f"  python jobdaemon.py{sched_flag} --node-index {node_index} submit {fname}")
     print(f"{'─' * 70}")
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -1119,55 +1053,54 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  # Profile models and generate optimized schedule:\n"
-            "  python job_scheduler.py --input jobs.yaml \\\n"
-            "      --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\\n"
+            "  # Explicit node count:\n"
+            "  python job_scheduler.py --input vit.yaml --num-nodes 3 \\\n"
             "      --schedule-name imagenet_sweep --profile-steps 20\n"
             "\n"
-            "  # Reuse cached profile (skip profiling):\n"
-            "  python job_scheduler.py --input jobs.yaml \\\n"
-            "      --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\\n"
+            "  # Pick up node count from $HOST_NUM:\n"
+            "  HOST_NUM=3 python job_scheduler.py --input vit.yaml \\\n"
             "      --schedule-name imagenet_sweep\n"
             "\n"
-            "  # Manual memory override (MiB):\n"
-            "  python job_scheduler.py --input jobs.yaml \\\n"
-            "      --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\\n"
-            "      --free-memory 320000 320000 310000\n"
+            "  # Reuse cached profile (skip profiling):\n"
+            "  python job_scheduler.py --input vit.yaml --num-nodes 3 \\\n"
+            "      --schedule-name imagenet_sweep --skip-profile\n"
             "\n"
             "  # Preview without writing:\n"
-            "  python job_scheduler.py --input jobs.yaml \\\n"
-            "      --nodes 28.12.129.140 28.12.25.40 28.12.130.213 \\\n"
-            "      --dry-run\n"
+            "  python job_scheduler.py --input vit.yaml --num-nodes 3 --dry-run\n"
+            "\n"
+            "Output filenames are derived from the input basename:\n"
+            "  --input vit.yaml  →  vit_node_0_jobs.yaml, vit_node_1_jobs.yaml, ...\n"
         ),
     )
     parser.add_argument(
         "-i", "--input",
         required=True,
-        help="Path to the input jobs.yaml",
+        help="Path to the input jobs.yaml. Its basename (minus extension) is "
+             "used as the prefix for every output file, e.g. 'vit.yaml' → "
+             "'vit_node_<i>_jobs.yaml'.",
     )
+    # Default is resolved at parse time: env $HOST_NUM takes precedence when
+    # --num-nodes is omitted, falling back to 1 when neither is given.
+    _default_num_nodes_env = os.environ.get("HOST_NUM")
+    try:
+        _default_num_nodes = int(_default_num_nodes_env) if _default_num_nodes_env else 1
+    except ValueError:
+        print(f"Error: $HOST_NUM is not an integer: {_default_num_nodes_env!r}")
+        sys.exit(1)
     parser.add_argument(
-        "--nodes",
-        nargs="+",
-        required=True,
-        help="Node IPs or hostnames (e.g. 28.12.129.140 28.12.25.40 28.12.130.213)",
-    )
-    parser.add_argument(
-        "--free-memory",
-        nargs="+",
+        "--num-nodes",
         type=int,
-        default=None,
-        help="Override free GPU memory (MiB) per node. "
-             "Must match --nodes count. Skips SSH queries.",
+        default=_default_num_nodes,
+        help=f"Number of nodes to split the job set across. "
+             f"Falls back to $HOST_NUM (currently: {_default_num_nodes_env or 'unset'}) "
+             f"or 1 when neither is provided. "
+             f"The scheduler does NOT contact these nodes — it only needs "
+             f"the count to perform the round-robin distribution.",
     )
     parser.add_argument(
         "-o", "--output-dir",
         default=".",
         help="Directory to write per-node YAML files (default: cwd)",
-    )
-    parser.add_argument(
-        "--prefix",
-        default="node",
-        help="Filename prefix base (default: 'node'). Output is '<schedule-name>_<prefix>_<idx>_jobs.yaml' when --schedule-name is set, otherwise '<prefix>_<idx>_jobs.yaml'.",
     )
     parser.add_argument(
         "--dry-run",
@@ -1211,9 +1144,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # Validate
-    if args.free_memory and len(args.free_memory) != len(args.nodes):
-        print(f"Error: --free-memory count ({len(args.free_memory)}) "
-              f"!= --nodes count ({len(args.nodes)})")
+    if args.num_nodes < 1:
+        print(f"Error: --num-nodes must be >= 1, got {args.num_nodes}")
         sys.exit(1)
 
     if not os.path.exists(args.input):
@@ -1222,10 +1154,8 @@ def main() -> None:
 
     schedule(
         input_path=args.input,
-        nodes=args.nodes,
+        num_nodes=args.num_nodes,
         output_dir=args.output_dir,
-        output_prefix=args.prefix,
-        free_memory_override=args.free_memory,
         dry_run=args.dry_run,
         schedule_name=args.schedule_name,
         profile_steps=args.profile_steps,

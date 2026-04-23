@@ -38,7 +38,7 @@ dist_bn: reduce
 drop: 0.0
 drop_block: null
 drop_connect: null
-drop_path: 0.1
+drop_path: 0.2
 epoch_repeats: 0.0
 epochs: 100
 eval_metric: top1
@@ -61,7 +61,7 @@ input_key: null
 input_size: null
 interpolation: ''
 jsd_loss: false
-layer_decay: 0.9
+layer_decay: 0.95
 local_rank: 0
 log_interval: 50
 log_wandb: false
