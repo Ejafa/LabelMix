@@ -552,7 +552,24 @@ def generate(
         available_datasets = list(DATASET_CONFIGS.keys())
         print(f"Error: Dataset '{dataset}' not found. Available datasets: {available_datasets}")
         sys.exit(1)
-    
+
+    # Enforce the `output_runs/` prefix on output_root.  Users can pass any
+    # shorthand (e.g. `xy`, `./xy`, `runs/xy`) and we will rewrite it to
+    # `output_runs/xy`.  If the path already lives under `output_runs/`
+    # (including the default `./output_runs/daemon`), leave it untouched.
+    _normalized_root = os.path.normpath(output_root)
+    _root_parts = _normalized_root.split(os.sep)
+    # Strip a single leading '.' component introduced by `./xy` style paths
+    # so we compare against the first *meaningful* segment.
+    if _root_parts and _root_parts[0] == ".":
+        _root_parts = _root_parts[1:]
+    if not _root_parts or _root_parts[0] != "output_runs":
+        # Drop any leading "./" before prepending so we don't end up with
+        # awkward "output_runs/./xy" strings.
+        _stripped = output_root[2:] if output_root.startswith("./") else output_root
+        output_root = os.path.join("output_runs", _stripped)
+        print(f"Prefixing output_root with 'output_runs/': {output_root}")
+
     # Load experiment config
     model_configs = get_model_configs()
     dataset_cfg = DATASET_CONFIGS[dataset]
@@ -614,31 +631,17 @@ def generate(
         })
         print("Adding bare baseline jobs (no mixup, no cutmix)")
     if naked:
-        # Naked: disable *all* heavy augmentations.  We deliberately leave
-        # horizontal flip (hflip) and random-resized-crop (scale/ratio) at
-        # their config defaults, since those are standard ImageNet
-        # preprocessing rather than true augmentation.  Everything else is
-        # turned off at the CLI level so it overrides the per-model YAML.
+        # Naked: flip timm's master `--no-aug` switch.  This forces the data
+        # pipeline into a deterministic resize + center-crop + normalize
+        # path, bypassing RandAugment, mixup/cutmix, random-erasing, color
+        # jitter, random-resized-crop, hflip, and everything else in one go.
+        # We also disable labelmix to keep the baseline truly naked.
         baseline_trials.append({
             "labelmix": False,
-            # timm mixup / cutmix pipeline -- fully off.
-            "mixup": 0,
-            "cutmix": 0,
-            "mixup_prob": 0.0,
-            "cutmix_minmax": None,
-            # Auto-augment / RandAugment / AugMix -- off.
-            "aa": None,
-            # Color jitter -- off.
-            "color_jitter": 0.0,
-            # Random erasing -- off.
-            "reprob": 0.0,
-            "recount": 1,
-            # Repeated-augmentation sampling -- off.
-            "aug_repeats": 0,
-            "aug_splits": 0,
+            "no_aug": True,
             "_baseline_variant": "naked",
         })
-        print("Adding naked baseline jobs (only hflip + random-resized-crop)")
+        print("Adding naked baseline jobs (no_aug=True: all train-time augmentation disabled)")
 
     if baseline_trials:
         # When any baseline flavor is requested, the baseline trials fully
@@ -1032,11 +1035,12 @@ def main() -> None:
     parser.add_argument(
         "--naked",
         action="store_true",
-        help="Add naked baseline jobs: disables ALL heavy augmentations "
-             "(RandAugment/auto-aug, color jitter, random erasing, "
-             "mixup, cutmix, labelmix, aug_repeats, aug_splits). Only "
-             "simple geometric preprocessing (hflip + random-resized-crop) "
-             "remains. Combinable with --baseline/--mixup/--cutmix/--bare.",
+        help="Add naked baseline jobs: sets timm's --no-aug master switch, "
+             "which disables ALL train-time augmentation (RandAugment, "
+             "color jitter, random erasing, mixup, cutmix, hflip, "
+             "random-resized-crop, etc.) and forces a deterministic "
+             "resize + center-crop pipeline. LabelMix is also disabled. "
+             "Combinable with --baseline/--mixup/--cutmix/--bare.",
     )
     args = parser.parse_args()
 
