@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Generate jobs.yaml for LabelMix experiments with configurable datasets.
 
-This script supports multiple datasets (ImageNet-1K, Places365) and allows
-for easy swapping between them via the --dataset argument.
+This script supports multiple datasets (ImageNet-1K, Places365, CIFAR-100) and
+allows for easy swapping between them via the --dataset argument.
 
 Usage::
 
     python experiments/generate_jobs.py --dataset in1k
     python experiments/generate_jobs.py --dataset places365
+    python experiments/generate_jobs.py --dataset cifar100
     python experiments/generate_jobs.py --dataset in1k --gpus-per-job 8 --output jobs.yaml
 """
 from __future__ import annotations
 
 import argparse
-import itertools
 import os
 import sys
 from dataclasses import dataclass, field
@@ -37,11 +37,25 @@ EXPERIMENT_NAME_PREFIX = ""
 METRIC = "top1"
 MODE = "max"
 
+# ---------------------------------------------------------------------------
+# Active sweep axes.
+#
+# This generator sweeps over exactly three dimensions:
+#   1. models          -- via get_model_configs() / --models filter
+#   2. seeds           -- the SEEDS list below
+#   3. learning rates  -- the LEARNING_RATES list below (empty == use YAML default)
+#
+# Every other hyperparameter (image size, layer-decay, mosaic knobs,
+# labelmix mixed-alpha, ...) is pinned to a single value below.  If you
+# ever need to re-enable one of those sweeps, wrap the corresponding
+# scalar in a loop at the job-expansion site.
+# ---------------------------------------------------------------------------
+
 # Seeds to sweep over — each trial is replicated once per seed.
 SEEDS: List[int] = [42, 43, 44]
 
-# Image sizes to sweep over — each trial is replicated once per image size.
-IMAGE_SIZES: List[int] = [256]
+# Image size used for every generated job (pinned, no sweep).
+IMG_SIZE: int = 256
 
 # Extra tags to include in experiment names (e.g. ["v2", "debug"]).
 # Leave empty for no extra tags.
@@ -54,43 +68,26 @@ TAGS: List[str] = []
 # is added to the experiment name.
 LEARNING_RATES: List[float] = []
 
-# Layer-wise LR decay values to sweep over — each trial is replicated once
-# per value.  If empty, the default from the config file (or train.py) is
-# used and no layer-decay tag is added to the experiment name.
-LAYER_DECAYS: List[float] = []
-
-# Mixing coefficients (alpha) to sweep over for `labelmix_loss=mixed`.
-# For each trial in CANDIDATE_TRIALS whose `labelmix_loss == "mixed"`, the
-# generator expands it once per alpha in this list (setting
-# `labelmix_mixed_alpha` accordingly).  Trials using other losses ignore
-# this list.  If empty and a trial requests `mixed`, the trial is used as-is
-# (with whatever `labelmix_mixed_alpha` is explicitly set, or the train.py
-# default).
-LABELMIX_MIXED_ALPHAS: List[float] = [0.1, 0.3, 0.5, 0.7, 0.9]
-
 # ---------------------------------------------------------------------------
-# Mosaic sweep configuration.
+# Mosaic configuration (pinned, no sweep).
 #
-# Mosaic is a 4-image fusion augmentation; when --mosaic is passed to
-# generate_jobs.py the generator emits the Cartesian product of the
-# following sweep axes (replacing the LabelMix candidate trials).
-# Mosaic is incompatible with Mixup/CutMix, so the generator zeroes
-# `mixup`, `cutmix`, `mixup_prob` and omits `cutmix_minmax` on every
-# Mosaic job.
+# Mosaic is a 4-image fusion augmentation that's incompatible with
+# Mixup/CutMix, so the generator zeroes `mixup`, `cutmix`, `mixup_prob`
+# and omits `cutmix_minmax` on every Mosaic job.
 # ---------------------------------------------------------------------------
 
 # Close-mosaic schedule: disable Mosaic during the last N epochs.
-MOSAIC_CLOSE_EPOCHS: List[int] = [10]
+MOSAIC_CLOSE_EPOCHS: int = 10
 
-# Center-ratio ranges for the Mosaic quadrant boundary: (lo, hi) means the
+# Center-ratio range for the Mosaic quadrant boundary: (lo, hi) means the
 # center point is sampled at S * uniform(lo, hi) along each axis.
-MOSAIC_CENTER_RATIOS: List[tuple[float, float]] = [(0.5, 1.5)]
+MOSAIC_CENTER_RATIO: tuple[float, float] = (0.5, 1.5)
 
-# Post-mosaic affine zoom ranges (applied to the final S x S crop).
-MOSAIC_SCALE_RANGES: List[tuple[float, float]] = [(0.8, 1.2)]
+# Post-mosaic affine zoom range (applied to the final S x S crop).
+MOSAIC_SCALE_RANGE: tuple[float, float] = (0.8, 1.2)
 
 # Mosaic application probability.
-MOSAIC_PROBS: List[float] = [0.5]
+MOSAIC_PROB: float = 0.5
 
 # ---------------------------------------------------------------------------
 # Dataset configs — add new datasets here; the active one is selected via
@@ -162,6 +159,23 @@ DATASET_CONFIGS: Dict[str, DatasetConfig] = {
         warmup_steps=17070, # ~ 10 epochs
         balanced_mode=4789,  # (1_839_960 (total images) * 0.95 (% of train images) / 365 (number of classes))
     ),
+    "cifar100": DatasetConfig(
+        dataset_id="cifar100",
+        # "hfds/" prefix routes to ReaderHFDS (parquet-based); the path after
+        # the prefix is the local directory that HF auto-detects as a parquet
+        # dataset.  data_dir is used as cache_dir in ReaderHfds.
+        dataset="hfds//dev/shm/cifar100",
+        data_dir="/dev/shm/cifar100",  # RAM destination; use copy_data_to_ram.py --dataset cifar100 to populate
+        train_split="train",
+        val_split="test",
+        input_key="img",
+        target_key="fine_label",
+        num_classes=100,
+        # 50 000 train images / 1024 batch * 200 epochs ≈ 9 766 steps
+        num_steps=9766,
+        warmup_steps=977,   # ~10 epochs
+        balanced_mode=500,  # 500 images per class (50 000 / 100 classes)
+    ),
     # Add more datasets here as needed
 }
 
@@ -221,7 +235,7 @@ def build_common_overrides(nproc_per_experiment: int, dataset_cfg: Optional[Data
         "batch_size": per_gpu_batch_size,
         "warmup_prefix": True,
         "aug_repeats": 0,
-        "img_size": None,  # set per-run from IMAGE_SIZES
+        "img_size": None,  # set per-run from IMG_SIZE
         "sched_on_updates": True,
         "num_logs": 1000,
         "num_evals": 100,
@@ -290,55 +304,54 @@ def get_model_configs() -> Dict[str, str]:
 
 # ---------------------------------------------------------------------------
 # Candidate trial configurations.
+#
+# LabelMix trials used to be hard-coded in a ``CANDIDATE_TRIALS`` list.  The
+# list has been removed in favour of :func:`build_labelmix_trial`, which
+# produces a standard LabelMix trial dict for a given loss variant.  The CLI
+# option ``--labelmix {mixed,pl,sce}`` (repeatable) selects which variants to
+# emit; ``--all`` is shorthand for every variant.
 # ---------------------------------------------------------------------------
 
-CANDIDATE_TRIALS: List[Dict[str, Any]] = [
-    
-#    {
-#        "labelmix_schedule": "cosine",
-#        "labelmix_k_schedule": "fixed",
-#        "labelmix_k_warmup_epochs": 0,
-#        "labelmix_mix_k": 4,
-#        "labelmix_k_min": 4,
-#        "labelmix_k_max": 4,
-#        "labelmix_alpha_min": 0.1,
-#        "labelmix_alpha_max": 0.5,
-#        "labelmix_loss": "soft_ce",
-#    },
-#    {
-#        "labelmix_schedule": "cosine",
-#        "labelmix_k_schedule": "fixed",
-#        "labelmix_k_warmup_epochs": 0,
-#        "labelmix_mix_k": 6,
-#        "labelmix_k_min": 6,
-#        "labelmix_k_max": 6,
-#        "labelmix_alpha_min": 0.1,
-#        "labelmix_alpha_max": 0.5,
-#        "labelmix_loss": "pl_loss",
-#    },
-#        {
-#        "labelmix_schedule": "cosine",
-#        "labelmix_k_schedule": "fixed",
-#        "labelmix_k_warmup_epochs": 0,
-#        "labelmix_mix_k": 4,
-#        "labelmix_k_min": 4,
-#        "labelmix_k_max": 4,
-#        "labelmix_alpha_min": 0.1,
-#        "labelmix_alpha_max": 0.5,
-#        "labelmix_loss": "mixed",
-#    },
-#    {
-#        "labelmix_schedule": "cosine",
-#        "labelmix_k_schedule": "fixed",
-#        "labelmix_k_warmup_epochs": 0,
-#        "labelmix_mix_k": 6,
-#        "labelmix_k_min": 6,
-#        "labelmix_k_max": 6,
-#        "labelmix_alpha_min": 0.1,
-#        "labelmix_alpha_max": 0.5,
-#        "labelmix_loss": "mixed",
-#    },
-]
+# Mapping from the public ``--labelmix`` choice to
+#   (wandb tag, train.py labelmix_loss value, mix-k, experiment-name-friendly key).
+# Keeping it declarative makes it trivial to add a new loss variant later.
+LABELMIX_LOSS_SPECS: Dict[str, Dict[str, Any]] = {
+    "mixed": {"tag": "labelmix-mixed", "loss": "mixed",   "mix_k": 4},
+    "pl":    {"tag": "labelmix-pl",    "loss": "pl_loss", "mix_k": 6},
+    "sce":   {"tag": "labelmix-sce",   "loss": "soft_ce", "mix_k": 4},
+}
+
+
+def build_labelmix_trial(variant: str) -> Dict[str, Any]:
+    """Return a standard LabelMix trial dict for the given variant.
+
+    ``variant`` must be one of ``LABELMIX_LOSS_SPECS`` (``mixed``, ``pl``,
+    ``sce``).  The returned dict carries a private ``_tags`` marker so the
+    job-emission loop can attach the correct wandb tag (e.g.
+    ``labelmix-mixed``) per trial.
+    """
+    try:
+        spec = LABELMIX_LOSS_SPECS[variant]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown labelmix variant {variant!r}; expected one of "
+            f"{sorted(LABELMIX_LOSS_SPECS)}"
+        ) from exc
+
+    mix_k = spec["mix_k"]
+    return {
+        "labelmix_schedule": "cosine",
+        "labelmix_k_schedule": "fixed",
+        "labelmix_k_warmup_epochs": 0,
+        "labelmix_mix_k": mix_k,
+        "labelmix_k_min": mix_k,
+        "labelmix_k_max": mix_k,
+        "labelmix_alpha_min": 0.1,
+        "labelmix_alpha_max": 0.5,
+        "labelmix_loss": spec["loss"],
+        # Private bookkeeping key (stripped before CLI emission).
+        "_tags": [spec["tag"]],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +517,7 @@ def dict_to_cli_args(d: Dict[str, Any]) -> str:
 
 def generate(
     dataset: str = "in1k",
-    gpus_per_job: int = 1,
+    gpus_per_job: int = 2,
     output_path: str = "jobs.yaml",
     output_root: str = "./output_runs/daemon",
     max_retries: int = 3,
@@ -514,7 +527,8 @@ def generate(
     mixup: bool = False,
     cutmix: bool = False,
     bare: bool = False,
-    naked: bool = False,
+    noaug: bool = False,
+    labelmix_variants: List[str] | None = None,
 ) -> None:
     """Expand the experiment grid and write ``jobs.yaml``.
 
@@ -540,12 +554,16 @@ def generate(
         If True, generate baseline jobs with cutmix only.
     bare : bool
         If True, generate baseline jobs with no mixup/cutmix.
-    naked : bool
+    noaug : bool
         If True, generate baseline jobs with *all* heavy augmentations
         disabled.  Only simple geometric preprocessing remains:
         horizontal flip + random-resized-crop (scale/ratio).  Everything
         else -- RandAugment, color jitter, random erasing, mixup, cutmix,
         labelmix, aug_repeats, aug_splits -- is turned off.
+    labelmix_variants : list[str] | None
+        List of LabelMix loss variants to emit.  Each entry must be a key of
+        ``LABELMIX_LOSS_SPECS`` (``mixed``, ``pl``, ``sce``).  ``None`` or the
+        empty list means no LabelMix trials are emitted.
     """
     # Validate dataset selection
     if dataset not in DATASET_CONFIGS:
@@ -574,7 +592,22 @@ def generate(
     model_configs = get_model_configs()
     dataset_cfg = DATASET_CONFIGS[dataset]
     common_overrides = build_common_overrides(nproc_per_experiment=gpus_per_job, dataset_cfg=dataset_cfg)
-    candidate_trials = list(CANDIDATE_TRIALS)
+
+    # Build LabelMix trials from the CLI-selected variants.  If none were
+    # selected this starts empty; baseline / mosaic flavors below may
+    # replace or extend it.
+    labelmix_variants = list(labelmix_variants or [])
+    # Preserve user-supplied order but deduplicate.
+    _seen: set[str] = set()
+    _ordered_variants: List[str] = []
+    for _v in labelmix_variants:
+        if _v not in _seen:
+            _seen.add(_v)
+            _ordered_variants.append(_v)
+    labelmix_variants = _ordered_variants
+    candidate_trials: List[Dict[str, Any]] = [
+        build_labelmix_trial(v) for v in labelmix_variants
+    ]
 
     # Add baseline trials if requested.  The four LabelMix-disabled flavors
     # (baseline / mixup / cutmix / bare) differ only in which parts of the
@@ -630,69 +663,60 @@ def generate(
             "_baseline_variant": "bare",
         })
         print("Adding bare baseline jobs (no mixup, no cutmix)")
-    if naked:
-        # Naked: flip timm's master `--no-aug` switch.  This forces the data
+    if noaug:
+        # NoAug: flip timm's master `--no-aug` switch.  This forces the data
         # pipeline into a deterministic resize + center-crop + normalize
         # path, bypassing RandAugment, mixup/cutmix, random-erasing, color
         # jitter, random-resized-crop, hflip, and everything else in one go.
-        # We also disable labelmix to keep the baseline truly naked.
+        # We also disable labelmix to keep the baseline truly free of augmentation.
         baseline_trials.append({
             "labelmix": False,
             "no_aug": True,
-            "_baseline_variant": "naked",
+            "_baseline_variant": "noaug",
         })
-        print("Adding naked baseline jobs (no_aug=True: all train-time augmentation disabled)")
+        print("Adding noaug baseline jobs (no_aug=True: all train-time augmentation disabled)")
 
+    # Tag each baseline trial with its variant name so the job-emission
+    # loop can attach the corresponding wandb tag (e.g. ``baseline``,
+    # ``mixup``, ``cutmix``, ``bare``, ``noaug``).
+    for _trial in baseline_trials:
+        _variant = _trial.get("_baseline_variant")
+        if _variant:
+            _trial.setdefault("_tags", []).append(_variant)
+
+    # Baseline flavors are *additive* to any LabelMix variants: each emits
+    # its own trial dict so a single invocation can sweep LabelMix AND the
+    # four/five augmentation-disabled baselines in one go.
     if baseline_trials:
-        # When any baseline flavor is requested, the baseline trials fully
-        # replace any (presumably commented-out) entries in CANDIDATE_TRIALS.
-        candidate_trials = baseline_trials
+        candidate_trials = candidate_trials + baseline_trials
 
-    # Mosaic sweep supersedes the LabelMix trial grid.  Each Mosaic trial
-    # disables labelmix/mixup/cutmix and sweeps the four Mosaic hyperparams.
+    # Mosaic trial.  Uses the pinned scalar Mosaic constants -- no sweep.
+    # Side-by-side with LabelMix / baseline trials (each job picks a
+    # single trial dict, so mosaic+labelmix coexist as *separate* trials).
     if mosaic:
-        if baseline or mixup or cutmix or bare or naked:
-            raise ValueError("--mosaic is mutually exclusive with --baseline, --mixup, --cutmix, --bare, and --naked.")
-        mosaic_trials: List[Dict[str, Any]] = []
-        for close_ep, center_range, scale_range, mprob in itertools.product(
-            MOSAIC_CLOSE_EPOCHS, MOSAIC_CENTER_RATIOS, MOSAIC_SCALE_RANGES, MOSAIC_PROBS
-        ):
-            mosaic_trials.append({
-                # Disable LabelMix on the data path.
-                "labelmix": False,
-                # Enable Mosaic.
-                "mosaic": True,
-                "mosaic_prob": float(mprob),
-                "mosaic_center_ratio": [float(center_range[0]), float(center_range[1])],
-                "mosaic_scale_range": [float(scale_range[0]), float(scale_range[1])],
-                "mosaic_close_epochs": int(close_ep),
-            })
-        candidate_trials = mosaic_trials
-        print(f"Generating {len(mosaic_trials)} Mosaic jobs per model/seed/img/lr/ld combination")
+        mosaic_trial: Dict[str, Any] = {
+            # Disable LabelMix on the data path.
+            "labelmix": False,
+            # Enable Mosaic.
+            "mosaic": True,
+            "mosaic_prob": float(MOSAIC_PROB),
+            "mosaic_center_ratio": [float(MOSAIC_CENTER_RATIO[0]), float(MOSAIC_CENTER_RATIO[1])],
+            "mosaic_scale_range": [float(MOSAIC_SCALE_RANGE[0]), float(MOSAIC_SCALE_RANGE[1])],
+            "mosaic_close_epochs": int(MOSAIC_CLOSE_EPOCHS),
+            "_tags": ["mosaic"],
+        }
+        candidate_trials = candidate_trials + [mosaic_trial]
+        print("Generating 1 Mosaic trial per model/seed/lr combination")
 
-    # Guard against silently emitting zero jobs when the user neither requested
-    # a baseline/mosaic/mixup/cutmix/bare sweep nor uncommented any LabelMix
-    # trial in ``CANDIDATE_TRIALS``.
+    # Guard against silently emitting zero jobs when the user neither
+    # requested a baseline/mosaic/mixup/cutmix/bare/noaug sweep nor a
+    # LabelMix variant via --labelmix / --all.
     if not candidate_trials:
         raise ValueError(
             "No candidate trials to generate. Pass --baseline, --mosaic, "
-            "--mixup, --cutmix, --bare, or uncomment at least one entry in "
-            "CANDIDATE_TRIALS."
+            "--mixup, --cutmix, --bare, --noaug, or --labelmix {mixed,pl,sce} "
+            "(or --all to enable everything)."
         )
-
-    # Expand trials with `labelmix_loss == "mixed"` across LABELMIX_MIXED_ALPHAS.
-    # A trial that already has `labelmix_mixed_alpha` set is used as-is.
-    if LABELMIX_MIXED_ALPHAS:
-        expanded_trials: List[Dict[str, Any]] = []
-        for trial in candidate_trials:
-            if trial.get("labelmix_loss") == "mixed" and "labelmix_mixed_alpha" not in trial:
-                for mixed_alpha in LABELMIX_MIXED_ALPHAS:
-                    new_trial = dict(trial)
-                    new_trial["labelmix_mixed_alpha"] = float(mixed_alpha)
-                    expanded_trials.append(new_trial)
-            else:
-                expanded_trials.append(trial)
-        candidate_trials = expanded_trials
 
     # Apply model filter
     if model_filter:
@@ -715,202 +739,208 @@ def generate(
     # Ensure every (model, trial) emits exactly one run per configured seed.
     seed_coverage: Dict[tuple[str, str], set[int]] = {}
 
-    image_sizes = list(IMAGE_SIZES)
-    if not image_sizes:
-        raise ValueError("IMAGE_SIZES must not be empty.")
+    img_size: int = int(IMG_SIZE)
 
     learning_rates: List[Optional[float]] = list(LEARNING_RATES) if LEARNING_RATES else [None]
-    layer_decays: List[Optional[float]] = list(LAYER_DECAYS) if LAYER_DECAYS else [None]
 
-    # Compose tag list.  For Mosaic we still include a top-level "mosaic"
-    # token so every generated experiment name contains "mosaic"; for the
-    # four baseline flavors we deliberately DO NOT hoist baseline/mixup/
-    # cutmix/bare into the global tag list -- otherwise combined runs
-    # (e.g. --baseline --bare) would end up with both tokens in every
-    # job's name.  Instead, each baseline trial carries its own
-    # `_baseline_variant` marker which `build_experiment_name` emits as
-    # the first path component of the trial-level name.
+    # Compose tag list.  All augmentation-specific tags (baseline, mixup,
+    # cutmix, bare, noaug, mosaic, labelmix-*) are attached *per trial* via
+    # the trial's ``_tags`` marker and emitted both into the experiment
+    # name and into ``--wandb-tags`` below -- so we deliberately do NOT
+    # hoist them into the global tag list here.
     effective_tags = list(TAGS)
-    if mosaic and "mosaic" not in effective_tags:
-        effective_tags.append("mosaic")
     tags_suffix = "__".join(effective_tags) if effective_tags else ""
 
     for model_tag, config_path in model_configs.items():
         for trial_overrides in candidate_trials:
-            for img_size in image_sizes:
-                for lr, layer_decay in itertools.product(learning_rates, layer_decays):
-                    for seed in SEEDS:
-                        trial_overrides = dict(trial_overrides)
+            for lr in learning_rates:
+                for seed in SEEDS:
+                    trial_overrides = dict(trial_overrides)
 
-                        # Sync k params: k_min == k_max == mix_k (fixed K per trial)
-                        if "labelmix_mix_k" in trial_overrides:
-                            k = trial_overrides["labelmix_mix_k"]
-                            trial_overrides.setdefault("labelmix_k_min", k)
-                            trial_overrides.setdefault("labelmix_k_max", k)
+                    # Sync k params: k_min == k_max == mix_k (fixed K per trial)
+                    if "labelmix_mix_k" in trial_overrides:
+                        k = trial_overrides["labelmix_mix_k"]
+                        trial_overrides.setdefault("labelmix_k_min", k)
+                        trial_overrides.setdefault("labelmix_k_max", k)
 
-                        base_exp_name = build_experiment_name(trial_overrides, common_overrides)
-                        # Build experiment name: [prefix__]model__dataset__img{size}[__tags][__lr=X]__trial__seed=N
-                        name_parts: List[str] = []
-                        if EXPERIMENT_NAME_PREFIX:
-                            name_parts.append(EXPERIMENT_NAME_PREFIX)
-                        name_parts.extend([
-                            model_tag,
-                            dataset_cfg.dataset_id,
-                            f"img{img_size}",
-                        ])
-                        if tags_suffix:
-                            name_parts.append(tags_suffix)
-                        if lr is not None:
-                            name_parts.append(f"lr={lr:g}")
-                        if layer_decay is not None:
-                            name_parts.append(f"ld={layer_decay:g}")
-                        name_parts.append(base_exp_name)
-                        name_parts.append(f"seed={seed}")
-                        exp_name = "__".join(name_parts)
+                    base_exp_name = build_experiment_name(trial_overrides, common_overrides)
+                    # Build experiment name: [prefix__]model__dataset__img{size}[__tags][__lr=X]__trial__seed=N
+                    name_parts: List[str] = []
+                    if EXPERIMENT_NAME_PREFIX:
+                        name_parts.append(EXPERIMENT_NAME_PREFIX)
+                    name_parts.extend([
+                        model_tag,
+                        dataset_cfg.dataset_id,
+                        f"img{img_size}",
+                    ])
+                    if tags_suffix:
+                        name_parts.append(tags_suffix)
+                    if lr is not None:
+                        name_parts.append(f"lr={lr:g}")
+                    name_parts.append(base_exp_name)
+                    name_parts.append(f"seed={seed}")
+                    exp_name = "__".join(name_parts)
 
-                        if exp_name in seen_experiment_names:
-                            raise ValueError(
-                                f"Duplicate experiment name generated: {exp_name}. "
-                                "Ensure all active sweep axes are encoded in build_experiment_name()."
-                            )
-                        seen_experiment_names.add(exp_name)
-
-                        group_key = (model_tag, base_exp_name, img_size, lr, layer_decay)
-                        seen_group_seeds = seed_coverage.setdefault(group_key, set())
-                        if seed in seen_group_seeds:
-                            raise ValueError(
-                                f"Duplicate seed run generated for {model_tag}/{base_exp_name}/img{img_size}/lr={lr}/ld={layer_decay}: seed={seed}"
-                            )
-                        seen_group_seeds.add(seed)
-
-                        # Merge all overrides (common < trial-specific < runtime)
-                        all_overrides: Dict[str, Any] = {}
-                        all_overrides.update(common_overrides)
-                        all_overrides.update(trial_overrides)
-                        
-                        # Determine active augmentations for this trial.
-                        labelmix_enabled = trial_overrides.get(
-                            "labelmix",
-                            common_overrides.get("labelmix", True)
+                    if exp_name in seen_experiment_names:
+                        raise ValueError(
+                            f"Duplicate experiment name generated: {exp_name}. "
+                            "Ensure all active sweep axes are encoded in build_experiment_name()."
                         )
-                        mosaic_enabled = trial_overrides.get("mosaic", False)
+                    seen_experiment_names.add(exp_name)
 
-                        # Mosaic is an *alternative* to LabelMix: the two cannot
-                        # coexist on the same trial.  Raise before we silently
-                        # zero any knobs so configuration mistakes are loud.
-                        if mosaic_enabled and labelmix_enabled:
-                            raise ValueError(
-                                f"Mosaic and LabelMix cannot both be active on the same trial "
-                                f"(exp={exp_name}). When --mosaic is used, every trial must set "
-                                f"labelmix=False (and train.py will refuse to run otherwise)."
-                            )
+                    group_key = (model_tag, base_exp_name, lr)
+                    seen_group_seeds = seed_coverage.setdefault(group_key, set())
+                    if seed in seen_group_seeds:
+                        raise ValueError(
+                            f"Duplicate seed run generated for {model_tag}/{base_exp_name}/lr={lr}: seed={seed}"
+                        )
+                    seen_group_seeds.add(seed)
 
-                        # Mosaic / LabelMix both ship their own target format,
-                        # so the timm mixup/cutmix pipeline must be disabled.
-                        if labelmix_enabled or mosaic_enabled:
-                            all_overrides["mixup"] = 0
-                            all_overrides["cutmix"] = 0
-                            all_overrides["mixup_prob"] = 0.0
-                            all_overrides["cutmix_minmax"] = None
+                    # Merge all overrides (common < trial-specific < runtime)
+                    all_overrides: Dict[str, Any] = {}
+                    all_overrides.update(common_overrides)
+                    all_overrides.update(trial_overrides)
 
-                        # When LabelMix is disabled for this trial (baseline or
-                        # Mosaic sweep), drop *every* labelmix_* key that leaked
-                        # in via ``labelmix_common_args``.  Otherwise the CLI
-                        # would still contain flags like ``--labelmix-sampling``
-                        # (a bool ON!) or ``--labelmix-sampling-*`` knobs, which
-                        # on a Mosaic run would spin up the LabelMix sampling
-                        # producer and/or confuse train.py's argument parsing.
-                        if not labelmix_enabled:
-                            for _k in list(all_overrides.keys()):
-                                if _k.startswith("labelmix"):
-                                    all_overrides.pop(_k, None)
+                    # Determine active augmentations for this trial.
+                    labelmix_enabled = trial_overrides.get(
+                        "labelmix",
+                        common_overrides.get("labelmix", True)
+                    )
+                    mosaic_enabled = trial_overrides.get("mosaic", False)
 
-                        # Strip private marker keys (e.g. "_baseline_variant")
-                        # that are used purely for internal bookkeeping and
-                        # must not be emitted as CLI flags.
+                    # Mosaic is an *alternative* to LabelMix: the two cannot
+                    # coexist on the same trial.  Raise before we silently
+                    # zero any knobs so configuration mistakes are loud.
+                    if mosaic_enabled and labelmix_enabled:
+                        raise ValueError(
+                            f"Mosaic and LabelMix cannot both be active on the same trial "
+                            f"(exp={exp_name}). When --mosaic is used, every trial must set "
+                            f"labelmix=False (and train.py will refuse to run otherwise)."
+                        )
+
+                    # Mosaic / LabelMix both ship their own target format,
+                    # so the timm mixup/cutmix pipeline must be disabled.
+                    if labelmix_enabled or mosaic_enabled:
+                        all_overrides["mixup"] = 0
+                        all_overrides["cutmix"] = 0
+                        all_overrides["mixup_prob"] = 0.0
+                        all_overrides["cutmix_minmax"] = None
+
+                    # When LabelMix is disabled for this trial (baseline or
+                    # Mosaic sweep), drop *every* labelmix_* key that leaked
+                    # in via ``labelmix_common_args``.  Otherwise the CLI
+                    # would still contain flags like ``--labelmix-sampling``
+                    # (a bool ON!) or ``--labelmix-sampling-*`` knobs, which
+                    # on a Mosaic run would spin up the LabelMix sampling
+                    # producer and/or confuse train.py's argument parsing.
+                    if not labelmix_enabled:
                         for _k in list(all_overrides.keys()):
-                            if _k.startswith("_"):
+                            if _k.startswith("labelmix"):
                                 all_overrides.pop(_k, None)
 
-                        # Belt-and-suspenders: every Mosaic job must have the
-                        # substring "mosaic" in its experiment name so it is
-                        # trivially greppable in run logs, dashboards and
-                        # checkpoint directories.
-                        if mosaic_enabled and "mosaic" not in exp_name:
-                            raise ValueError(
-                                f"Mosaic trial produced an experiment name without the 'mosaic' token: "
-                                f"{exp_name}. Check build_experiment_name() / effective_tags."
-                            )
+                    # Strip private marker keys (e.g. "_baseline_variant")
+                    # that are used purely for internal bookkeeping and
+                    # must not be emitted as CLI flags.
+                    for _k in list(all_overrides.keys()):
+                        if _k.startswith("_"):
+                            all_overrides.pop(_k, None)
 
-                        # Every baseline-variant job must have its variant
-                        # token (baseline/mixup/cutmix/bare) embedded in the
-                        # experiment name so different flavors are trivially
-                        # distinguishable in run logs and checkpoint dirs.
-                        # Note: we check the trial's own marker, not the CLI
-                        # flags, because multiple flags may be active at once.
-                        variant_marker = trial_overrides.get("_baseline_variant")
-                        if variant_marker and variant_marker not in exp_name:
-                            raise ValueError(
-                                f"Baseline trial (variant={variant_marker}) produced an experiment name "
-                                f"without the '{variant_marker}' token: {exp_name}. "
-                                f"Check build_experiment_name()."
-                            )
-
-                        all_overrides["img_size"] = img_size
-                        all_overrides["seed"] = seed
-                        all_overrides["experiment"] = exp_name
-                        all_overrides["output"] = output_root
-                        if lr is not None:
-                            all_overrides["lr_base"] = lr
-                        if layer_decay is not None:
-                            all_overrides["layer_decay"] = layer_decay
-
-                        cli_args = dict_to_cli_args(all_overrides)
-
-                        # For ViT / Eva models the constructor needs img_size via
-                        # --model-kwargs so the patch-embed grid and positional
-                        # embeddings match the actual input resolution.  The CLI
-                        # --img-size only affects the data pipeline.
-                        #
-                        # IMPORTANT: --model-kwargs on the CLI *replaces* (not
-                        # merges with) the model_kwargs from the YAML config.
-                        # We therefore read the config's existing model_kwargs,
-                        # merge in the runtime img_size, and emit the full set
-                        # so nothing (e.g. fix_init) is lost.
-                        model_kwargs_args = ""
-                        if model_tag in MODELS_REQUIRING_IMG_SIZE_KWARG:
-                            cfg_model_kwargs = _read_config_model_kwargs(config_path)
-                            cfg_model_kwargs["img_size"] = img_size
-                            kw_parts = [f"{k}={v}" for k, v in cfg_model_kwargs.items()]
-                            model_kwargs_args = " --model-kwargs " + " ".join(kw_parts)
-
-                        # {gpus} and {port} are resolved at launch time by the daemon
-                        cmd = (
-                            f"torchrun --nproc_per_node={{gpus}} --master_port={{port}} "
-                            f"train.py --config {config_path} {cli_args}{model_kwargs_args}"
+                    # Belt-and-suspenders: every Mosaic job must have the
+                    # substring "mosaic" in its experiment name so it is
+                    # trivially greppable in run logs, dashboards and
+                    # checkpoint directories.
+                    if mosaic_enabled and "mosaic" not in exp_name:
+                        raise ValueError(
+                            f"Mosaic trial produced an experiment name without the 'mosaic' token: "
+                            f"{exp_name}. Check build_experiment_name() / effective_tags."
                         )
 
-                        if f"--seed {seed}" not in cmd:
-                            raise ValueError(
-                                f"Internal error: generated command for {exp_name} is missing '--seed {seed}'."
-                            )
+                    # Every baseline-variant job must have its variant
+                    # token (baseline/mixup/cutmix/bare) embedded in the
+                    # experiment name so different flavors are trivially
+                    # distinguishable in run logs and checkpoint dirs.
+                    # Note: we check the trial's own marker, not the CLI
+                    # flags, because multiple flags may be active at once.
+                    variant_marker = trial_overrides.get("_baseline_variant")
+                    if variant_marker and variant_marker not in exp_name:
+                        raise ValueError(
+                            f"Baseline trial (variant={variant_marker}) produced an experiment name "
+                            f"without the '{variant_marker}' token: {exp_name}. "
+                            f"Check build_experiment_name()."
+                        )
 
-                        jobs.append({"name": exp_name, "cmd": cmd})
+                    all_overrides["img_size"] = img_size
+                    all_overrides["seed"] = seed
+                    all_overrides["experiment"] = exp_name
+                    all_overrides["output"] = output_root
+                    if lr is not None:
+                        all_overrides["lr_base"] = lr
+
+                    # Augment wandb_tags with the per-trial augmentation
+                    # tags (baseline/mixup/cutmix/bare/noaug/mosaic/
+                    # labelmix-*).  ``wandb_tags`` from common_overrides
+                    # is a scalar (dataset id); we fold everything into a
+                    # space-delimited list so train.py's argparse
+                    # (``nargs='+'``) picks up every tag.
+                    _trial_tags: List[str] = list(trial_overrides.get("_tags", []) or [])
+                    _base_tags_raw = all_overrides.get("wandb_tags", "")
+                    if isinstance(_base_tags_raw, (list, tuple)):
+                        _base_tags = [str(t) for t in _base_tags_raw if t]
+                    elif _base_tags_raw:
+                        _base_tags = [str(_base_tags_raw)]
+                    else:
+                        _base_tags = []
+                    _merged_tags: List[str] = []
+                    for _t in _base_tags + _trial_tags:
+                        if _t and _t not in _merged_tags:
+                            _merged_tags.append(_t)
+                    if _merged_tags:
+                        all_overrides["wandb_tags"] = _merged_tags
+
+                    cli_args = dict_to_cli_args(all_overrides)
+
+                    # For ViT / Eva models the constructor needs img_size via
+                    # --model-kwargs so the patch-embed grid and positional
+                    # embeddings match the actual input resolution.  The CLI
+                    # --img-size only affects the data pipeline.
+                    #
+                    # IMPORTANT: --model-kwargs on the CLI *replaces* (not
+                    # merges with) the model_kwargs from the YAML config.
+                    # We therefore read the config's existing model_kwargs,
+                    # merge in the runtime img_size, and emit the full set
+                    # so nothing (e.g. fix_init) is lost.
+                    model_kwargs_args = ""
+                    if model_tag in MODELS_REQUIRING_IMG_SIZE_KWARG:
+                        cfg_model_kwargs = _read_config_model_kwargs(config_path)
+                        cfg_model_kwargs["img_size"] = img_size
+                        kw_parts = [f"{k}={v}" for k, v in cfg_model_kwargs.items()]
+                        model_kwargs_args = " --model-kwargs " + " ".join(kw_parts)
+
+                    # {gpus} and {port} are resolved at launch time by the daemon
+                    cmd = (
+                        f"torchrun --nproc_per_node={{gpus}} --master_port={{port}} "
+                        f"train.py --config {config_path} {cli_args}{model_kwargs_args}"
+                    )
+
+                    if f"--seed {seed}" not in cmd:
+                        raise ValueError(
+                            f"Internal error: generated command for {exp_name} is missing '--seed {seed}'."
+                        )
+
+                    jobs.append({"name": exp_name, "cmd": cmd})
 
     # Check seed coverage
     missing_seed_errors: List[str] = []
-    for (model_tag, base_exp_name, img_size, lr, layer_decay), seen_seeds in sorted(
+    for (model_tag, base_exp_name, lr), seen_seeds in sorted(
         seed_coverage.items(),
-        key=lambda kv: (kv[0][0], kv[0][1], kv[0][2],
-                        (kv[0][3] is None, kv[0][3]),
-                        (kv[0][4] is None, kv[0][4])),
+        key=lambda kv: (kv[0][0], kv[0][1],
+                        (kv[0][2] is None, kv[0][2])),
     ):
         missing = sorted(expected_seeds - seen_seeds)
         if missing:
             lr_tag = f"/lr={lr:g}" if lr is not None else ""
-            ld_tag = f"/ld={layer_decay:g}" if layer_decay is not None else ""
             missing_seed_errors.append(
-                f"{model_tag}/{base_exp_name}/img{img_size}{lr_tag}{ld_tag}: missing seeds {missing}"
+                f"{model_tag}/{base_exp_name}{lr_tag}: missing seeds {missing}"
             )
 
     if missing_seed_errors:
@@ -940,7 +970,9 @@ def generate(
     print(f"Generated {len(jobs)} job(s) -> {output_path}")
     print(f"  Dataset: {dataset}")
     print(f"  Models: {list(model_configs.keys())}")
-    print(f"  Image sizes: {image_sizes}")
+    print(f"  Image size: {img_size}")
+    print(f"  Seeds: {SEEDS}")
+    print(f"  Learning rates: {LEARNING_RATES if LEARNING_RATES else '(config default)'}")
     print(f"  Candidate configs/model: {len(candidate_trials)}")
     print(f"  Tags: {effective_tags if effective_tags else '(none)'}")
     print(f"  GPUs/job: {gpus_per_job}")
@@ -962,6 +994,7 @@ def main() -> None:
             "Examples:\n"
             "  python experiments/generate_jobs.py --dataset in1k\n"
             "  python experiments/generate_jobs.py --dataset places365\n"
+            "  python experiments/generate_jobs.py --dataset cifar100\n"
             "  python experiments/generate_jobs.py --dataset in1k --gpus-per-job 8 -o jobs.yaml\n"
             "  python experiments/generate_jobs.py --dataset places365 --model-filter vit-medium vit-base\n"
         ),
@@ -1033,24 +1066,61 @@ def main() -> None:
              "Combinable with --baseline/--mixup/--cutmix.",
     )
     parser.add_argument(
-        "--naked",
+        "--noaug",
         action="store_true",
-        help="Add naked baseline jobs: sets timm's --no-aug master switch, "
+        help="Add noaug baseline jobs: sets timm's --no-aug master switch, "
              "which disables ALL train-time augmentation (RandAugment, "
              "color jitter, random erasing, mixup, cutmix, hflip, "
              "random-resized-crop, etc.) and forces a deterministic "
              "resize + center-crop pipeline. LabelMix is also disabled. "
              "Combinable with --baseline/--mixup/--cutmix/--bare.",
     )
+    parser.add_argument(
+        "--labelmix",
+        dest="labelmix_variants",
+        nargs="+",
+        choices=sorted(LABELMIX_LOSS_SPECS.keys()),
+        default=[],
+        help="LabelMix loss variant(s) to generate. Choices: "
+             f"{sorted(LABELMIX_LOSS_SPECS.keys())}. "
+             "Each variant adds the corresponding wandb tag "
+             "(mixed -> labelmix-mixed, pl -> labelmix-pl, "
+             "sce -> labelmix-sce). Combinable with the baseline flavors.",
+    )
+    parser.add_argument(
+        "--all",
+        dest="all_configs",
+        action="store_true",
+        help="Generate every augmentation configuration at once: all "
+             "LabelMix variants (mixed, pl, sce) PLUS baseline, mixup, "
+             "cutmix, bare, noaug and mosaic. Overrides / unions with any "
+             "individually-set flags.",
+    )
     args = parser.parse_args()
 
-    # --mosaic is the only truly exclusive option: its trial structure is
-    # incompatible with the timm mixup/cutmix pipeline that the four
-    # baseline flavors rely on.  --baseline/--mixup/--cutmix/--bare, on
-    # the other hand, can be freely combined -- each one contributes its
-    # own trial dict to the job list.
-    if args.mosaic and any([args.baseline, args.mixup, args.cutmix, args.bare, args.naked]):
-        parser.error("--mosaic is mutually exclusive with --baseline, --mixup, --cutmix, --bare, and --naked")
+    # --all is shorthand for turning on every augmentation flavor.  We
+    # *union* with any individually-set flags rather than overwrite so
+    # that ``--all --mixup`` behaves identically to ``--all``.
+    if args.all_configs:
+        args.baseline = True
+        args.mixup = True
+        args.cutmix = True
+        args.bare = True
+        args.noaug = True
+        args.mosaic = True
+        _all_variants = sorted(LABELMIX_LOSS_SPECS.keys())
+        _existing = list(args.labelmix_variants or [])
+        for _v in _all_variants:
+            if _v not in _existing:
+                _existing.append(_v)
+        args.labelmix_variants = _existing
+
+    # Every flag (--baseline, --mixup, --cutmix, --bare, --noaug, --mosaic,
+    # --labelmix, --all) is additive: each contributes its own trial dict(s)
+    # to the job list.  There is no mutual-exclusion check any more -- the
+    # per-job guard inside ``generate()`` still rejects nonsensical
+    # combinations on a *single* trial (e.g. mosaic+labelmix on the same
+    # trial), but trials themselves can be freely mixed.
 
     generate(
         dataset=args.dataset,
@@ -1064,7 +1134,8 @@ def main() -> None:
         mixup=args.mixup,
         cutmix=args.cutmix,
         bare=args.bare,
-        naked=args.naked,
+        noaug=args.noaug,
+        labelmix_variants=args.labelmix_variants,
     )
 
 

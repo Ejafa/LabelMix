@@ -13,6 +13,7 @@ Usage::
 
     python copy_data_to_ram.py                          # copy imagenet-1k (default)
     python copy_data_to_ram.py --dataset places365      # copy places365
+    python copy_data_to_ram.py --dataset cifar100       # copy cifar100
     python copy_data_to_ram.py --dry-run                # show what would be copied
     python copy_data_to_ram.py --verify                 # verify existing copy
     python copy_data_to_ram.py --cleanup                # remove the RAM copy
@@ -26,6 +27,10 @@ Supported datasets and their default paths:
     places365:
       src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/places365/arrow
       dst: /dev/shm/places365/arrow
+
+    cifar100:
+      src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/cifar100/cifar100
+      dst: /dev/shm/cifar100
 """
 from __future__ import annotations
 
@@ -53,6 +58,15 @@ DATASETS: dict[str, dict[str, str]] = {
         # that reader_hfds.py finds <data_dir>/arrow/<split>/ at runtime.
         "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/places365/arrow",
         "dst": "/dev/shm/places365/arrow",
+    },
+    "cifar100": {
+        # Parquet-based HuggingFace dataset (train + test splits, ~170 MB total).
+        # The inner cifar100/ subdirectory contains the actual parquet files;
+        # we copy that directory directly so /dev/shm/cifar100/ holds the
+        # parquet files at the top level, matching the data_dir expected by
+        # generate_jobs.py.
+        "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/cifar100/cifar100",
+        "dst": "/dev/shm/cifar100",
     },
 }
 
@@ -336,6 +350,7 @@ def main() -> None:
             "Examples:\n"
             "  python copy_data_to_ram.py                         # copy imagenet-1k to /dev/shm\n"
             "  python copy_data_to_ram.py --dataset places365     # copy places365 to /dev/shm\n"
+            "  python copy_data_to_ram.py --dataset cifar100      # copy cifar100 to /dev/shm\n"
             "  python copy_data_to_ram.py --dry-run               # preview without copying\n"
             "  python copy_data_to_ram.py --verify                # verify existing copy\n"
             "  python copy_data_to_ram.py --cleanup               # remove RAM copy\n"
