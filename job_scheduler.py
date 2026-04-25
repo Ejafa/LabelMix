@@ -78,6 +78,12 @@ DEBUG_SUBDIR_NAME = "debug"
 PROFILE_LOGS_SUBDIR_NAME = "profile_logs"
 SCHEDULE_INFO_FILENAME = "schedule_info.yaml"
 
+# Batch size assumed by any legacy profile-cache entry that only stores a
+# plain ``<model_key>`` (no ``__bs<N>`` suffix).  Jobs whose batch size
+# differs from this default trigger a fresh profile run, while jobs at
+# this batch size continue to read the legacy entries unchanged.
+DEFAULT_BATCH_SIZE = 1024
+
 # ---------------------------------------------------------------------------
 # GPU memory query
 # ---------------------------------------------------------------------------
@@ -204,9 +210,67 @@ def extract_num_steps(job: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def extract_batch_size(job: Dict[str, Any]) -> Optional[int]:
+    """Extract the --batch-size value from a job's command string."""
+    cmd = job.get("cmd", "")
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+
+    for i, tok in enumerate(tokens):
+        if tok in ("--batch-size", "--batch_size") and i + 1 < len(tokens):
+            try:
+                return int(tokens[i + 1])
+            except ValueError:
+                return None
+        if tok.startswith("--batch-size=") or tok.startswith("--batch_size="):
+            try:
+                return int(tok.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def extract_profile_key(job: Dict[str, Any]) -> str:
+    """Return the cache key used for memory profiling.
+
+    - For jobs at the default batch size (``DEFAULT_BATCH_SIZE``) or with
+      an unparseable batch size, this is just the plain ``model_key``.
+      This keeps all pre-existing ``memory_profile.yaml`` entries valid.
+    - For jobs at any other batch size, we suffix ``__bs<N>`` so the
+      scheduler treats them as a separate VRAM class and runs a fresh
+      profile when the entry is missing from the cache.
+    """
+    model_key = extract_model_key(job)
+    bs = extract_batch_size(job)
+    if bs is None or bs == DEFAULT_BATCH_SIZE:
+        return model_key
+    return f"{model_key}__bs{bs}"
+
+
 # ---------------------------------------------------------------------------
 # Memory profiling via short test runs
 # ---------------------------------------------------------------------------
+
+def _pick_free_port() -> int:
+    """Ask the kernel for an ephemeral TCP port that is currently free.
+
+    Used to avoid rendezvous-endpoint collisions between consecutive (or
+    concurrent) profile runs.  A previously-used port can linger in
+    ``TIME_WAIT`` for ~60s, which causes the next ``torchrun`` to either
+    fail to bind or, worse, silently attach to the stale server and then
+    produce ``sendBytes failed ... Broken pipe`` /
+    ``TCPStore server has shut down too early`` warnings.
+
+    Note: there is a tiny TOCTOU window between closing this socket and
+    ``torchrun`` binding the port.  In practice this is not an issue for
+    short-lived profiling runs.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
 
 def _build_profile_cmd(
     job_cmd: str,
@@ -225,9 +289,10 @@ def _build_profile_cmd(
     """
     # Resolve placeholders
     cmd = job_cmd.replace("{gpus}", str(len(gpu_ids)))
-    cmd = job_cmd.replace("{gpus}", str(len(gpu_ids)))
-    # Use a fixed port for profiling
-    cmd = cmd.replace("{port}", "29400")
+    # Pick a free port at launch time to avoid rendezvous collisions
+    # between consecutive/concurrent profile runs (see _pick_free_port).
+    port = _pick_free_port()
+    cmd = cmd.replace("{port}", str(port))
     cmd = cmd.replace("{gpu_ids}", ",".join(str(g) for g in gpu_ids))
     cmd = cmd.replace("{job_name}", "profile_run")
     cmd = cmd.replace("{log_file}", "/dev/null")
@@ -626,13 +691,18 @@ def annotate_jobs_with_profile_metadata(
     annotated: List[Dict[str, Any]] = []
     for job in jobs:
         model_key = extract_model_key(job)
-        profile = model_profiles.get(model_key)
+        profile_key = extract_profile_key(job)
+        # Look up by the (model, batch-size) composite key first, then
+        # fall back to the plain model_key for backward compatibility
+        # with legacy memory_profile.yaml files that predate batch-size
+        # awareness (those implicitly assume ``DEFAULT_BATCH_SIZE``).
+        profile = model_profiles.get(profile_key) or model_profiles.get(model_key)
         if profile:
             mem_per_gpu = int(profile["peak_memory_mib"])
         else:
             mem_per_gpu = int(fallback_memory_mib)
             print(
-                f"  ⚠️  No profile for {model_key}, using conservative estimate: "
+                f"  ⚠️  No profile for {profile_key}, using conservative estimate: "
                 f"{mem_per_gpu} MiB/GPU"
             )
 
@@ -748,17 +818,24 @@ def schedule(
     print(f"   Output prefix: {file_prefix}_node_<i>_jobs.yaml")
 
     # ── Step 1: Identify unique models ──────────────────
+    # Group by (model_config, batch_size) composite key — jobs with the
+    # same model but different batch sizes are distinct VRAM classes and
+    # must be profiled separately.  The composite key degrades to the
+    # plain model key for the default batch size so existing caches keep
+    # working without migration.
     model_jobs: Dict[str, List[Dict[str, Any]]] = {}
     for job in jobs:
-        key = extract_model_key(job)
+        key = extract_profile_key(job)
         model_jobs.setdefault(key, []).append(job)
 
     print(f"\n🔍 Found {len(model_jobs)} unique model config(s):")
     for key, mjobs in model_jobs.items():
         num_steps = extract_num_steps(mjobs[0])
         steps_str = f", {num_steps} steps" if num_steps else ""
+        bs = extract_batch_size(mjobs[0])
+        bs_str = f", bs={bs}" if bs is not None else ""
         print(f"   {key}: {len(mjobs)} job(s), "
-              f"{mjobs[0].get('gpus', 1)} GPU(s)/job{steps_str}")
+              f"{mjobs[0].get('gpus', 1)} GPU(s)/job{steps_str}{bs_str}")
 
     # ── Step 2: Query LOCAL GPU memory (once) ──────────────
     # The scheduler profiles only on the local node.  All target nodes are

@@ -140,6 +140,7 @@ class DaemonConfig:
     saturation_checkpoints_passed: int = 0  # how many saturation checkpoints completed (for progressive wait)
     overcommit_rr_index: int = 0  # round-robin index for GPU pinning in overcommit mode
     fill_gpu_index: int = 0  # index into gpus list: the GPU group we are currently probing/filling
+    round_robin: bool = True  # round-robin GPU placement: advance fill_gpu_index after every launch in burst phase (spreads jobs evenly across GPUs instead of stacking on one GPU until OOM)
     prev_running: int = 0  # legacy FIFO state retained for backward-compatible persistence
     peak_memory_per_job: Optional[float] = None  # MiB: best estimate of memory per job from stabilized jobs
     last_checkpoint_burst_index: int = 0  # burst_jobs_launched at last successful saturation checkpoint
@@ -1878,6 +1879,7 @@ def daemon_main(args: argparse.Namespace) -> None:
     state.daemon.gpus = gpus
     state.daemon.max_concurrent = len(gpus)  # each job gets 1 GPU by default; overcommit shares all
     state.daemon.overcommit = True  # overcommit is always on
+    state.daemon.round_robin = bool(getattr(args, "round_robin", True))
     state.daemon.saturated = False
     state.daemon.saturation_time = None
     state.daemon.burst_phase = True
@@ -2468,11 +2470,26 @@ def daemon_main(args: argparse.Namespace) -> None:
                                     job.name)
                                 changed = True
 
+                                # Round-robin: after a successful launch,
+                                # advance fill_gpu_index by gpus_needed so
+                                # the next burst job starts on the next GPU
+                                # group. Without this, fill_gpu_index stays
+                                # put until the current group OOMs, which
+                                # crams all jobs onto the first GPU(s).
+                                # Use --no-round-robin to restore the
+                                # legacy fill-first behavior.
+                                if state.daemon.round_robin:
+                                    state.daemon.fill_gpu_index = (
+                                        (fill_idx + job.gpus_needed)
+                                        % num_gpus
+                                    )
+
                                 _log(
                                     f"🚀 BURST [{state.daemon.burst_jobs_launched}] "
                                     f"Launched {job.name} on GPU "
                                     f"{pin_gpus} (fill_gpu_index="
-                                    f"{fill_idx}, total running: "
+                                    f"{fill_idx}->{state.daemon.fill_gpu_index}, "
+                                    f"total running: "
                                     f"{running_count + 1})")
 
                                 # Quick sanity: died immediately?
@@ -2949,6 +2966,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"Max seconds to wait for a job's .training_started sentinel "
                          f"before falling back to GPU presence detection. "
                          f"(default: {DEFAULT_SENTINEL_TIMEOUT}s = 10 min)")
+    sp.add_argument("--round-robin", dest="round_robin",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Round-robin GPU placement in burst phase: advance "
+                         "fill_gpu_index by gpus_needed after every launch so "
+                         "jobs spread evenly across all GPUs instead of "
+                         "stacking on one GPU until it's full. Use "
+                         "--no-round-robin for the legacy fill-first behavior "
+                         "(fill GPU 0 to capacity, then GPU 1, etc.). "
+                         "Default: on.")
 
 
     # -- submit --

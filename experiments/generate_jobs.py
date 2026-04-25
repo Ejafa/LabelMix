@@ -4,12 +4,29 @@
 This script supports multiple datasets (ImageNet-1K, Places365, CIFAR-100) and
 allows for easy swapping between them via the --dataset argument.
 
-Usage::
+Usage Examples:
 
+# Basic runs (100 epochs, 10 warmup, batch 1024)
     python experiments/generate_jobs.py --dataset in1k
     python experiments/generate_jobs.py --dataset places365
     python experiments/generate_jobs.py --dataset cifar100
+
+# Long-run mode (300 epochs, 20 warmup, batch 1024)
+    python experiments/generate_jobs.py --dataset in1k --long-run
+    python experiments/generate_jobs.py --dataset places365 --long-run
+    python experiments/generate_jobs.py --dataset cifar100 --long-run
+
+# Custom parameters (override defaults)
+    python experiments/generate_jobs.py --dataset in1k --epochs 200 --warmup-epochs 15 --batch-size 512
+    python experiments/generate_jobs.py --dataset places365 --epochs 150 --warmup-epochs 5 --batch-size 2048
+
+# Multi-GPU and output file options
     python experiments/generate_jobs.py --dataset in1k --gpus-per-job 8 --output jobs.yaml
+    python experiments/generate_jobs.py --dataset in1k --gpus-per-job 4 --output custom_jobs.yaml
+
+# Advanced: Custom config directory and model selection
+    python experiments/generate_jobs.py --dataset in1k --config-dir ./custom_configs --models vit-base
+    python experiments/generate_jobs.py --dataset in1k --exclude-models resnet50 --seed 42
 """
 from __future__ import annotations
 
@@ -25,8 +42,33 @@ import yaml
 # Paths
 # ---------------------------------------------------------------------------
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_CONFIGS_DIR = os.path.join(_THIS_DIR, "labelmix_imagenet1k", "configs")
 _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
+
+# Per-dataset directory that holds the per-model YAML training configs.
+# Each entry must map a ``DATASET_CONFIGS`` key to a directory containing
+# one ``<model-tag>.yaml`` file per model listed in ``MODEL_CONFIGS``.
+# Datasets without their own config folder fall back to the ImageNet-1K
+# configs (see ``_resolve_configs_dir`` below).
+_DATASET_CONFIG_DIRS: Dict[str, str] = {
+    "in1k": os.path.join(_THIS_DIR, "labelmix_imagenet1k", "configs"),
+    "places365": os.path.join(_THIS_DIR, "labelmix_imagenet1k", "configs"),
+    "cifar100": os.path.join(_THIS_DIR, "labelmix_cifar100", "configs"),
+}
+
+# Default configs dir (ImageNet-1K) -- used as the fallback for datasets
+# that don't have a dedicated config folder yet, and as the build-time
+# default for ``MODEL_CONFIGS`` below (which is only used by
+# ``get_model_configs()`` when no dataset is specified).
+_CONFIGS_DIR = _DATASET_CONFIG_DIRS["in1k"]
+
+
+def _resolve_configs_dir(dataset_id: str) -> str:
+    """Return the configs directory for ``dataset_id``.
+
+    Falls back to the ImageNet-1K configs directory for any dataset not
+    explicitly registered in ``_DATASET_CONFIG_DIRS``.
+    """
+    return _DATASET_CONFIG_DIRS.get(dataset_id, _CONFIGS_DIR)
 
 # ---------------------------------------------------------------------------
 # Experiment family metadata
@@ -52,7 +94,8 @@ MODE = "max"
 # ---------------------------------------------------------------------------
 
 # Seeds to sweep over — each trial is replicated once per seed.
-SEEDS: List[int] = [42, 43, 44]
+# SEEDS: List[int] = [42, 43]
+SEEDS: List[int] = [42]
 
 # Image size used for every generated job (pinned, no sweep).
 IMG_SIZE: int = 256
@@ -97,7 +140,17 @@ MOSAIC_PROB: float = 0.5
 
 @dataclass
 class DatasetConfig:
-    """All dataset-specific CLI overrides plus metadata."""
+    """All dataset-specific CLI overrides plus metadata.
+
+    The scheduling-related fields (``num_steps``, ``warmup_steps``,
+    ``base_batch_size``) are **no longer hard-coded per dataset**.  They
+    are computed at job-generation time from the total number of
+    training epochs, warmup epochs and global batch size supplied on the
+    CLI (see ``--epochs`` / ``--warmup-epochs`` / ``--batch-size`` /
+    ``--long-run``).  Only ``balanced_mode`` (samples per class in the
+    balanced epoch) is pinned here because it is an intrinsic property
+    of the dataset, not a training schedule choice.
+    """
     dataset_id: str                        # short tag embedded in exp name & wandb tags
     dataset: str                           # --dataset value
     data_dir: str                          # --data-dir value
@@ -106,13 +159,20 @@ class DatasetConfig:
     input_key: str
     target_key: str
     num_classes: int
-    num_steps: int
-    warmup_steps: int
-    balanced_mode: int
+    balanced_mode: int                     # samples/class per balanced epoch (dataset-intrinsic)
     extra: Dict[str, Any] = field(default_factory=dict)  # any additional overrides
 
-    def to_overrides(self) -> Dict[str, Any]:
-        """Return a flat dict of CLI overrides for this dataset."""
+    def to_overrides(self, num_steps: int, warmup_steps: int) -> Dict[str, Any]:
+        """Return a flat dict of CLI overrides for this dataset.
+
+        Parameters
+        ----------
+        num_steps : int
+            Total training steps (computed by
+            :func:`compute_schedule`).
+        warmup_steps : int
+            Warmup steps (computed by :func:`compute_schedule`).
+        """
         d: Dict[str, Any] = {
             "dataset": self.dataset,
             "data_dir": self.data_dir,
@@ -122,8 +182,8 @@ class DatasetConfig:
             "target_key": self.target_key,
             "balanced_mode": self.balanced_mode,
             "num_classes": self.num_classes,
-            "num_steps": self.num_steps,
-            "warmup_steps": self.warmup_steps,
+            "num_steps": num_steps,
+            "warmup_steps": warmup_steps,
         }
         d.update(self.extra)
         return d
@@ -139,8 +199,6 @@ DATASET_CONFIGS: Dict[str, DatasetConfig] = {
         input_key="image",
         target_key="label",
         num_classes=1000,
-        num_steps=125000,
-        warmup_steps=12500,
         balanced_mode=1280,
     ),
     "places365": DatasetConfig(
@@ -155,8 +213,6 @@ DATASET_CONFIGS: Dict[str, DatasetConfig] = {
         input_key="image",
         target_key="labels",  # README: field is 'labels' (plural)
         num_classes=365,
-        num_steps=170702, # ~ 100 epochs (balanced_mode * 365 (amount of classes)) * 100 (epochs) / 1024 (batch size)
-        warmup_steps=17070, # ~ 10 epochs
         balanced_mode=4789,  # (1_839_960 (total images) * 0.95 (% of train images) / 365 (number of classes))
     ),
     "cifar100": DatasetConfig(
@@ -171,27 +227,101 @@ DATASET_CONFIGS: Dict[str, DatasetConfig] = {
         input_key="img",
         target_key="fine_label",
         num_classes=100,
-        # 50 000 train images / 1024 batch * 200 epochs ≈ 9 766 steps
-        num_steps=9766,
-        warmup_steps=977,   # ~10 epochs
         balanced_mode=500,  # 500 images per class (50 000 / 100 classes)
     ),
     # Add more datasets here as needed
 }
 
+
 # ---------------------------------------------------------------------------
-# Model configs: active model variants for this sweep.
+# Training-schedule defaults.
+#
+# ``num_steps`` and ``warmup_steps`` are *derived* from the total number
+# of training epochs, the warmup epoch count and the global batch size:
+#
+#   steps_per_epoch = ceil(balanced_mode * num_classes / batch_size)
+#   num_steps       = steps_per_epoch * epochs
+#   warmup_steps    = steps_per_epoch * warmup_epochs
+#
+# Two presets are supported (selected via ``--long-run``); each can be
+# overridden per-invocation on the CLI.
 # ---------------------------------------------------------------------------
 
+DEFAULT_EPOCHS: int = 100
+DEFAULT_WARMUP_EPOCHS: int = 10
+DEFAULT_BATCH_SIZE: int = 1024
+
+LONG_RUN_EPOCHS: int = 300
+LONG_RUN_WARMUP_EPOCHS: int = 20
+LONG_RUN_BATCH_SIZE: int = 1024
+
+
+def compute_schedule(
+    dataset_cfg: DatasetConfig,
+    epochs: int,
+    warmup_epochs: int,
+    batch_size: int,
+) -> tuple[int, int, int]:
+    """Compute ``(num_steps, warmup_steps, steps_per_epoch)`` for a run.
+
+    One balanced epoch = ``balanced_mode * num_classes`` samples.  The
+    number of optimizer steps per epoch is therefore ``ceil(balanced_mode
+    * num_classes / batch_size)``; training and warmup step counts are
+    just this scaled by the corresponding epoch counts.
+    
+    To minimize rounding error accumulation, ceil operations are performed
+    at the final step rather than early in the calculation.
+    """
+    if epochs <= 0:
+        raise ValueError(f"epochs must be positive, got {epochs}")
+    if warmup_epochs < 0:
+        raise ValueError(f"warmup_epochs must be non-negative, got {warmup_epochs}")
+    if warmup_epochs > epochs:
+        raise ValueError(
+            f"warmup_epochs ({warmup_epochs}) cannot exceed total epochs ({epochs})"
+        )
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    samples_per_epoch = dataset_cfg.balanced_mode * dataset_cfg.num_classes
+    
+    # Calculate total samples for training and warmup
+    total_samples = samples_per_epoch * epochs
+    warmup_samples = samples_per_epoch * warmup_epochs
+    
+    # Perform ceil division at the final step to minimize rounding error
+    num_steps = (total_samples + batch_size - 1) // batch_size
+    warmup_steps = (warmup_samples + batch_size - 1) // batch_size
+    steps_per_epoch = (samples_per_epoch + batch_size - 1) // batch_size
+    
+    return num_steps, warmup_steps, steps_per_epoch
+
+# ---------------------------------------------------------------------------
+# Model configs: active model variants for this sweep.
+#
+# The mapping below is keyed by *model tag* (``vit-wee``, ``vit-little``, ...)
+# and the value is the YAML filename *without* the dataset-specific directory
+# prefix.  ``get_model_configs(dataset_id)`` stitches the two together so
+# each dataset automatically resolves to the right configs folder
+# (``labelmix_imagenet1k/configs`` vs ``labelmix_cifar100/configs``).
+# ---------------------------------------------------------------------------
+
+MODEL_CONFIG_FILES: Dict[str, str] = {
+    "vit-medium": "vit-medium.yaml",
+    "vit-wee": "vit-wee.yaml",
+    "vit-little": "vit-little.yaml",
+    "vit-betwixt": "vit-betwixt.yaml",
+#    "convnextv2-base": "convnextv2-base.yaml",
+#    "convnextv2-tiny": "convnextv2-tiny.yaml",
+#    "resnet50": "resnet-50.yaml",
+#    "resnet101": "resnet-101.yaml",
+}
+
+# Backwards-compatible ImageNet-1K absolute-path map (unused internally, but
+# kept for any external script that imports ``MODEL_CONFIGS`` directly).
 MODEL_CONFIGS: Dict[str, str] = {
-    "vit-medium": os.path.join(_CONFIGS_DIR, "vit-medium.yaml"),
-    "vit-wee": os.path.join(_CONFIGS_DIR, "vit-wee.yaml"),
-    "vit-little": os.path.join(_CONFIGS_DIR, "vit-little.yaml"),
-    "vit-betwixt": os.path.join(_CONFIGS_DIR, "vit-betwixt.yaml"),
-#    "convnextv2-base": os.path.join(_CONFIGS_DIR, "convnextv2-base.yaml"),
-#    "convnextv2-tiny": os.path.join(_CONFIGS_DIR, "convnextv2-tiny.yaml"),
-#    "resnet50": os.path.join(_CONFIGS_DIR, "resnet-50.yaml"),
-#    "resnet101": os.path.join(_CONFIGS_DIR, "resnet-101.yaml"),
+    tag: os.path.join(_CONFIGS_DIR, fname)
+    for tag, fname in MODEL_CONFIG_FILES.items()
 }
 
 # Models whose constructors require img_size to be passed explicitly via
@@ -214,20 +344,30 @@ MODELS_REQUIRING_IMG_SIZE_KWARG: set[str] = {
 # Common overrides — broken into logical groups.
 # ---------------------------------------------------------------------------
 
-BASE_BATCH_SIZE = 1024
+def build_common_overrides(
+    nproc_per_experiment: int,
+    dataset_cfg: Optional[DatasetConfig] = None,
+    base_batch_size: int = DEFAULT_BATCH_SIZE,
+    num_steps: Optional[int] = None,
+    warmup_steps: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Build the merged common-overrides dict for one experiment family.
 
-
-def build_common_overrides(nproc_per_experiment: int, dataset_cfg: Optional[DatasetConfig] = None) -> Dict[str, Any]:
-    """Build the merged common-overrides dict for one experiment family."""
+    ``num_steps`` / ``warmup_steps`` must be precomputed by the caller
+    (see :func:`compute_schedule`) and are forwarded to
+    :meth:`DatasetConfig.to_overrides`.
+    """
     if dataset_cfg is None:
         raise ValueError("Dataset config must be provided")
-    
-    if BASE_BATCH_SIZE % nproc_per_experiment != 0:
+    if num_steps is None or warmup_steps is None:
+        raise ValueError("num_steps and warmup_steps must be provided")
+
+    if base_batch_size % nproc_per_experiment != 0:
         raise ValueError(
-            f"Base batch size {BASE_BATCH_SIZE} must be divisible by per-experiment "
-            f"GPU count ({nproc_per_experiment})."
+            f"Base batch size {base_batch_size} (dataset={dataset_cfg.dataset_id!r}) "
+            f"must be divisible by per-experiment GPU count ({nproc_per_experiment})."
         )
-    per_gpu_batch_size = BASE_BATCH_SIZE // nproc_per_experiment
+    per_gpu_batch_size = base_batch_size // nproc_per_experiment
 
     # Base training common (precision, batch, scheduling, logging)
     base_train_common: Dict[str, Any] = {
@@ -250,8 +390,11 @@ def build_common_overrides(nproc_per_experiment: int, dataset_cfg: Optional[Data
         "pin_mem": True,
     }
 
-    # Dataset args (sourced from DatasetConfig)
-    dataset_args: Dict[str, Any] = dataset_cfg.to_overrides()
+    # Dataset args (sourced from DatasetConfig; step counts are computed)
+    dataset_args: Dict[str, Any] = dataset_cfg.to_overrides(
+        num_steps=num_steps,
+        warmup_steps=warmup_steps,
+    )
 
     # LabelMix common args
     labelmix_common_args: Dict[str, Any] = {
@@ -297,9 +440,21 @@ def build_common_overrides(nproc_per_experiment: int, dataset_cfg: Optional[Data
     return merged
 
 
-def get_model_configs() -> Dict[str, str]:
-    """Return available model config paths for this family."""
-    return dict(MODEL_CONFIGS)
+def get_model_configs(dataset_id: Optional[str] = None) -> Dict[str, str]:
+    """Return available model config paths for the requested dataset.
+
+    Parameters
+    ----------
+    dataset_id : str | None
+        Dataset key (e.g. ``in1k``, ``cifar100``).  When ``None`` the
+        ImageNet-1K config paths are returned so callers that haven't
+        been updated keep working.
+    """
+    configs_dir = _resolve_configs_dir(dataset_id) if dataset_id else _CONFIGS_DIR
+    return {
+        tag: os.path.join(configs_dir, fname)
+        for tag, fname in MODEL_CONFIG_FILES.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +649,19 @@ def _read_config_model_kwargs(config_path: str) -> Dict[str, Any]:
     return dict(cfg.get("model_kwargs", {}))
 
 
+def _read_config_lr_base(config_path: str) -> Optional[float]:
+    """Read the ``lr_base`` scalar from a YAML config file.
+
+    Returns ``None`` if the key is absent. Used by ``--lr-multiplier`` to
+    scale each model's config-default learning rate when no explicit LR
+    sweep is active.
+    """
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f) or {}
+    val = cfg.get("lr_base", None)
+    return float(val) if val is not None else None
+
+
 def dict_to_cli_args(d: Dict[str, Any]) -> str:
     """Convert a dict of overrides to a CLI argument string."""
     parts: List[str] = []
@@ -529,6 +697,12 @@ def generate(
     bare: bool = False,
     noaug: bool = False,
     labelmix_variants: List[str] | None = None,
+    epochs: int = DEFAULT_EPOCHS,
+    warmup_epochs: int = DEFAULT_WARMUP_EPOCHS,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    lr_multiplier: float = 1.0,
+    batch_size_explicit: bool = False,
+    lr_multiplier_explicit: bool = False,
 ) -> None:
     """Expand the experiment grid and write ``jobs.yaml``.
 
@@ -564,6 +738,24 @@ def generate(
         List of LabelMix loss variants to emit.  Each entry must be a key of
         ``LABELMIX_LOSS_SPECS`` (``mixed``, ``pl``, ``sce``).  ``None`` or the
         empty list means no LabelMix trials are emitted.
+    epochs : int
+        Total training epochs.  Converted into ``--num-steps`` via
+        :func:`compute_schedule`.
+    warmup_epochs : int
+        Warmup epochs.  Converted into ``--warmup-steps`` via
+        :func:`compute_schedule`.
+    batch_size : int
+        Global (across-all-GPUs) batch size.  Divided by ``gpus_per_job``
+        to set the per-GPU ``--batch-size``.
+    batch_size_explicit : bool
+        Whether ``batch_size`` was explicitly set on the CLI. When True,
+        a ``bs=<N>`` token is appended to each experiment name so runs with
+        non-default batch sizes end up in distinct output folders.
+    lr_multiplier_explicit : bool
+        Whether ``lr_multiplier`` was explicitly set on the CLI (i.e.
+        differs from 1.0). When True, an ``lrx=<M>`` token is appended to
+        each experiment name so scaled-LR runs end up in distinct output
+        folders.
     """
     # Validate dataset selection
     if dataset not in DATASET_CONFIGS:
@@ -589,9 +781,33 @@ def generate(
         print(f"Prefixing output_root with 'output_runs/': {output_root}")
 
     # Load experiment config
-    model_configs = get_model_configs()
     dataset_cfg = DATASET_CONFIGS[dataset]
-    common_overrides = build_common_overrides(nproc_per_experiment=gpus_per_job, dataset_cfg=dataset_cfg)
+    num_steps, warmup_steps, steps_per_epoch = compute_schedule(
+        dataset_cfg=dataset_cfg,
+        epochs=epochs,
+        warmup_epochs=warmup_epochs,
+        batch_size=batch_size,
+    )
+    model_configs = get_model_configs(dataset_cfg.dataset_id)
+    # Fail fast with a helpful message if any resolved config is missing
+    # -- typically means the dataset's config folder does not yet contain
+    # the requested model YAML.
+    _missing_cfg_paths = [p for p in model_configs.values() if not os.path.isfile(p)]
+    if _missing_cfg_paths:
+        raise FileNotFoundError(
+            "The following model config files are missing for dataset "
+            f"{dataset_cfg.dataset_id!r}:\n  "
+            + "\n  ".join(_missing_cfg_paths)
+            + "\nEither add the missing YAML files or restrict the model "
+            "set via --model-filter."
+        )
+    common_overrides = build_common_overrides(
+        nproc_per_experiment=gpus_per_job,
+        dataset_cfg=dataset_cfg,
+        base_batch_size=batch_size,
+        num_steps=num_steps,
+        warmup_steps=warmup_steps,
+    )
 
     # Build LabelMix trials from the CLI-selected variants.  If none were
     # selected this starts empty; baseline / mosaic flavors below may
@@ -722,7 +938,7 @@ def generate(
     if model_filter:
         model_configs = {k: v for k, v in model_configs.items() if k in model_filter}
     if not model_configs:
-        all_models = list(get_model_configs().keys())
+        all_models = list(get_model_configs(dataset_cfg.dataset_id).keys())
         print(f"Error: No model configs matched filter. Available: {all_models}")
         sys.exit(1)
 
@@ -741,7 +957,13 @@ def generate(
 
     img_size: int = int(IMG_SIZE)
 
-    learning_rates: List[Optional[float]] = list(LEARNING_RATES) if LEARNING_RATES else [None]
+    # Apply --lr-multiplier to the explicit LEARNING_RATES sweep (if any).
+    # When LEARNING_RATES is empty, the per-model config's ``lr_base`` is
+    # scaled instead -- see the override-build block below.
+    if LEARNING_RATES:
+        learning_rates: List[Optional[float]] = [lr * lr_multiplier for lr in LEARNING_RATES]
+    else:
+        learning_rates = [None]
 
     # Compose tag list.  All augmentation-specific tags (baseline, mixup,
     # cutmix, bare, noaug, mosaic, labelmix-*) are attached *per trial* via
@@ -775,6 +997,10 @@ def generate(
                     ])
                     if tags_suffix:
                         name_parts.append(tags_suffix)
+                    if batch_size_explicit:
+                        name_parts.append(f"bs={batch_size}")
+                    if lr_multiplier_explicit:
+                        name_parts.append(f"lrx={lr_multiplier:g}")
                     if lr is not None:
                         name_parts.append(f"lr={lr:g}")
                     name_parts.append(base_exp_name)
@@ -875,6 +1101,17 @@ def generate(
                     all_overrides["output"] = output_root
                     if lr is not None:
                         all_overrides["lr_base"] = lr
+                    elif lr_multiplier != 1.0:
+                        # No explicit LR sweep -> scale the config's own
+                        # lr_base by --lr-multiplier so every config gets
+                        # its learning rate scaled uniformly.
+                        cfg_lr = _read_config_lr_base(config_path)
+                        if cfg_lr is None:
+                            raise ValueError(
+                                f"--lr-multiplier was set but config {config_path} "
+                                "has no 'lr_base' field to scale."
+                            )
+                        all_overrides["lr_base"] = cfg_lr * lr_multiplier
 
                     # Augment wandb_tags with the per-trial augmentation
                     # tags (baseline/mixup/cutmix/bare/noaug/mosaic/
@@ -972,11 +1209,22 @@ def generate(
     print(f"  Models: {list(model_configs.keys())}")
     print(f"  Image size: {img_size}")
     print(f"  Seeds: {SEEDS}")
-    print(f"  Learning rates: {LEARNING_RATES if LEARNING_RATES else '(config default)'}")
+    if LEARNING_RATES:
+        print(f"  Learning rates: {learning_rates}  (multiplier: {lr_multiplier})")
+    elif lr_multiplier != 1.0:
+        print(f"  Learning rates: (config lr_base * {lr_multiplier})")
+    else:
+        print(f"  Learning rates: (config default)")
     print(f"  Candidate configs/model: {len(candidate_trials)}")
     print(f"  Tags: {effective_tags if effective_tags else '(none)'}")
     print(f"  GPUs/job: {gpus_per_job}")
     print(f"  Output root: {output_root}")
+    print(f"  Epochs: {epochs} (warmup: {warmup_epochs})")
+    print(f"  Batch size (global): {batch_size}  (per-GPU: {batch_size // gpus_per_job})")
+    print(
+        f"  Schedule: steps_per_epoch={steps_per_epoch}  "
+        f"num_steps={num_steps}  warmup_steps={warmup_steps}"
+    )
     print()
     print("Next steps:")
     print(f"  python jobdaemon.py submit {output_path}")
@@ -1010,7 +1258,8 @@ def main() -> None:
         "--gpus-per-job",
         type=int,
         default=1,
-        help="GPUs per job (default: 1). Affects --batch-size via BASE_BATCH_SIZE.",
+        help="GPUs per job (default: 1). Affects --batch-size via the "
+             "dataset's base_batch_size (see DatasetConfig).",
     )
     parser.add_argument(
         "-o",
@@ -1096,6 +1345,54 @@ def main() -> None:
              "cutmix, bare, noaug and mosaic. Overrides / unions with any "
              "individually-set flags.",
     )
+    # -------------------------------------------------------------------
+    # Training-schedule knobs.  ``num_steps`` and ``warmup_steps`` are
+    # computed from these (see compute_schedule()).  Only balanced_mode
+    # stays pinned per dataset.
+    # -------------------------------------------------------------------
+    parser.add_argument(
+        "--long-run",
+        action="store_true",
+        help=f"Use the long-run preset: {LONG_RUN_EPOCHS} epochs, "
+             f"{LONG_RUN_WARMUP_EPOCHS} warmup epochs, batch size "
+             f"{LONG_RUN_BATCH_SIZE}. Default is "
+             f"{DEFAULT_EPOCHS} epochs / {DEFAULT_WARMUP_EPOCHS} warmup / "
+             f"batch {DEFAULT_BATCH_SIZE}. Individual --epochs / "
+             f"--warmup-epochs / --batch-size flags override these.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Total training epochs. Overrides the preset default "
+             f"({DEFAULT_EPOCHS} normal, {LONG_RUN_EPOCHS} with --long-run).",
+    )
+    parser.add_argument(
+        "--warmup-epochs",
+        type=int,
+        default=None,
+        help="Warmup epochs. Overrides the preset default "
+             f"({DEFAULT_WARMUP_EPOCHS} normal, {LONG_RUN_WARMUP_EPOCHS} "
+             "with --long-run).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Global (across-all-GPUs) batch size. Overrides the preset "
+             f"default ({DEFAULT_BATCH_SIZE} in both presets). Per-GPU "
+             "batch size = batch_size // gpus_per_job.",
+    )
+    parser.add_argument(
+        "--lr-multiplier",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to every learning rate. When "
+             "LEARNING_RATES is non-empty, each swept LR is multiplied. "
+             "Otherwise (default), each model config's own 'lr_base' is "
+             "multiplied. Default: 1.0 (no change). Example: "
+             "--lr-multiplier 1.5 scales all LRs by 1.5x.",
+    )
     args = parser.parse_args()
 
     # --all is shorthand for turning on every augmentation flavor.  We
@@ -1122,6 +1419,26 @@ def main() -> None:
     # combinations on a *single* trial (e.g. mosaic+labelmix on the same
     # trial), but trials themselves can be freely mixed.
 
+    # Resolve training-schedule preset (--long-run) and apply per-flag
+    # overrides.  CLI flags take priority over the preset defaults.
+    if args.long_run:
+        preset_epochs = LONG_RUN_EPOCHS
+        preset_warmup = LONG_RUN_WARMUP_EPOCHS
+        preset_batch = LONG_RUN_BATCH_SIZE
+    else:
+        preset_epochs = DEFAULT_EPOCHS
+        preset_warmup = DEFAULT_WARMUP_EPOCHS
+        preset_batch = DEFAULT_BATCH_SIZE
+    epochs = args.epochs if args.epochs is not None else preset_epochs
+    warmup_epochs = args.warmup_epochs if args.warmup_epochs is not None else preset_warmup
+    batch_size = args.batch_size if args.batch_size is not None else preset_batch
+
+    # Track whether the user explicitly set batch size / lr multiplier on
+    # the CLI so we can embed them in the experiment name (and therefore
+    # output folder) to keep non-default runs from colliding with defaults.
+    batch_size_explicit = args.batch_size is not None
+    lr_multiplier_explicit = args.lr_multiplier != 1.0
+
     generate(
         dataset=args.dataset,
         gpus_per_job=args.gpus_per_job,
@@ -1136,6 +1453,12 @@ def main() -> None:
         bare=args.bare,
         noaug=args.noaug,
         labelmix_variants=args.labelmix_variants,
+        epochs=epochs,
+        warmup_epochs=warmup_epochs,
+        batch_size=batch_size,
+        lr_multiplier=args.lr_multiplier,
+        batch_size_explicit=batch_size_explicit,
+        lr_multiplier_explicit=lr_multiplier_explicit,
     )
 
 

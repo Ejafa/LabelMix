@@ -144,3 +144,5 @@ miniconda3
 old_jobs
 in1k-main
 mixed_loss
+
+detectron2_vitdet/datasets

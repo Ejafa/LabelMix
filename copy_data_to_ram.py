@@ -9,6 +9,11 @@ For places365, run ``convert_places365_to_arrow.py`` first to pre-convert the
 parquet source into Arrow datasets on disk. Then this script simply copies the
 pre-built Arrow directories to /dev/shm — just like imagenet-1k.
 
+For cifar100, run ``convert_cifar100_to_arrow.py`` first for the same reason:
+it turns the parquet source into ``arrow/train/`` and ``arrow/test/`` that
+``reader_hfds.py`` loads instantly via ``load_from_disk()``, so the
+"Generating train split" step disappears from every launch.
+
 Usage::
 
     python copy_data_to_ram.py                          # copy imagenet-1k (default)
@@ -29,8 +34,8 @@ Supported datasets and their default paths:
       dst: /dev/shm/places365/arrow
 
     cifar100:
-      src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/cifar100/cifar100
-      dst: /dev/shm/cifar100
+      src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/cifar100/arrow
+      dst: /dev/shm/cifar100/arrow
 """
 from __future__ import annotations
 
@@ -60,13 +65,13 @@ DATASETS: dict[str, dict[str, str]] = {
         "dst": "/dev/shm/places365/arrow",
     },
     "cifar100": {
-        # Parquet-based HuggingFace dataset (train + test splits, ~170 MB total).
-        # The inner cifar100/ subdirectory contains the actual parquet files;
-        # we copy that directory directly so /dev/shm/cifar100/ holds the
-        # parquet files at the top level, matching the data_dir expected by
-        # generate_jobs.py.
-        "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/cifar100/cifar100",
-        "dst": "/dev/shm/cifar100",
+        # Pre-converted Arrow datasets (run convert_cifar100_to_arrow.py first).
+        # Source is the arrow/ subdirectory; destination mirrors the structure
+        # so that reader_hfds.py finds <data_dir>/arrow/<split>/ at runtime and
+        # uses the instant load_from_disk() fast path instead of regenerating
+        # the train/test split from parquet on every launch.
+        "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/cifar100/arrow",
+        "dst": "/dev/shm/cifar100/arrow",
     },
 }
 
