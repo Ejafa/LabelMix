@@ -11,7 +11,7 @@ Given a directory of backed-up LabelMix runs (as produced by
 3. converts the timm checkpoint into the ViTDet-compatible layout with
    :mod:`convert_timm_to_vitdet` (result is cached on disk),
 4. launches ``train_net.py`` with the matching
-   ``configs/COCO/mask_rcnn_vitdet_<variant>_100ep.py`` recipe (or, with
+   ``configs/COCO/mask_rcnn_vitdet_<variant>_30ep.py`` recipe (or, with
    ``--eval-only``, just evaluates an existing ``model_final.pth``),
 5. aggregates the COCO AP numbers from every run's ``metrics.json`` into
    one summary CSV.
@@ -60,6 +60,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
+# Ensure DETECTRON2_DATASETS is set *before* we spawn any train_net.py
+# subprocesses, so they inherit it via os.environ automatically.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _coco_env import ensure_detectron2_datasets  # noqa: E402
+
+ensure_detectron2_datasets()
+
 
 # ---------------------------------------------------------------------------
 # Paths / constants
@@ -74,10 +81,9 @@ DEFAULT_OUTPUT_DIR = THIS_DIR / "output"
 DEFAULT_SUMMARY_CSV = THIS_DIR / "output" / "vitdet_eval_summary.csv"
 
 #: Map timm model name (as written in args.yaml) to ViTDet variant tag.
+#: Only ``wee`` and ``betwixt`` are supported for object detection.
 MODEL_TO_VARIANT: Dict[str, str] = {
     "vit_wee_patch16_reg1_gap_256":     "wee",
-    "vit_little_patch16_reg4_gap_256":  "little",
-    "vit_medium_patch16_reg1_gap_256":  "medium",
     "vit_betwixt_patch16_reg4_gap_256": "betwixt",
 }
 
@@ -269,7 +275,7 @@ def _build_train_cmd(
     eval_only: bool,
     extra_overrides: List[str],
 ) -> List[str]:
-    cfg = CONFIG_DIR / f"mask_rcnn_vitdet_{run.variant}_100ep.py"
+    cfg = CONFIG_DIR / f"mask_rcnn_vitdet_{run.variant}_30ep.py"
     cmd = [
         "torchrun",
         f"--nproc_per_node={num_gpus}",
@@ -280,9 +286,21 @@ def _build_train_cmd(
     ]
     if eval_only:
         cmd.append("--eval-only")
+    # Hydra's override parser rejects un-quoted ``=`` inside the VALUE of a
+    # ``key=value`` override ("mismatched input '=' expecting <EOF>"),
+    # which bites us for checkpoint paths like
+    # ``…/baseline_seed=42__runid-xyz.pth``.  Wrap values containing ``=``
+    # in double quotes so Hydra takes them literally.  Argv-style exec
+    # means no outer shell is involved, so the quotes go straight into
+    # Hydra's input.
+    def _q(key: str, value: str) -> str:
+        if "=" in value or " " in value:
+            return f'{key}="{value}"'
+        return f"{key}={value}"
+
     cmd.extend([
-        f"train.init_checkpoint={init_ckpt}",
-        f"train.output_dir={output_dir}",
+        _q("train.init_checkpoint", str(init_ckpt)),
+        _q("train.output_dir",     str(output_dir)),
     ])
     cmd.extend(extra_overrides)
     return cmd

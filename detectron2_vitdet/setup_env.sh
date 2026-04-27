@@ -191,7 +191,25 @@ python -m pip install \
     "matplotlib" \
     "Pillow" \
     "timm>=0.9" \
+    "PyYAML>=6.0" \
+    "shapely>=2.0" \
+    "fairscale>=0.4.13" \
     "numpy<2"   # detectron2 has a few spots that still assume numpy 1.x
+
+# NOTE: shapely is lazy-imported by fvcore.transforms.Transform.apply_polygons
+# (see fvcore/transforms/transform.py). It only gets pulled in when an
+# augmentation has to re-project polygon annotations — which is exactly what
+# happens for COCO instance-segmentation runs (ViTDet). bbox-only runs never
+# touch that code path, so a shapely-less env silently "works" until the
+# first mask-RCNN job. Pin it alongside the other fvcore / detectron2 deps.
+
+# NOTE: fairscale is required ONLY when ViTDet configs set
+# `use_act_checkpoint=True` on the ViT backbone. detectron2's
+# detectron2/modeling/backbone/vit.py does `from fairscale.nn.checkpoint import
+# checkpoint_wrapper` lazily inside the ViT constructor, so a fairscale-less
+# env works fine for checkpointing-off runs and crashes at model build time
+# for checkpointing-on runs. All LabelMix ViTDet configs (vit_wee / vit_betwixt
+# 30ep) enable activation checkpointing by default to fit comfortably in VRAM.
 
 # Re-pin numpy AFTER everything else, because opencv/headless/etc. routinely
 # pull in numpy 2.x as a newer candidate and silently upgrade it. torch 2.1.2

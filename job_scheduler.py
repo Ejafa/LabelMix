@@ -166,13 +166,13 @@ def extract_model_key(job: Dict[str, Any]) -> str:
     except ValueError:
         tokens = cmd.split()
 
-    # Look for --config or -c flag
+    # Look for --config, --config-file or -c flag
     for i, tok in enumerate(tokens):
-        if tok in ("--config", "-c") and i + 1 < len(tokens):
+        if tok in ("--config", "--config-file", "-c") and i + 1 < len(tokens):
             config_path = tokens[i + 1]
             # Use the basename without extension as the model key
             return os.path.splitext(os.path.basename(config_path))[0]
-        if tok.startswith("--config="):
+        if tok.startswith("--config=") or tok.startswith("--config-file="):
             config_path = tok.split("=", 1)[1]
             return os.path.splitext(os.path.basename(config_path))[0]
 
@@ -229,6 +229,12 @@ def extract_batch_size(job: Dict[str, Any]) -> Optional[int]:
                 return int(tok.split("=", 1)[1])
             except ValueError:
                 return None
+        # Detectron2 LazyConfig override form (positional key=value).
+        if tok.startswith("dataloader.train.total_batch_size="):
+            try:
+                return int(tok.split("=", 1)[1])
+            except ValueError:
+                return None
     return None
 
 
@@ -272,7 +278,171 @@ def _pick_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _is_detectron2_cmd(cmd: str) -> bool:
+    """Heuristic: does this job use the detectron2 ``train_net.py`` entry?
+
+    The timm-based jobs use ``torchrun ... train.py --config ...`` with
+    ``--num-steps`` / ``--batch-size`` dash-flags, whereas detectron2
+    ViTDet jobs use ``python train_net.py --config-file ...`` with
+    positional LazyConfig ``key=value`` overrides.  We detect the latter
+    by the presence of ``--config-file`` / ``train_net.py`` / ``--num-gpus``
+    which are unique to the detectron2 entry point.
+    """
+    return (
+        "--config-file" in cmd
+        or "train_net.py" in cmd
+        or "--num-gpus" in cmd
+    )
+
+
+def _build_profile_cmd_detectron2(
+    job_cmd: str,
+    profile_steps: int,
+    gpu_ids: List[int],
+) -> Tuple[str, Dict[str, str]]:
+    """Build a short profile run for a detectron2 ``train_net.py`` job.
+
+    Strategy:
+    - Resolve ``{gpus}`` / ``{port}`` placeholders the usual way.
+    - Replace ``--num-gpus {gpus}`` with the chosen GPU count.
+    - Rewrite / inject LazyConfig overrides to cap the run:
+        * ``train.max_iter=<profile_steps>``
+        * ``train.eval_period=0``
+        * ``train.log_period=1``
+        * ``train.checkpointer.period=10000000`` (effectively disabled)
+        * ``train.output_dir=/tmp/profile_runs/<model_key>``
+    - Keep the original ``train.init_checkpoint`` so profiling reflects
+      realistic memory (the backbone weights get loaded).
+    - Set ``CUDA_VISIBLE_DEVICES`` to the chosen GPUs and
+      ``--num-gpus`` to ``len(gpu_ids)`` — detectron2's ``launch()``
+      picks the first N visible devices.
+
+    Unlike the timm profiler, we do not touch any CLI dash-flags beyond
+    the placeholders — all ViTDet hyperparameters live in the LazyConfig
+    and are adjusted via ``key=value`` overrides appended to the cmd.
+    """
+    # Resolve placeholders
+    cmd = job_cmd.replace("{gpus}", str(len(gpu_ids)))
+    port = _pick_free_port()
+    cmd = cmd.replace("{port}", str(port))
+    cmd = cmd.replace("{gpu_ids}", ",".join(str(g) for g in gpu_ids))
+    cmd = cmd.replace("{job_name}", "profile_run")
+    cmd = cmd.replace("{log_file}", "/dev/null")
+
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+
+    # Drop (override) any key=value tokens the user set — we rebuild them
+    # ourselves so the profile run is small and self-contained.  Everything
+    # else (``python``, ``train_net.py``, ``--config-file FOO``,
+    # ``--num-gpus N``, ``--dist-url ...``) is preserved.
+    _SUPPRESS_KEYS = {
+        "train.max_iter",
+        "train.eval_period",
+        "train.log_period",
+        "train.checkpointer.period",
+        "train.output_dir",
+    }
+
+    def _is_suppressed_override(tok: str) -> bool:
+        if "=" not in tok:
+            return False
+        key = tok.split("=", 1)[0]
+        return key in _SUPPRESS_KEYS
+
+    filtered: List[str] = [t for t in tokens if not _is_suppressed_override(t)]
+
+    # Derive a model-key fragment for the profile output dir.
+    model_key = "profile"
+    for i, tok in enumerate(filtered):
+        if tok in ("--config-file", "--config") and i + 1 < len(filtered):
+            model_key = os.path.splitext(os.path.basename(filtered[i + 1]))[0]
+            break
+        if tok.startswith("--config-file=") or tok.startswith("--config="):
+            model_key = os.path.splitext(os.path.basename(tok.split("=", 1)[1]))[0]
+            break
+
+    profile_output_dir = f"/tmp/profile_runs/{model_key}"
+
+    # Append short-run overrides.  These go LAST so they win against any
+    # that might have been baked into the config file.
+    filtered.extend([
+        f"train.max_iter={profile_steps}",
+        "train.eval_period=0",
+        "train.log_period=1",
+        "train.checkpointer.period=10000000",
+        f"train.output_dir={profile_output_dir}",
+    ])
+
+    # Defensive Hydra-override quoting.
+    #
+    # Hydra's LazyConfig override parser rejects an un-quoted ``=`` inside
+    # the VALUE of a ``key=value`` token with
+    #   OverrideParseException: mismatched input '=' expecting <EOF>
+    # This bites us for checkpoint paths generated by the backup pipeline
+    # (e.g. ``…/baseline_seed=42__runid-xyz.pth``).  We re-wrap any such
+    # value in double quotes so Hydra takes it as a literal string.
+    # ``shlex.split``/``shlex.quote`` preserve the inner quotes intact
+    # because the outer quoting they use is single-quotes.
+    def _quote_bad_override(tok: str) -> str:
+        if "=" not in tok or tok.startswith("--"):
+            return tok
+        key, _, value = tok.partition("=")
+        # Only re-quote if the value still contains an '=' AND it isn't
+        # already wrapped in matching quotes.
+        if "=" not in value:
+            return tok
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            return tok
+        escaped = value.replace('"', r"\"")
+        return f'{key}="{escaped}"'
+
+    filtered = [_quote_bad_override(t) for t in filtered]
+
+    # Force the subprocess to use the SAME Python interpreter the scheduler
+    # is running under, instead of resolving the bare word "python" via PATH.
+    # Without this pin, a user who `conda activate det2`-ed in one shell and
+    # launched the scheduler from a different one (or under any wrapper that
+    # scrubs PATH) will see the child resolve `python` to the system binary
+    # and fail with `ModuleNotFoundError: No module named 'detectron2'`,
+    # even though the env itself is fully installed.
+    if filtered and filtered[0] in ("python", "python3"):
+        filtered[0] = sys.executable
+
+    resolved_cmd = " ".join(shlex.quote(t) for t in filtered)
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+    # Keep HF datasets offline to avoid surprise network hits, matching
+    # the timm profile builder.
+    env.setdefault("HF_DATASETS_OFFLINE", "1")
+
+    return resolved_cmd, env
+
+
 def _build_profile_cmd(
+    job_cmd: str,
+    profile_steps: int,
+    gpu_ids: List[int],
+) -> Tuple[str, Dict[str, str]]:
+    """Build a short test-run command from a job's command template.
+
+    Dispatches to the detectron2-dialect builder when the job uses
+    ``train_net.py`` / ``--config-file`` / ``--num-gpus``, and otherwise
+    falls back to the original timm-dialect builder below.
+
+    Returns (resolved_cmd, env_dict).
+    """
+    if _is_detectron2_cmd(job_cmd):
+        return _build_profile_cmd_detectron2(job_cmd, profile_steps, gpu_ids)
+    return _build_profile_cmd_timm(job_cmd, profile_steps, gpu_ids)
+
+
+def _build_profile_cmd_timm(
     job_cmd: str,
     profile_steps: int,
     gpu_ids: List[int],
@@ -423,7 +593,13 @@ def _build_profile_cmd(
         if tok.startswith("--output="):
             final_tokens.append("--output=/tmp/profile_runs")
             continue
-        final_tokens.append(tok)
+            final_tokens.append(tok)
+
+    # Mirror the detectron2 profiler: pin `python` to the scheduler's own
+    # interpreter so we never depend on whatever `python` happens to be
+    # first on PATH inside the subprocess.
+    if final_tokens and final_tokens[0] in ("python", "python3"):
+        final_tokens[0] = sys.executable
 
     resolved_cmd = " ".join(shlex.quote(t) for t in final_tokens)
 
@@ -759,7 +935,7 @@ def schedule(
     schedule_name: Optional[str] = None,
     profile_steps: int = 20,
     profile_gpu: int = 0,
-    working_dir: str = ".",
+    working_dir: Optional[str] = None,
     skip_profile: bool = False,
 ) -> None:
     """Profile models locally, annotate jobs, and split across ``num_nodes``.
@@ -785,7 +961,7 @@ def schedule(
     profile_gpu : int
         Starting GPU index for profiling selection (default: 0).
         Multi-GPU jobs use consecutive indices from this start.
-    working_dir : str
+    working_dir : Optional[str]
         Working directory for profile runs.
     skip_profile : bool
         If True, skip profiling even if no cache exists (use conservative estimates).
@@ -812,9 +988,31 @@ def schedule(
         if "gpus" not in job:
             job["gpus"] = default_gpus
 
+    # Resolve the effective working directory for profile subprocesses.
+    # Precedence (highest first):
+    #   1. CLI --working-dir (explicit user override)
+    #   2. defaults.working_dir in the input YAML (set by generate_vitdet_jobs
+    #      et al. so scripts living in sub-packages like ``detectron2_vitdet/``
+    #      are invoked from their own directory)
+    #   3. current working directory (``.``)
+    # Per-job ``working_dir`` overrides are honoured further down when the
+    # representative job is actually profiled.
+    cli_working_dir = working_dir
+    yaml_default_working_dir = defaults.get("working_dir")
+    effective_working_dir = (
+        cli_working_dir
+        or yaml_default_working_dir
+        or "."
+    )
+
     print(f"\n📋 Loaded {total_jobs} job(s) from {input_path}")
     print(f"   Defaults: gpus={default_gpus}, "
           f"max_retries={defaults.get('max_retries', 3)}")
+    if yaml_default_working_dir and not cli_working_dir:
+        print(f"   Profile cwd: {effective_working_dir}  "
+              f"(from defaults.working_dir)")
+    elif cli_working_dir:
+        print(f"   Profile cwd: {effective_working_dir}  (from --working-dir)")
     print(f"   Output prefix: {file_prefix}_node_<i>_jobs.yaml")
 
     # ── Step 1: Identify unique models ──────────────────
@@ -916,11 +1114,15 @@ def schedule(
                       f"got {profile_gpu_ids}. Using conservative estimate.")
                 peak = None
             else:
+                job_working_dir = (
+                    representative.get("working_dir")
+                    or effective_working_dir
+                )
                 peak = profile_model_memory(
                     representative_job=representative,
                     use_gpus=profile_gpu_ids,
                     profile_steps=profile_steps,
-                    working_dir=working_dir,
+                    working_dir=job_working_dir,
                     profile_log_dir=profile_log_dir,
                 )
             if peak is not None:
@@ -1208,8 +1410,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--working-dir",
-        default=".",
-        help="Working directory for profile runs (default: cwd)",
+        default=None,
+        help="Working directory for profile runs. If omitted, the scheduler "
+             "uses the input YAML's defaults.working_dir (or per-job "
+             "working_dir), falling back to cwd.",
     )
 
     parser.add_argument(

@@ -1,8 +1,8 @@
 # ViTDet Object Detection for LabelMix ViTs
 
-This folder evaluates the LabelMix pre-trained ViT backbones (`vit-wee`,
-`vit-little`, `vit-medium`, `vit-betwixt`) on COCO object detection + instance
-segmentation, using the official
+This folder evaluates the LabelMix pre-trained ViT backbones (`vit-wee` and
+`vit-betwixt` -- the only two backbones used for downstream object detection)
+on COCO object detection + instance segmentation, using the official
 [Detectron2 ViTDet recipe](https://github.com/facebookresearch/detectron2/tree/main/projects/ViTDet).
 
 It provides:
@@ -13,8 +13,11 @@ It provides:
   state-dict layout expected by Detectron2's `ViT` backbone (drops the
   classification head + register tokens, fuses LayerScale into the adjacent
   projections, etc.).
-* `configs/COCO/mask_rcnn_vitdet_<variant>_100ep.py` – LazyConfig training
-  recipes for each supported backbone (`wee`, `little`, `medium`, `betwixt`).
+* `configs/COCO/mask_rcnn_vitdet_<variant>_30ep.py` – LazyConfig training
+  recipes for each supported backbone (`wee`, `betwixt`). 30 epochs of
+  cosine-decayed LR at batch 256 / 256x256 inputs, suitable for
+  ablation-style sweeps. Override ``train.max_iter`` / ``lr_multiplier``
+  via ``build_schedule(epochs=100)`` for a full confirmation run.
 * `train_net.py` – training / evaluation driver built on Detectron2's
   `lazyconfig_train_net.py`.
 
@@ -76,51 +79,50 @@ channel-wise diagonal scaling that commutes with the following residual add).
 
 ## 4. Train ViTDet
 
-Single node, 8 GPUs:
+Single node, 4 GPUs:
 
 ```bash
 python train_net.py \
-    --config-file configs/COCO/mask_rcnn_vitdet_wee_100ep.py \
-    --num-gpus 8 \
+    --config-file configs/COCO/mask_rcnn_vitdet_wee_30ep.py \
+    --num-gpus 4 \
     train.init_checkpoint=./converted/vit_wee_in1k.pth \
     train.output_dir=./output/vit_wee_vitdet
 ```
 
-Swap the config for `mask_rcnn_vitdet_little_100ep.py`,
-`mask_rcnn_vitdet_medium_100ep.py`, or `mask_rcnn_vitdet_betwixt_100ep.py` for
-the other backbones.
+Swap the config for `mask_rcnn_vitdet_betwixt_30ep.py` to train the other
+supported backbone.
 
-### Standard ViTDet recipe (unchanged from the paper)
+### Standard ViTDet recipe (adapted for ablation sweeps)
 
 | Hyper-parameter              | Value                                   |
 |------------------------------|-----------------------------------------|
-| Image size                   | 1024 × 1024 with Large-Scale Jittering  |
-| Batch size                   | 64                                      |
-| Max iterations               | 184 375 (≈ 100 epochs)                  |
+| Image size                   | 256 × 256 with Large-Scale Jittering    |
+| Batch size                   | 256                                     |
+| Max iterations               | 13 830 (≈ 30 epochs)                    |
 | Optimizer                    | AdamW                                   |
-| LR schedule                  | MultiStep × Warmup (250 iters)          |
-| LR milestones                | 163 889 / 177 546                       |
+| LR schedule                  | Cosine × Warmup (250 iters)             |
+| LR decay endpoint            | 0.01 × base_lr at training end          |
 | Layer-wise LR decay          | 0.7                                     |
 | `pos_embed` weight decay     | 0.0                                     |
 | Window size                  | 14 (global attn every `depth/4` blocks) |
 
-Override anything on the command line using LazyConfig syntax, e.g.:
+For a full 100-epoch confirmation run, override from the CLI:
 
 ```bash
-python train_net.py --config-file configs/COCO/mask_rcnn_vitdet_medium_100ep.py \
-    --num-gpus 8 \
-    train.init_checkpoint=./converted/vit_medium_in1k.pth \
-    train.max_iter=92187 \
-    dataloader.train.total_batch_size=32 \
-    optimizer.lr=8e-5
+python train_net.py --config-file configs/COCO/mask_rcnn_vitdet_betwixt_30ep.py \
+    --num-gpus 4 \
+    train.init_checkpoint=./converted/vit_betwixt_in1k.pth \
+    train.max_iter=46094 \
+    dataloader.train.total_batch_size=256 \
+    optimizer.lr=2e-4
 ```
 
 ## 5. Evaluate only
 
 ```bash
 python train_net.py \
-    --config-file configs/COCO/mask_rcnn_vitdet_wee_100ep.py \
-    --num-gpus 8 --eval-only \
+    --config-file configs/COCO/mask_rcnn_vitdet_wee_30ep.py \
+    --num-gpus 4 --eval-only \
     train.init_checkpoint=./output/vit_wee_vitdet/model_final.pth
 ```
 
@@ -133,8 +135,8 @@ If you have a directory of LabelMix runs produced by
 aggregate pipeline in one shot:
 
 ```bash
-# Train + evaluate every backed-up run (8 GPUs per run):
-python eval_all.py --backup-root ../backup --num-gpus 8
+# Train + evaluate every backed-up run (4 GPUs per run):
+python eval_all.py --backup-root ../backup --num-gpus 4
 
 # Dry-run first, to see what would be launched:
 python eval_all.py --backup-root ../backup --dry-run
@@ -144,7 +146,7 @@ python eval_all.py --backup-root ../backup --summary-only
 
 # Restrict to one variant / pattern, keep going on individual failures:
 python eval_all.py --backup-root ../backup \
-    --include-variants wee little \
+    --include-variants wee \
     --include-pattern "seed=42" \
     --continue-on-error
 ```
@@ -152,8 +154,8 @@ python eval_all.py --backup-root ../backup \
 What it does per-run:
 
 1. Parses `args.yaml` to pick the matching backbone variant
-   (`vit_wee` / `vit_little` / `vit_medium` / `vit_betwixt`) and its
-   `configs/COCO/mask_rcnn_vitdet_<variant>_100ep.py` recipe.
+   (`vit_wee` / `vit_betwixt`) and its
+   `configs/COCO/mask_rcnn_vitdet_<variant>_30ep.py` recipe.
 2. Calls `convert_timm_to_vitdet.py` (cached in `./converted/`).
 3. Runs `torchrun ... train_net.py ...` with
    `train.init_checkpoint` / `train.output_dir` set appropriately.
@@ -173,11 +175,9 @@ Useful knobs: `--use-ema`, `--eval-only`, `--force-convert`,
 | Variant    | `embed_dim` | `depth` | `num_heads` | `mlp_ratio` | reg. tokens |
 |------------|------------:|--------:|------------:|------------:|------------:|
 | vit-wee    |         256 |      14 |           4 |         5.0 |           1 |
-| vit-little |         320 |      14 |           5 |         5.6 |           4 |
-| vit-medium |         512 |      12 |           8 |         4.0 |           1 |
 | vit-betwixt|         640 |      12 |          10 |         4.0 |           4 |
 
-(All variants use `patch_size=16`, absolute position embedding, `qkv_bias=True`,
+(Both variants use `patch_size=16`, absolute position embedding, `qkv_bias=True`,
 and were pre-trained at 256×256 on ImageNet-1k.)
 
 ## Troubleshooting

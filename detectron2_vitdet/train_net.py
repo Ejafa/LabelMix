@@ -5,19 +5,19 @@ This is a minimal port of ``detectron2/tools/lazyconfig_train_net.py`` that
 also adds convenient overrides for ``train.init_checkpoint`` (pointing to a
 converted LabelMix ViT checkpoint) and ``train.output_dir``.
 
-Example (single-node, 8 GPUs)::
+Example (single-node, 4 GPUs)::
 
     python train_net.py \\
-        --config-file configs/COCO/mask_rcnn_vitdet_wee_100ep.py \\
-        --num-gpus 8 \\
+        --config-file configs/COCO/mask_rcnn_vitdet_wee_30ep.py \\
+        --num-gpus 4 \\
         train.init_checkpoint=./converted/vit_wee_in1k.pth \\
         train.output_dir=./output/vit_wee_vitdet
 
 Example (evaluation only)::
 
     python train_net.py \\
-        --config-file configs/COCO/mask_rcnn_vitdet_wee_100ep.py \\
-        --num-gpus 8 --eval-only \\
+        --config-file configs/COCO/mask_rcnn_vitdet_wee_30ep.py \\
+        --num-gpus 4 --eval-only \\
         train.init_checkpoint=./output/vit_wee_vitdet/model_final.pth
 """
 
@@ -25,8 +25,16 @@ import logging
 import os
 import sys
 
-from detectron2.checkpoint import DetectionCheckpointer
-from detectron2.config import LazyConfig, instantiate
+# Make the local package importable (this file lives at the package root) and
+# auto-set DETECTRON2_DATASETS *before* detectron2 is imported, because
+# detectron2 reads the env var exactly once during dataset registration.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _coco_env import ensure_detectron2_datasets  # noqa: E402
+
+ensure_detectron2_datasets()
+
+from detectron2.checkpoint import DetectionCheckpointer  # noqa: E402
+from detectron2.config import LazyConfig, instantiate  # noqa: E402
 from detectron2.engine import (
     AMPTrainer,
     SimpleTrainer,
@@ -39,6 +47,8 @@ from detectron2.engine import (
 from detectron2.engine.defaults import create_ddp_model
 from detectron2.evaluation import inference_on_dataset, print_csv_format
 from detectron2.utils import comm
+
+from _wandb_writer import WandbWriter, init_wandb_from_cfg  # noqa: E402
 
 logger = logging.getLogger("detectron2")
 
@@ -74,6 +84,17 @@ def do_train(args, cfg):
         cfg.train.output_dir,
         trainer=trainer,
     )
+
+    # Initialise W&B on the main rank only; DDP workers never touch wandb.
+    # A no-op (returns None) when wandb is uninstalled / WANDB_MODE=disabled /
+    # init fails, so training never crashes because of logging.
+    if comm.is_main_process():
+        variant_tag = os.path.basename(cfg.train.output_dir or "").split("__", 1)[0]
+        init_wandb_from_cfg(cfg, extra_tags=[variant_tag] if variant_tag else None)
+
+    writers = default_writers(cfg.train.output_dir, cfg.train.max_iter)
+    writers.append(WandbWriter())
+
     trainer.register_hooks(
         [
             hooks.IterationTimer(),
@@ -83,7 +104,7 @@ def do_train(args, cfg):
             else None,
             hooks.EvalHook(cfg.train.eval_period, lambda: do_test(cfg, model)),
             hooks.PeriodicWriter(
-                default_writers(cfg.train.output_dir, cfg.train.max_iter),
+                writers,
                 period=cfg.train.log_period,
             )
             if comm.is_main_process()
@@ -112,9 +133,6 @@ def main(args):
 
 
 if __name__ == "__main__":
-    # Make the configs/ package importable (it lives next to this script).
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
     parser = default_argument_parser()
     args = parser.parse_args()
     launch(

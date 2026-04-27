@@ -267,15 +267,79 @@ def allocate_port(state: State) -> int:
     raise RuntimeError(f"No free ports in range {lo}-{hi}")
 
 
+def _is_object_detection_cmd(cmd: str) -> bool:
+    """Heuristic: does this command launch a detectron2 / ViTDet (object
+    detection) training run?
+
+    Object-detection jobs are launched via ``train_net.py --config-file …``
+    with a config living under ``detectron2_vitdet/…`` and use Hydra-style
+    ``key=value`` overrides that may legitimately contain ``=`` inside the
+    value (e.g. checkpoint paths like ``…/baseline_seed=42.pth``).
+
+    Classification jobs (ImageNet-1k, CIFAR-100, …) are launched via
+    ``torchrun … train.py --config …`` in timm style and must NOT have
+    their ``--experiment foo__seed=44`` tokens rewritten — otherwise the
+    experiment name ends up wrapped in literal double quotes.
+    """
+    lowered = cmd.lower()
+    if "train_net.py" in lowered and "--config-file" in lowered:
+        return True
+    if "detectron2_vitdet" in lowered:
+        return True
+    return False
+
+
 def resolve_placeholders(cmd: str, gpu_ids: List[int], port: int, job: Job) -> str:
-    """Replace {gpus}, {port}, {gpu_ids}, {job_name}, {log_file} placeholders."""
-    return (
+    """Replace {gpus}, {port}, {gpu_ids}, {job_name}, {log_file} placeholders.
+
+    For object-detection jobs (see :func:`_is_object_detection_cmd`) we
+    additionally wrap Hydra-style ``key=value`` overrides whose VALUE
+    itself contains an un-quoted ``=`` in double quotes.  Hydra's override
+    parser rejects such tokens with
+        OverrideParseException: mismatched input '=' expecting <EOF>
+    which happens for checkpoint paths like
+    ``…/baseline_seed=42__runid-xyz.pth``.
+
+    For classification jobs (ImageNet-1k, CIFAR-100, …) this defensive
+    quoting is DISABLED, because their CLIs do not use Hydra overrides
+    and the extra quotes would corrupt values such as
+    ``--experiment vit-betwixt__in1k__img256__seed=44``.
+    """
+    resolved = (
         cmd.replace("{gpus}", str(len(gpu_ids)))
         .replace("{port}", str(port))
         .replace("{gpu_ids}", ",".join(str(g) for g in gpu_ids))
         .replace("{job_name}", job.name)
         .replace("{log_file}", job.log_file or "")
     )
+
+    # Only object-detection (detectron2 / ViTDet) commands need the
+    # Hydra-override quoting fix-up.  For everything else, return the
+    # resolved command verbatim so we don't accidentally mangle tokens
+    # like ``--experiment foo__seed=44``.
+    if not _is_object_detection_cmd(resolved):
+        return resolved
+
+    try:
+        tokens = shlex.split(resolved)
+    except ValueError:
+        return resolved  # let downstream surface the syntax error
+
+    def _fix(tok: str) -> str:
+        if "=" not in tok or tok.startswith("--"):
+            return tok
+        key, _, value = tok.partition("=")
+        if "=" not in value:
+            return tok
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            return tok
+        escaped = value.replace('"', r"\"")
+        return f'{key}="{escaped}"'
+
+    fixed = [_fix(t) for t in tokens]
+    return " ".join(shlex.quote(t) for t in fixed)
 
 
 def _compute_cpu_affinity(gpu_ids: List[int], total_gpus: int = 8) -> Optional[str]:
@@ -310,6 +374,19 @@ def launch_job(job: Job, gpu_ids: List[int], port: int, log_dir: str, working_di
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
     env["HF_DATASETS_OFFLINE"] = "1"
+
+    # ---- Weights & Biases: always-on by default ------------------------
+    # train_net.py already instantiates a WandbWriter and calls
+    # init_wandb_from_cfg; here we just make sure the subprocess env does
+    # not accidentally disable it (e.g. inherited WANDB_MODE=disabled from
+    # an offline login shell). Operators can still opt out explicitly by
+    # exporting WANDB_MODE=disabled|offline before launching the daemon.
+    env.setdefault("WANDB_MODE", "online")
+    env.setdefault("WANDB_PROJECT", "labelmix-vitdet")
+    # Make crashes flush data (best-effort; _wandb_writer has an atexit hook too).
+    env.setdefault("WANDB_START_METHOD", "thread")
+    # Silence the interactive login prompt — in a subprocess it would just hang.
+    env.setdefault("WANDB_SILENT", "true")
 
     log_file = os.path.join(log_dir, f"{job.name}.log")
     os.makedirs(os.path.dirname(log_file), exist_ok=True)

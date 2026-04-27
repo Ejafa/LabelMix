@@ -1,7 +1,10 @@
 """COCO dataloader with Large-Scale Jittering (same recipe as upstream ViTDet).
 
-The images are resized & cropped to 1024x1024, which matches the ViT backbone
-``img_size`` used at detection time.
+The images are resized & cropped to 256x256 (see ``image_size`` below), which
+matches the ViT backbone ``img_size`` used at detection time in this project.
+This is a downscaled variant of the upstream 1024x1024 recipe, chosen for
+memory/throughput reasons; expect correspondingly lower AP than the reference
+ViTDet numbers. Bump ``image_size`` (e.g. to 1024) to recover those.
 """
 
 import detectron2.data.transforms as T

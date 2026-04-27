@@ -30,7 +30,14 @@ Typical invocations::
 
     # Default: back up every finished run into ``../backup`` (relative to
     # the project root, i.e. the repository containing ``evaluation/``).
+    # Runs whose ``model_best.pth.tar`` is missing are *not* recorded in
+    # the manifest, so the next pass will retry them automatically.
     python -m evaluation.scripts.backup_runs
+
+    # Archive non-checkpoint artifacts (args.yaml, summary.csv, ...) even
+    # when the checkpoint file is absent -- useful for salvaging crashed
+    # sweeps.
+    python -m evaluation.scripts.backup_runs --allow-missing-best-checkpoint
 
     # Custom destination + force re-copy of everything.
     python -m evaluation.scripts.backup_runs \\
@@ -252,6 +259,8 @@ class BackupStats:
     skipped_not_finished: int = 0
     skipped_cached: int = 0
     skipped_no_run_dir: int = 0
+    skipped_no_best_checkpoint: int = 0
+    skipped_incomplete: int = 0
     failed: int = 0
 
 
@@ -262,7 +271,7 @@ def backup_runs(
     project_root: Path,
     force: bool = False,
     dry_run: bool = False,
-    require_best_checkpoint: bool = False,
+    require_best_checkpoint: bool = True,
 ) -> BackupStats:
     """Walk ``wandb_root`` and back up every finished run into ``backup_root``.
 
@@ -274,9 +283,14 @@ def backup_runs(
             paths stored in the run config.
         force: If True, re-copy runs even if the manifest already lists them.
         dry_run: If True, only log what would happen, don't touch the disk.
-        require_best_checkpoint: If True, skip runs that don't have a
-            ``model_best.pth.tar`` on disk — useful when the checkpoint is
-            the reason you're running the backup in the first place.
+        require_best_checkpoint: If True (the default), *refuse* to record a
+            backup entry when ``model_best.pth.tar`` is missing at the
+            resolved source directory. This prevents the silent-drift
+            failure mode where the manifest would otherwise cache a
+            half-populated backup and short-circuit all future retries.
+            Set to False via ``--allow-missing-best-checkpoint`` if you
+            genuinely want to archive non-checkpoint artifacts (e.g. logs
+            from a crashed sweep).
     """
     wandb_root = wandb_root.resolve()
     backup_root = backup_root.resolve()
@@ -334,10 +348,13 @@ def backup_runs(
 
         if require_best_checkpoint and not (src_dir / "model_best.pth.tar").is_file():
             _logger.warning(
-                "[%s] skip: %s has no model_best.pth.tar (require_best_checkpoint=True)",
-                run_id, src_dir,
+                "[%s] skip: no model_best.pth.tar at %s "
+                "(require_best_checkpoint=True). Not recording in manifest so "
+                "the next pass can retry. Pass --allow-missing-best-checkpoint "
+                "to archive this run without its checkpoint.",
+                run_id, src_dir / "model_best.pth.tar",
             )
-            stats.skipped_no_run_dir += 1
+            stats.skipped_no_best_checkpoint += 1
             continue
 
         dst_dir = backup_root / str(group) / experiment
@@ -349,13 +366,28 @@ def backup_runs(
             stats.failed += 1
             continue
 
+        # Treat an incomplete best-ckpt copy as a soft failure under strict
+        # mode: log it, bump the stat, and *skip the manifest write* so the
+        # next invocation will retry (e.g. once the checkpoint is produced
+        # or the right --project-root is used).
+        is_incomplete = require_best_checkpoint and (
+            "model_best.pth.tar" in missing
+        )
+
         _logger.info(
-            "[%s] %s %s  (copied=%s, missing=%s, src=%s)",
+            "[%s] %s %s  (copied=%s, missing=%s, src=%s%s)",
             run_id,
-            "DRY-RUN would back up" if dry_run else "backed up",
+            "DRY-RUN would back up" if dry_run else (
+                "incomplete backup (NOT recorded)" if is_incomplete else "backed up"
+            ),
             dst_dir,
             copied, missing, src_dir,
+            " [will retry next pass]" if is_incomplete else "",
         )
+
+        if is_incomplete:
+            stats.skipped_incomplete += 1
+            continue
 
         if not dry_run:
             manifest.record(run_id, {
@@ -374,9 +406,11 @@ def backup_runs(
 
     _logger.info(
         "Done: scanned=%d backed_up=%d skipped_not_finished=%d skipped_cached=%d "
-        "skipped_no_run_dir=%d failed=%d",
+        "skipped_no_run_dir=%d skipped_no_best_checkpoint=%d "
+        "skipped_incomplete=%d failed=%d",
         stats.scanned, stats.backed_up, stats.skipped_not_finished,
-        stats.skipped_cached, stats.skipped_no_run_dir, stats.failed,
+        stats.skipped_cached, stats.skipped_no_run_dir,
+        stats.skipped_no_best_checkpoint, stats.skipped_incomplete, stats.failed,
     )
     return stats
 
@@ -410,9 +444,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--dry-run", action="store_true",
         help="Log what would be copied without touching the destination.",
     )
-    p.add_argument(
-        "--require-best-checkpoint", action="store_true",
-        help="Only back up runs that actually have a model_best.pth.tar on disk.",
+    ckpt_group = p.add_mutually_exclusive_group()
+    ckpt_group.add_argument(
+        "--require-best-checkpoint", dest="require_best_checkpoint",
+        action="store_true", default=True,
+        help="(default) Only record a backup when model_best.pth.tar exists "
+             "at the source. Runs whose checkpoint is missing are logged "
+             "and left unrecorded so the next pass can retry.",
+    )
+    ckpt_group.add_argument(
+        "--allow-missing-best-checkpoint", dest="require_best_checkpoint",
+        action="store_false",
+        help="Escape hatch: archive runs even when model_best.pth.tar is "
+             "absent (e.g. to keep summary.csv/args.yaml from a crashed "
+             "sweep). The manifest will record which files were missing.",
     )
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)

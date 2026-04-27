@@ -14,11 +14,20 @@ it turns the parquet source into ``arrow/train/`` and ``arrow/test/`` that
 ``reader_hfds.py`` loads instantly via ``load_from_disk()``, so the
 "Generating train split" step disappears from every launch.
 
+For coco, the script copies the detectron2-style layout
+(``annotations/``, ``train2017/``, ``val2017/``) into ``/dev/shm/coco``. After
+copying you typically set ``export DETECTRON2_DATASETS=/dev/shm`` so detectron2
+picks up the RAM copy automatically (it looks for ``$DETECTRON2_DATASETS/coco``
+at runtime). Use ``--splits`` to copy only a subset, e.g. ``--splits val`` for
+eval-only jobs (~1.6 GB) instead of the full ~20 GB.
+
 Usage::
 
     python copy_data_to_ram.py                          # copy imagenet-1k (default)
     python copy_data_to_ram.py --dataset places365      # copy places365
     python copy_data_to_ram.py --dataset cifar100       # copy cifar100
+    python copy_data_to_ram.py --dataset coco           # copy coco (full: ~20 GB)
+    python copy_data_to_ram.py --dataset coco --splits val  # coco val2017 + anns only
     python copy_data_to_ram.py --dry-run                # show what would be copied
     python copy_data_to_ram.py --verify                 # verify existing copy
     python copy_data_to_ram.py --cleanup                # remove the RAM copy
@@ -36,6 +45,11 @@ Supported datasets and their default paths:
     cifar100:
       src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/cifar100/arrow
       dst: /dev/shm/cifar100/arrow
+
+    coco:
+      src: <repo>/detectron2_vitdet/datasets/coco
+      dst: /dev/shm/coco
+      splits: annotations, train, val   (select with --splits, default: all)
 """
 from __future__ import annotations
 
@@ -52,7 +66,12 @@ from pathlib import Path
 # Dataset registry — add new datasets here
 # ---------------------------------------------------------------------------
 
-DATASETS: dict[str, dict[str, str]] = {
+# Each entry may optionally declare a ``splits`` mapping:
+#   split-alias -> list of subdirectory names (relative to ``src``).
+# When present, ``--splits`` can restrict which subdirs are copied; otherwise
+# the whole ``src`` tree is copied (imagenet-1k / places365 / cifar100 behaviour).
+
+DATASETS: dict[str, dict] = {
     "imagenet-1k": {
         "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k",
         "dst": "/dev/shm/imagenet-1k",
@@ -72,6 +91,35 @@ DATASETS: dict[str, dict[str, str]] = {
         # the train/test split from parquet on every launch.
         "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/cifar100/arrow",
         "dst": "/dev/shm/cifar100/arrow",
+    },
+    "coco": {
+        # Detectron2-style COCO layout:
+        #   <src>/annotations/  ~ 795 MB (instances_{train,val}2017.json, etc.)
+        #   <src>/train2017/    ~ 18 GB  (118k jpgs)
+        #   <src>/val2017/      ~ 777 MB (5k jpgs)
+        # After copying, set DETECTRON2_DATASETS=/dev/shm so detectron2 finds
+        # /dev/shm/coco at runtime (it reads $DETECTRON2_DATASETS/coco).
+        "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/detectron2_vitdet/datasets/coco",
+        "dst": "/dev/shm/coco",
+        "splits": {
+            # alias -> list of subdirectories (relative to src) to include
+            "annotations": ["annotations"],
+            "train":       ["train2017"],
+            "val":         ["val2017"],
+            # convenience presets
+            "eval":        ["annotations", "val2017"],        # ~1.6 GB, enough for inference + AP
+            "full":        ["annotations", "train2017", "val2017"],
+        },
+        "post_copy_hint": (
+            "NOTE: detectron2 locates COCO via the DETECTRON2_DATASETS env var.\n"
+            "      The LabelMix entry points (train_net.py, eval_all.py,\n"
+            "      generate_vitdet_jobs.py) auto-detect /dev/shm/coco, so no\n"
+            "      manual export is required for those scripts.\n"
+            "      For plain detectron2 tools, or to make the choice explicit\n"
+            "      in your shell, run:\n"
+            "          export DETECTRON2_DATASETS=/dev/shm\n"
+            "      (detectron2 will then resolve $DETECTRON2_DATASETS/coco → /dev/shm/coco)"
+        ),
     },
 }
 
@@ -97,15 +145,82 @@ def shm_capacity() -> tuple[int, int, int]:
     return shutil.disk_usage("/dev/shm")
 
 
-def walk_files(root: str) -> list[tuple[str, int]]:
-    """Walk *root* and return [(relative_path, size_bytes), ...]."""
+def resolve_split_subdirs(
+    dataset_cfg: dict,
+    splits_arg: str | None,
+) -> list[str] | None:
+    """Translate a --splits CLI value into a list of subdirectories under ``src``.
+
+    Returns ``None`` when no split filtering is needed (copy the whole source).
+    Returns a list of relative subdirectory names otherwise (order preserved,
+    duplicates removed).
+    """
+    available = dataset_cfg.get("splits")
+    if splits_arg is None or splits_arg.strip().lower() in ("", "all", "full"):
+        # No filtering requested. If the dataset defines a "full" preset, use
+        # it to stay explicit about what we copy; otherwise fall back to None
+        # (= whole source tree).
+        if available and "full" in available:
+            return list(available["full"])
+        return None
+
+    if not available:
+        raise SystemExit(
+            f"--splits is not supported for this dataset "
+            f"(no split registry). Remove --splits or pick a different dataset."
+        )
+
+    requested: list[str] = []
+    seen: set[str] = set()
+    for raw in splits_arg.split(","):
+        alias = raw.strip()
+        if not alias:
+            continue
+        if alias not in available:
+            valid = ", ".join(sorted(available.keys()))
+            raise SystemExit(
+                f"Unknown split alias {alias!r}. Valid aliases: {valid}"
+            )
+        for sub in available[alias]:
+            if sub not in seen:
+                seen.add(sub)
+                requested.append(sub)
+    return requested
+
+
+def walk_files(
+    root: str,
+    subdirs: list[str] | None = None,
+) -> list[tuple[str, int]]:
+    """Walk *root* and return ``[(relative_path, size_bytes), ...]``.
+
+    If *subdirs* is given, only those top-level subdirectories of *root* are
+    traversed. Paths in the returned tuples remain relative to *root*, so the
+    destination layout mirrors the source layout.
+    """
     result = []
-    root_path = Path(root)
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for fname in filenames:
-            full = os.path.join(dirpath, fname)
-            rel = os.path.relpath(full, root)
-            result.append((rel, os.path.getsize(full)))
+    if subdirs is None:
+        walk_roots = [root]
+    else:
+        walk_roots = []
+        for sub in subdirs:
+            full_sub = os.path.join(root, sub)
+            if not os.path.exists(full_sub):
+                print(f"⚠️  Split subdir not found, skipping: {full_sub}")
+                continue
+            walk_roots.append(full_sub)
+
+    for walk_root in walk_roots:
+        if os.path.isfile(walk_root):
+            # Support top-level files listed as a "split" entry if ever needed.
+            rel = os.path.relpath(walk_root, root)
+            result.append((rel, os.path.getsize(walk_root)))
+            continue
+        for dirpath, _dirnames, filenames in os.walk(walk_root):
+            for fname in filenames:
+                full = os.path.join(dirpath, fname)
+                rel = os.path.relpath(full, root)
+                result.append((rel, os.path.getsize(full)))
     return sorted(result)
 
 
@@ -151,14 +266,23 @@ def copy_with_progress(src: str, dst: str, total_bytes: int, copied_so_far: int)
 # Commands
 # ---------------------------------------------------------------------------
 
-def cmd_copy(src: str, dst: str, dry_run: bool = False, force: bool = False) -> bool:
+def cmd_copy(
+    src: str,
+    dst: str,
+    dry_run: bool = False,
+    force: bool = False,
+    subdirs: list[str] | None = None,
+    post_copy_hint: str | None = None,
+) -> bool:
     """Copy dataset from src to dst (/dev/shm). Returns True if a fresh copy was made."""
     print(f"Source:      {src}")
     print(f"Destination: {dst}")
+    if subdirs is not None:
+        print(f"Splits:      {', '.join(subdirs)}")
     print()
 
     # Gather files
-    files = walk_files(src)
+    files = walk_files(src, subdirs=subdirs)
     total_bytes = sum(s for _, s in files)
     total_count = len(files)
     print(f"Files:       {total_count}")
@@ -184,22 +308,20 @@ def cmd_copy(src: str, dst: str, dry_run: bool = False, force: bool = False) -> 
         print(f"\nWould copy {total_count} files ({fmt_size(total_bytes)}) to {dst}")
         return False
 
-    # Check for existing copy
+    # Check for existing copy (scoped to the same subdirs we intend to copy)
     if os.path.exists(dst) and not force:
-        existing = walk_files(dst)
+        existing = walk_files(dst, subdirs=subdirs)
         if existing:
             existing_size = sum(s for _, s in existing)
-            print(f"⚠️  Destination already exists with {len(existing)} files ({fmt_size(existing_size)})")
+            scope = f" (splits={','.join(subdirs)})" if subdirs else ""
+            print(f"⚠️  Destination already exists with {len(existing)} files ({fmt_size(existing_size)}){scope}")
             # Check if it's a complete copy
             if len(existing) == total_count:
                 src_sizes = {rel: sz for rel, sz in files}
                 dst_sizes = {rel: sz for rel, sz in existing}
                 if src_sizes == dst_sizes:
                     print("✅ Existing copy appears complete and matching!")
-                    print(f"\n{'='*60}")
-                    print(f"DATA DIR (use in generate_jobs.py or --data-dir):")
-                    print(f"  {dst}")
-                    print(f"{'='*60}")
+                    _print_data_dir_banner(dst, post_copy_hint)
                     return False
             print("   Existing copy is incomplete/mismatched. Use --force to overwrite.")
             print("   Or run with --cleanup first.")
@@ -225,27 +347,40 @@ def cmd_copy(src: str, dst: str, dry_run: bool = False, force: bool = False) -> 
     print(f"   Throughput: {fmt_size(throughput)}/s")
 
     # Verify file count
-    dst_files = walk_files(dst)
+    dst_files = walk_files(dst, subdirs=subdirs)
     if len(dst_files) != total_count:
         print(f"⚠️  WARNING: expected {total_count} files but found {len(dst_files)} in destination!")
     else:
         print(f"   File count verified: {len(dst_files)} ✓")
 
+    _print_data_dir_banner(dst, post_copy_hint)
+    return True  # signal success for post-copy steps
+
+
+def _print_data_dir_banner(dst: str, post_copy_hint: str | None = None) -> None:
+    """Print the final DATA DIR banner (and any per-dataset hint)."""
     print(f"\n{'='*60}")
     print(f"DATA DIR (use in generate_jobs.py or --data-dir):")
     print(f"  {dst}")
     print(f"{'='*60}")
+    if post_copy_hint:
+        print(post_copy_hint)
 
-    return True  # signal success for post-copy steps
 
-
-def cmd_verify(src: str, dst: str) -> None:
+def cmd_verify(
+    src: str,
+    dst: str,
+    subdirs: list[str] | None = None,
+    post_copy_hint: str | None = None,
+) -> None:
     """Verify the RAM copy matches the source."""
     print(f"Verifying {dst} against {src}...")
+    if subdirs is not None:
+        print(f"Splits:    {', '.join(subdirs)}")
     print()
 
-    src_files = walk_files(src)
-    dst_files = walk_files(dst)
+    src_files = walk_files(src, subdirs=subdirs)
+    dst_files = walk_files(dst, subdirs=subdirs)
 
     src_map = {rel: sz for rel, sz in src_files}
     dst_map = {rel: sz for rel, sz in dst_files}
@@ -299,10 +434,7 @@ def cmd_verify(src: str, dst: str) -> None:
     print(f"Hash check:  {len(sample_indices)} samples ✓")
     print()
     print("✅ Verification passed!")
-    print(f"\n{'='*60}")
-    print(f"DATA DIR (use in generate_jobs.py or --data-dir):")
-    print(f"  {dst}")
-    print(f"{'='*60}")
+    _print_data_dir_banner(dst, post_copy_hint)
 
 
 def cmd_cleanup(dst: str) -> None:
@@ -319,21 +451,26 @@ def cmd_cleanup(dst: str) -> None:
     print(f"✅ Cleaned up. Freed ~{fmt_size(total_bytes)} in /dev/shm.")
 
 
-def cmd_status(src: str, dst: str) -> None:
+def cmd_status(
+    src: str,
+    dst: str,
+    subdirs: list[str] | None = None,
+) -> None:
     """Show current status of RAM copy and /dev/shm."""
     shm_total, shm_used, shm_free = shm_capacity()
     print(f"/dev/shm:    total={fmt_size(shm_total)}  used={fmt_size(shm_used)}  free={fmt_size(shm_free)}")
     print()
 
-    src_files = walk_files(src)
+    src_files = walk_files(src, subdirs=subdirs)
     src_total = sum(s for _, s in src_files)
-    print(f"Source ({src}):")
+    scope = f" (splits={','.join(subdirs)})" if subdirs else ""
+    print(f"Source ({src}){scope}:")
     print(f"  Files: {len(src_files)}, Size: {fmt_size(src_total)}")
 
     if os.path.exists(dst):
-        dst_files = walk_files(dst)
+        dst_files = walk_files(dst, subdirs=subdirs)
         dst_total = sum(s for _, s in dst_files)
-        print(f"\nRAM copy ({dst}):")
+        print(f"\nRAM copy ({dst}){scope}:")
         print(f"  Files: {len(dst_files)}, Size: {fmt_size(dst_total)}")
         if len(dst_files) == len(src_files):
             print(f"  Status: ✅ Complete ({len(dst_files)}/{len(src_files)} files)")
@@ -353,13 +490,16 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python copy_data_to_ram.py                         # copy imagenet-1k to /dev/shm\n"
-            "  python copy_data_to_ram.py --dataset places365     # copy places365 to /dev/shm\n"
-            "  python copy_data_to_ram.py --dataset cifar100      # copy cifar100 to /dev/shm\n"
-            "  python copy_data_to_ram.py --dry-run               # preview without copying\n"
-            "  python copy_data_to_ram.py --verify                # verify existing copy\n"
-            "  python copy_data_to_ram.py --cleanup               # remove RAM copy\n"
-            "  python copy_data_to_ram.py --status                # show current state\n"
+            "  python copy_data_to_ram.py                              # copy imagenet-1k to /dev/shm\n"
+            "  python copy_data_to_ram.py --dataset places365          # copy places365 to /dev/shm\n"
+            "  python copy_data_to_ram.py --dataset cifar100           # copy cifar100 to /dev/shm\n"
+            "  python copy_data_to_ram.py --dataset coco               # copy full coco (~20 GB)\n"
+            "  python copy_data_to_ram.py --dataset coco --splits val  # only annotations+val2017 (~1.6 GB)\n"
+            "  python copy_data_to_ram.py --dataset coco --splits annotations,val\n"
+            "  python copy_data_to_ram.py --dry-run                    # preview without copying\n"
+            "  python copy_data_to_ram.py --verify                     # verify existing copy\n"
+            "  python copy_data_to_ram.py --cleanup                    # remove RAM copy\n"
+            "  python copy_data_to_ram.py --status                     # show current state\n"
             "\n"
             "Available datasets: " + ", ".join(DATASETS.keys()) + "\n"
         ),
@@ -379,6 +519,14 @@ def main() -> None:
         "--dst",
         default=None,
         help="Override destination in RAM",
+    )
+    parser.add_argument(
+        "--splits",
+        default=None,
+        help=(
+            "Comma-separated split aliases to copy (dataset-specific). "
+            "For coco: annotations, train, val, eval (=annotations+val), full (default)."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -411,15 +559,26 @@ def main() -> None:
     dataset_defaults = DATASETS[args.dataset]
     src = args.src or dataset_defaults["src"]
     dst = args.dst or dataset_defaults["dst"]
+    post_copy_hint = dataset_defaults.get("post_copy_hint")
+    subdirs = resolve_split_subdirs(dataset_defaults, args.splits)
 
     if args.cleanup:
+        # Cleanup always nukes the whole destination — RAM is precious and
+        # partial splits cohabiting in /dev/shm/coco get in each other's way.
         cmd_cleanup(dst)
     elif args.verify:
-        cmd_verify(src, dst)
+        cmd_verify(src, dst, subdirs=subdirs, post_copy_hint=post_copy_hint)
     elif args.status:
-        cmd_status(src, dst)
+        cmd_status(src, dst, subdirs=subdirs)
     else:
-        cmd_copy(src, dst, dry_run=args.dry_run, force=args.force)
+        cmd_copy(
+            src,
+            dst,
+            dry_run=args.dry_run,
+            force=args.force,
+            subdirs=subdirs,
+            post_copy_hint=post_copy_hint,
+        )
 
 
 if __name__ == "__main__":

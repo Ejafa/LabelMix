@@ -40,30 +40,35 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+# Keep DETECTRON2_DATASETS discovery behaviour consistent across every entry
+# point: if the user launches generate_vitdet_jobs.py from a node that already
+# has a /dev/shm/coco copy, we pick it up here too. The *real* guarantee for
+# running jobs still lives in train_net.py, which auto-sets the same var at
+# launch time — this call is mostly for parity and early diagnostics.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _coco_env import ensure_detectron2_datasets  # noqa: E402
+
+ensure_detectron2_datasets(verbose=False)
+
 
 # ---------------------------------------------------------------------------
 # Variant registry
 # ---------------------------------------------------------------------------
-# Maps short CLI tags ("wee", "little", ...) to:
+# Maps short CLI tags ("wee", "betwixt") to:
 #   - the LazyConfig file under ``configs/COCO/``
 #   - a pattern used to auto-match a converted checkpoint to the variant.
 #
 # Keep this in sync with ``MODEL_META`` in ``convert_timm_to_vitdet.py``.
+#
+# Only ``wee`` and ``betwixt`` are supported for object detection -- the other
+# LabelMix ViT sizes (``little``, ``medium``) are not in the downstream scope.
 VARIANTS: Dict[str, Dict[str, str]] = {
     "wee": {
-        "config": "configs/COCO/mask_rcnn_vitdet_wee_100ep.py",
+        "config": "configs/COCO/mask_rcnn_vitdet_wee_30ep.py",
         "ckpt_pattern": "vit_wee",
     },
-    "little": {
-        "config": "configs/COCO/mask_rcnn_vitdet_little_100ep.py",
-        "ckpt_pattern": "vit_little",
-    },
-    "medium": {
-        "config": "configs/COCO/mask_rcnn_vitdet_medium_100ep.py",
-        "ckpt_pattern": "vit_medium",
-    },
     "betwixt": {
-        "config": "configs/COCO/mask_rcnn_vitdet_betwixt_100ep.py",
+        "config": "configs/COCO/mask_rcnn_vitdet_betwixt_30ep.py",
         "ckpt_pattern": "vit_betwixt",
     },
 }
@@ -91,6 +96,30 @@ def build_job_name(
     )
 
 
+def _quote_override_value(key: str, value: str) -> str:
+    """Format a Hydra ``key=value`` override safely.
+
+    Hydra's override grammar treats an un-quoted ``=`` inside the value as
+    the start of a new override and raises
+    ``OverrideParseException: mismatched input '=' expecting <EOF>``.
+    This bites us for checkpoint paths like
+    ``…/baseline_seed=42__runid-xyz.pth``.
+
+    Single-quoting the value makes Hydra take it as a literal string.
+    We also quote whitespace / other shell-sensitive chars defensively so
+    the override survives the ``shlex.split`` round-trip the scheduler
+    performs on the full command line.
+    """
+    needs_quote = any(ch in value for ch in ("=", " ", "\t", "'", '"', "$", "`"))
+    if not needs_quote:
+        return f"{key}={value}"
+    # Use double quotes so the scheduler's shlex.split keeps the token
+    # intact; Hydra accepts either "..." or '...' as a quoted override
+    # value. Escape any embedded double quotes inside the path.
+    escaped = value.replace('"', r"\"")
+    return f'{key}="{escaped}"'
+
+
 def build_job_cmd(
     config_path: str,
     checkpoint: str,
@@ -105,8 +134,8 @@ def build_job_cmd(
     ``jobdaemon.py`` / ``job_scheduler.py`` at launch time.
     """
     overrides: List[str] = [
-        f"train.init_checkpoint={checkpoint}",
-        f"train.output_dir={output_dir}",
+        _quote_override_value("train.init_checkpoint", checkpoint),
+        _quote_override_value("train.output_dir", output_dir),
         f"train.seed={seed}",
     ]
     if lr is not None:
@@ -127,20 +156,36 @@ def _resolve_checkpoint_for_variant(
     variant: str,
     checkpoints_dir: Optional[str],
     explicit: Optional[str],
+    ckpt_filter: Optional[str] = None,
 ) -> Optional[str]:
-    """Find the converted .pth for a variant, either explicitly or by pattern."""
+    """Find the converted .pth for a variant, either explicitly or by pattern.
+
+    Matching is tolerant of the hyphen/underscore split in experiment names
+    (the timm pipeline writes ``vit-wee`` while the registry uses ``vit_wee``),
+    so both spellings match. ``ckpt_filter``, when given, is an additional
+    case-insensitive substring that the filename must contain — handy for
+    restricting the match to e.g. ``baseline`` checkpoints only.
+    """
     if explicit:
         return os.path.abspath(explicit)
     if not checkpoints_dir:
         return None
     pattern = VARIANTS[variant]["ckpt_pattern"]
+    # Accept both ``vit_wee`` and ``vit-wee`` by normalising the separator.
+    pattern_alts = {pattern, pattern.replace("_", "-"), pattern.replace("-", "_")}
     if not os.path.isdir(checkpoints_dir):
         return None
-    candidates = sorted(
-        os.path.join(checkpoints_dir, f)
-        for f in os.listdir(checkpoints_dir)
-        if f.endswith(".pth") and pattern in f
-    )
+
+    filter_lc = ckpt_filter.lower() if ckpt_filter else None
+    candidates: List[str] = []
+    for f in os.listdir(checkpoints_dir):
+        if not f.endswith(".pth"):
+            continue
+        if not any(alt in f for alt in pattern_alts):
+            continue
+        if filter_lc is not None and filter_lc not in f.lower():
+            continue
+        candidates.append(os.path.join(checkpoints_dir, f))
     if not candidates:
         return None
     # Prefer the most recently modified match for reproducibility across re-runs.
@@ -158,6 +203,7 @@ def generate_jobs(
     dataset: str,
     img_size: int,
     extra_overrides: List[str],
+    ckpt_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Cartesian product sweep over (variant × seed × lr)."""
     jobs: List[Dict[str, Any]] = []
@@ -175,12 +221,14 @@ def generate_jobs(
             variant,
             checkpoints_dir=checkpoints_dir,
             explicit=explicit_checkpoint if len(variants) == 1 else None,
+            ckpt_filter=ckpt_filter,
         )
         if ckpt is None:
             print(
                 f"  ⚠️  No checkpoint found for variant '{variant}' "
-                f"(pattern='{VARIANTS[variant]['ckpt_pattern']}' in "
-                f"'{checkpoints_dir}'). Skipping.",
+                f"(pattern='{VARIANTS[variant]['ckpt_pattern']}'"
+                + (f", filter='{ckpt_filter}'" if ckpt_filter else "")
+                + f" in '{checkpoints_dir}'). Skipping.",
                 file=sys.stderr,
             )
             continue
@@ -210,7 +258,7 @@ def generate_jobs(
 # ---------------------------------------------------------------------------
 
 DEFAULTS_TEMPLATE: Dict[str, Any] = {
-    "gpus": 8,
+    "gpus": 4,
     "max_retries": 3,
     "working_dir": _THIS_DIR,
 }
@@ -267,7 +315,7 @@ def emit_job_for_checkpoint(
     output_root: str = "./output",
     dataset: str = "coco",
     img_size: int = 256,
-    gpus_per_job: int = 8,
+    gpus_per_job: int = 4,
     extra_overrides: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """Convenience entry point: append one variant's jobs to ``jobs_yaml_path``.
@@ -329,7 +377,14 @@ def main() -> None:
     ap.add_argument(
         "--checkpoints-dir", default=None,
         help="Directory containing converted checkpoints (auto-matches by "
-             "filename: e.g. 'vit_wee_*.pth' -> wee variant).",
+             "filename: e.g. 'vit_wee_*.pth' -> wee variant). Matching "
+             "accepts both 'vit_wee' and 'vit-wee' spellings.",
+    )
+    ap.add_argument(
+        "--ckpt-filter", default=None,
+        help="Case-insensitive substring the checkpoint filename must contain "
+             "in addition to the variant pattern, e.g. 'baseline' to restrict "
+             "a sweep to baseline checkpoints only.",
     )
     ap.add_argument(
         "--seeds", nargs="+", type=int, default=[42],
@@ -355,8 +410,8 @@ def main() -> None:
              "Informational only — the config controls the actual size.",
     )
     ap.add_argument(
-        "--gpus-per-job", type=int, default=8,
-        help="GPUs per job; written to 'defaults.gpus' (default: 8). "
+        "--gpus-per-job", type=int, default=4,
+        help="GPUs per job; written to 'defaults.gpus' (default: 4). "
              "jobdaemon.py enforces a single value across the whole file.",
     )
     ap.add_argument(
@@ -396,6 +451,7 @@ def main() -> None:
         dataset=args.dataset,
         img_size=args.img_size,
         extra_overrides=args.extra_override,
+        ckpt_filter=args.ckpt_filter,
     )
 
     if not jobs:
