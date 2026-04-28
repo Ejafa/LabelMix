@@ -29,4 +29,4 @@ model = build_vitdet_model(
 )
 
 train.init_checkpoint = ""  # set via CLI: train.init_checkpoint=/path/to/vit_wee.pth
-optimizer = build_optimizer(num_layers=14, lr_decay_rate=0.7)
+optimizer = build_optimizer(num_layers=14, lr_decay_rate=0.7, lr=0.0006)

@@ -25,4 +25,4 @@ model = build_vitdet_model(
 )
 
 train.init_checkpoint = ""
-optimizer = build_optimizer(num_layers=12, lr_decay_rate=0.7)
+optimizer = build_optimizer(num_layers=12, lr_decay_rate=0.7, lr=0.0008)

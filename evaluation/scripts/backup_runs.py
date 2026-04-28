@@ -1,42 +1,81 @@
-"""CLI: back up the key files of finished W&B runs to a local directory.
+"""CLI: back up the key files of finished training runs to a local directory.
 
-The script walks every locally-materialized W&B run under
+This script drives **two independent backup pipelines** and by default
+runs both in a single pass. Which one(s) execute is controlled by
+``--only {both,wandb,vitdet}`` (default ``both``).
+
+1. W&B / timm pipeline (unchanged legacy behaviour)
+---------------------------------------------------
+Walks every locally-materialized W&B run under
 ``evaluation/data/raw/wandb/<group>/<run_id>/``, looks up the on-disk
 training-run directory via the ``experiment`` / ``output`` fields in the
-downloaded ``config.yaml``, and copies the following files together into a
-single per-run backup directory:
+downloaded ``config.yaml``, and copies the following files together into
+a single per-run backup directory:
 
 * ``args.yaml``
 * ``run_status.yaml``
 * ``summary.csv``
 * ``model_best.pth.tar``
 
-Only runs whose W&B ``metadata.json`` reports ``state == "finished"`` are
-copied.  A small manifest at ``<backup_root>/_manifest.json`` keeps track of
-previously-backed-up runs so re-running the script is cheap and idempotent —
-each run is copied at most once unless ``--force`` is given.
+Only runs whose W&B ``metadata.json`` reports ``state == "finished"``
+are copied.
 
-The backup layout mirrors the W&B group/experiment split::
+Layout::
 
-    <backup_root>/
-      <group>/                   # e.g. ``in1k``
-        <experiment_name>/       # e.g. ``vit-little__in1k__img256__...``
-          args.yaml
-          run_status.yaml
-          summary.csv
-          model_best.pth.tar
+    <backup_root>/<group>/<experiment>/
+        args.yaml
+        run_status.yaml
+        summary.csv
+        model_best.pth.tar
+
+2. VitDet / detectron2 pipeline (new)
+-------------------------------------
+Walks every immediate subdirectory of ``detectron2_vitdet/output/``
+(overridable via ``--vitdet-output-root``) and, for each one that has
+already finished training (sentinel: a ``model_final.pth`` at the top
+of the run dir), copies:
+
+* ``model_final.pth``              -- the best/final checkpoint
+* ``config.yaml``                  -- serialised detectron2 lazy-config
+* ``metrics.json``                 -- per-iter training/eval metrics
+* ``log.txt``                      -- rank-0 log
+* ``last_checkpoint``              -- pointer file
+* ``events.out.tfevents.*``        -- tensorboard event file(s), globbed
+
+In-progress runs (no ``model_final.pth`` yet) are skipped and NOT
+recorded in the manifest so the next pass automatically picks them up
+once they finish.
+
+Layout::
+
+    <backup_root>/vitdet_runs/<job_name>/
+        model_final.pth
+        config.yaml
+        metrics.json
+        log.txt
+        last_checkpoint
+        events.out.tfevents.*
+
+Shared manifest
+---------------
+A single ``<backup_root>/_manifest.json`` tracks previously-backed-up
+runs so re-running the script is cheap and idempotent. W&B runs are
+keyed by their W&B run id; vitdet runs are keyed by the string
+``vitdet::<job_name>`` so the two namespaces cannot collide.
 
 Typical invocations::
 
-    # Default: back up every finished run into ``../backup`` (relative to
-    # the project root, i.e. the repository containing ``evaluation/``).
-    # Runs whose ``model_best.pth.tar`` is missing are *not* recorded in
-    # the manifest, so the next pass will retry them automatically.
+    # Default: back up both pipelines into ``../backup``.
     python -m evaluation.scripts.backup_runs
 
-    # Archive non-checkpoint artifacts (args.yaml, summary.csv, ...) even
-    # when the checkpoint file is absent -- useful for salvaging crashed
-    # sweeps.
+    # Only the legacy W&B pipeline.
+    python -m evaluation.scripts.backup_runs --only wandb
+
+    # Only the vitdet / detectron2 pipeline.
+    python -m evaluation.scripts.backup_runs --only vitdet
+
+    # Archive non-checkpoint W&B artifacts even when the checkpoint file
+    # is absent (W&B pipeline only).
     python -m evaluation.scripts.backup_runs --allow-missing-best-checkpoint
 
     # Custom destination + force re-copy of everything.
@@ -65,7 +104,8 @@ _logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-#: Files we try to copy from the on-disk run directory into the backup.
+#: Files we try to copy from the on-disk run directory into the backup
+#: (timm / in1k pipeline).
 BACKUP_FILES: tuple[str, ...] = (
     "args.yaml",
     "run_status.yaml",
@@ -85,6 +125,43 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 
 #: Default backup destination: ``<project_root>/../backup``.
 DEFAULT_BACKUP_ROOT: Path = (PROJECT_ROOT.parent / "backup").resolve()
+
+# ---------------------------------------------------------------------------
+# VitDet (detectron2) backup configuration
+# ---------------------------------------------------------------------------
+
+#: Exact filenames to copy from a finished vitdet run directory. The
+#: tensorboard events file is handled separately via a glob because its
+#: suffix is PID-/timestamp-dependent.
+VITDET_BACKUP_FILES: tuple[str, ...] = (
+    "model_final.pth",
+    "config.yaml",
+    "metrics.json",
+    "log.txt",
+    "last_checkpoint",
+)
+
+#: Glob patterns whose matches are ALSO copied (all matches kept).
+VITDET_BACKUP_GLOBS: tuple[str, ...] = (
+    "events.out.tfevents.*",
+)
+
+#: Sentinel file whose presence means "training finished successfully".
+VITDET_FINISHED_SENTINEL: str = "model_final.pth"
+
+#: Default on-disk location of the detectron2 output dir (relative to the
+#: repository root, which is ``PROJECT_ROOT``).
+DEFAULT_VITDET_OUTPUT_ROOT: Path = (
+    PROJECT_ROOT / "detectron2_vitdet" / "output"
+).resolve()
+
+#: Subdirectory name under ``<backup_root>`` where vitdet backups land, so
+#: they never collide with the timm/W&B-driven backups above.
+VITDET_BACKUP_SUBDIR: str = "vitdet_runs"
+
+#: Prefix used to namespace vitdet entries in the shared manifest so the
+#: name of a vitdet job can never collide with a W&B run id.
+VITDET_MANIFEST_PREFIX: str = "vitdet::"
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +341,17 @@ class BackupStats:
     failed: int = 0
 
 
+@dataclass
+class VitDetBackupStats:
+    """Per-pass counters for the vitdet (detectron2) backup pipeline."""
+    scanned: int = 0
+    backed_up: int = 0
+    skipped_not_finished: int = 0   # no model_final.pth sentinel yet
+    skipped_cached: int = 0         # already recorded in manifest
+    skipped_empty: int = 0          # directory exists but nothing to copy
+    failed: int = 0
+
+
 def backup_runs(
     *,
     wandb_root: Path,
@@ -416,12 +504,193 @@ def backup_runs(
 
 
 # ---------------------------------------------------------------------------
+# VitDet (detectron2) backup pipeline
+# ---------------------------------------------------------------------------
+
+def _iter_vitdet_run_dirs(vitdet_output_root: Path) -> Iterable[Path]:
+    """Yield every plausible vitdet run directory directly under the root.
+
+    A vitdet run directory is any immediate subdirectory of
+    ``<vitdet_output_root>``. The caller is responsible for deciding
+    whether each directory is \"finished\" (via the ``model_final.pth``
+    sentinel) or should otherwise be skipped.
+    """
+    if not vitdet_output_root.is_dir():
+        return
+    for child in sorted(p for p in vitdet_output_root.iterdir() if p.is_dir()):
+        yield child
+
+
+def _copy_vitdet_run_files(
+    src_dir: Path,
+    dst_dir: Path,
+    *,
+    dry_run: bool,
+) -> tuple[List[str], List[str]]:
+    """Copy the vitdet backup files from ``src_dir`` into ``dst_dir``.
+
+    Returns ``(copied, missing)`` where ``copied`` includes both the exact
+    filenames in :data:`VITDET_BACKUP_FILES` and every file matched by the
+    globs in :data:`VITDET_BACKUP_GLOBS`. ``missing`` only covers exact
+    filenames that weren't present (globs are allowed to be empty).
+    """
+    if not dry_run:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: List[str] = []
+    missing: List[str] = []
+
+    # Exact filenames.
+    for name in VITDET_BACKUP_FILES:
+        src = src_dir / name
+        if not src.is_file():
+            missing.append(name)
+            continue
+        if dry_run:
+            copied.append(name)
+            continue
+        shutil.copy2(src, dst_dir / name)
+        copied.append(name)
+
+    # Globs (e.g. tensorboard events). Empty match is not a failure.
+    for pattern in VITDET_BACKUP_GLOBS:
+        for src in sorted(src_dir.glob(pattern)):
+            if not src.is_file():
+                continue
+            if dry_run:
+                copied.append(src.name)
+                continue
+            shutil.copy2(src, dst_dir / src.name)
+            copied.append(src.name)
+
+    return copied, missing
+
+
+def backup_vitdet_runs(
+    *,
+    vitdet_output_root: Path,
+    backup_root: Path,
+    force: bool = False,
+    dry_run: bool = False,
+) -> VitDetBackupStats:
+    """Back up every *finished* detectron2/vitdet training run.
+
+    Discovery walks ``<vitdet_output_root>/<job_name>/`` directly — there
+    is no W&B-mirror intermediary. A run is considered finished when a
+    ``model_final.pth`` file exists at the top of its output directory
+    (this is what ``PeriodicCheckpointer`` writes at the end of training
+    in ``detectron2_vitdet/train_net.py``). Runs without that sentinel
+    are skipped and NOT recorded so they'll be retried on the next pass.
+
+    Backups land under ``<backup_root>/<VITDET_BACKUP_SUBDIR>/<job_name>/``
+    and include ``model_final.pth`` plus the metadata files listed in
+    :data:`VITDET_BACKUP_FILES` / :data:`VITDET_BACKUP_GLOBS`.
+
+    The manifest is shared with :func:`backup_runs` (same
+    ``<backup_root>/_manifest.json``), but vitdet entries are namespaced
+    with :data:`VITDET_MANIFEST_PREFIX` so they cannot collide with W&B
+    run ids.
+    """
+    vitdet_output_root = vitdet_output_root.resolve()
+    backup_root = backup_root.resolve()
+
+    if not vitdet_output_root.is_dir():
+        _logger.warning(
+            "[vitdet] output root %s does not exist; skipping vitdet pass.",
+            vitdet_output_root,
+        )
+        return VitDetBackupStats()
+
+    vitdet_backup_root = backup_root / VITDET_BACKUP_SUBDIR
+
+    _logger.info(
+        "[vitdet] Backing up runs: output_root=%s -> %s (force=%s, dry_run=%s)",
+        vitdet_output_root, vitdet_backup_root, force, dry_run,
+    )
+
+    if not dry_run:
+        vitdet_backup_root.mkdir(parents=True, exist_ok=True)
+
+    manifest = BackupManifest.load_or_empty(backup_root)
+    stats = VitDetBackupStats()
+
+    for run_dir in _iter_vitdet_run_dirs(vitdet_output_root):
+        stats.scanned += 1
+        job_name = run_dir.name
+        manifest_key = f"{VITDET_MANIFEST_PREFIX}{job_name}"
+
+        sentinel = run_dir / VITDET_FINISHED_SENTINEL
+        if not sentinel.is_file():
+            _logger.debug(
+                "[vitdet:%s] skip: no %s sentinel yet",
+                job_name, VITDET_FINISHED_SENTINEL,
+            )
+            stats.skipped_not_finished += 1
+            continue
+
+        if not force and manifest.already_done(manifest_key):
+            _logger.debug("[vitdet:%s] skip: already in manifest", job_name)
+            stats.skipped_cached += 1
+            continue
+
+        dst_dir = vitdet_backup_root / job_name
+        try:
+            copied, missing = _copy_vitdet_run_files(
+                run_dir, dst_dir, dry_run=dry_run,
+            )
+        except OSError as exc:
+            _logger.exception("[vitdet:%s] copy failed: %s", job_name, exc)
+            stats.failed += 1
+            continue
+
+        if not copied:
+            _logger.warning(
+                "[vitdet:%s] skip: nothing to copy from %s (missing=%s)",
+                job_name, run_dir, missing,
+            )
+            stats.skipped_empty += 1
+            continue
+
+        # The sentinel is guaranteed to have been copied because we
+        # already asserted its existence above; we still surface any
+        # other missing metadata files in the log for visibility.
+        _logger.info(
+            "[vitdet:%s] %s %s  (copied=%s, missing=%s)",
+            job_name,
+            "DRY-RUN would back up" if dry_run else "backed up",
+            dst_dir, copied, missing,
+        )
+
+        if not dry_run:
+            manifest.record(manifest_key, {
+                "kind": "vitdet",
+                "job_name": job_name,
+                "src_dir": str(run_dir),
+                "dst_dir": str(dst_dir),
+                "copied": copied,
+                "missing": missing,
+            })
+            manifest.save()
+
+        stats.backed_up += 1
+
+    _logger.info(
+        "[vitdet] Done: scanned=%d backed_up=%d skipped_not_finished=%d "
+        "skipped_cached=%d skipped_empty=%d failed=%d",
+        stats.scanned, stats.backed_up, stats.skipped_not_finished,
+        stats.skipped_cached, stats.skipped_empty, stats.failed,
+    )
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(
-        description="Back up key files of finished W&B runs to a local directory.",
+        description="Back up key files of finished W&B (timm) AND vitdet "
+                    "training runs to a local directory.",
     )
     p.add_argument(
         "--wandb-root", default=str(WANDB_RAW_DIR),
@@ -437,6 +706,18 @@ def main(argv: Optional[List[str]] = None) -> int:
              f"config.yaml (default: {PROJECT_ROOT}).",
     )
     p.add_argument(
+        "--vitdet-output-root", default=str(DEFAULT_VITDET_OUTPUT_ROOT),
+        help=f"Root of the detectron2/vitdet on-disk training outputs; each "
+             f"immediate subdirectory is treated as one run, and only runs "
+             f"with a 'model_final.pth' sentinel are backed up "
+             f"(default: {DEFAULT_VITDET_OUTPUT_ROOT}).",
+    )
+    p.add_argument(
+        "--only", choices=("both", "wandb", "vitdet"), default="both",
+        help="Which pipeline(s) to run: 'both' (default), 'wandb' (timm/W&B "
+             "only, legacy behaviour), or 'vitdet' (detectron2 only).",
+    )
+    p.add_argument(
         "--force", action="store_true",
         help="Ignore the manifest and re-copy every matched run.",
     )
@@ -448,32 +729,57 @@ def main(argv: Optional[List[str]] = None) -> int:
     ckpt_group.add_argument(
         "--require-best-checkpoint", dest="require_best_checkpoint",
         action="store_true", default=True,
-        help="(default) Only record a backup when model_best.pth.tar exists "
-             "at the source. Runs whose checkpoint is missing are logged "
-             "and left unrecorded so the next pass can retry.",
+        help="(default, W&B pipeline only) Only record a backup when "
+             "model_best.pth.tar exists at the source. Runs whose "
+             "checkpoint is missing are logged and left unrecorded so the "
+             "next pass can retry.",
     )
     ckpt_group.add_argument(
         "--allow-missing-best-checkpoint", dest="require_best_checkpoint",
         action="store_false",
-        help="Escape hatch: archive runs even when model_best.pth.tar is "
-             "absent (e.g. to keep summary.csv/args.yaml from a crashed "
-             "sweep). The manifest will record which files were missing.",
+        help="Escape hatch (W&B pipeline only): archive runs even when "
+             "model_best.pth.tar is absent (e.g. to keep summary.csv/args.yaml "
+             "from a crashed sweep). The manifest will record which files "
+             "were missing.",
     )
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
 
     setup_logging(args.log_level)
 
-    stats = backup_runs(
-        wandb_root=Path(args.wandb_root),
-        backup_root=Path(args.backup_root),
-        project_root=Path(args.project_root),
-        force=args.force,
-        dry_run=args.dry_run,
-        require_best_checkpoint=args.require_best_checkpoint,
-    )
-    # Non-zero exit if every scanned run failed outright — useful for cron.
-    if stats.scanned > 0 and stats.failed == stats.scanned:
+    wandb_stats: Optional[BackupStats] = None
+    vitdet_stats: Optional[VitDetBackupStats] = None
+
+    if args.only in ("both", "wandb"):
+        wandb_stats = backup_runs(
+            wandb_root=Path(args.wandb_root),
+            backup_root=Path(args.backup_root),
+            project_root=Path(args.project_root),
+            force=args.force,
+            dry_run=args.dry_run,
+            require_best_checkpoint=args.require_best_checkpoint,
+        )
+
+    if args.only in ("both", "vitdet"):
+        vitdet_stats = backup_vitdet_runs(
+            vitdet_output_root=Path(args.vitdet_output_root),
+            backup_root=Path(args.backup_root),
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+
+    # Non-zero exit if every pipeline that ran failed 100% of its scans
+    # (useful as a cron-style health check). A pipeline with zero scans
+    # is treated as a no-op and does not contribute to the failure test.
+    ran_any = False
+    all_failed = True
+    for s in (wandb_stats, vitdet_stats):
+        if s is None or s.scanned == 0:
+            continue
+        ran_any = True
+        if s.failed != s.scanned:
+            all_failed = False
+    if ran_any and all_failed:
         return 1
     return 0
 
