@@ -14,6 +14,7 @@ provided as JSON (``*.json``).
 from __future__ import annotations
 
 import argparse
+import glob
 import sys
 
 from ..common import RAW_LOGITS_DIR, ensure_dirs, setup_logging
@@ -54,6 +55,13 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"Where to write raw logits (default: {RAW_LOGITS_DIR}).")
     p.add_argument("--stop-on-error", action="store_true",
                    help="Abort immediately on the first failing run.")
+    p.add_argument("--skip-from", nargs="*", default=None,
+                   help="Additional result CSVs (or glob patterns) whose "
+                        "``name`` column should be treated as 'already done' "
+                        "and excluded from this run. Rows with a non-empty "
+                        "``error`` column are still re-tried. The primary "
+                        "``--output-csv`` is always consulted in addition to "
+                        "whatever is passed here.")
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
 
@@ -84,11 +92,22 @@ def main(argv: list[str] | None = None) -> int:
         cfg_kwargs["args_columns"] = args.args_columns
     cfg = EvalConfig(**cfg_kwargs)
 
+    skip_from_csvs: list[str] = []
+    for pattern in args.skip_from or []:
+        expanded = sorted(glob.glob(pattern))
+        if expanded:
+            skip_from_csvs.extend(expanded)
+        else:
+            # Not a glob (or just points at a not-yet-existing file): keep
+            # the literal so evaluate_mapping can no-op cleanly on missing.
+            skip_from_csvs.append(pattern)
+
     evaluate_mapping(
         mapping=mapping,
         output_csv=args.output_csv,
         cfg=cfg,
         continue_on_error=not args.stop_on_error,
+        skip_from_csvs=skip_from_csvs,
     )
     return 0
 

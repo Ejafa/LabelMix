@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+    #!/usr/bin/env python3
 """Generate jobs.yaml for LabelMix experiments with configurable datasets.
 
 This script supports multiple datasets (ImageNet-1K, Places365, CIFAR-100) and
@@ -94,8 +94,7 @@ MODE = "max"
 # ---------------------------------------------------------------------------
 
 # Seeds to sweep over — each trial is replicated once per seed.
-# SEEDS: List[int] = [42, 43]
-SEEDS: List[int] = [42]
+SEEDS: List[int] = [42, 43, 44]
 
 # Image size used for every generated job (pinned, no sweep).
 IMG_SIZE: int = 256
@@ -254,6 +253,30 @@ DEFAULT_BATCH_SIZE: int = 1024
 LONG_RUN_EPOCHS: int = 300
 LONG_RUN_WARMUP_EPOCHS: int = 20
 LONG_RUN_BATCH_SIZE: int = 1024
+
+# ---------------------------------------------------------------------------
+# Per-dataset preset overrides.
+#
+# Some datasets benefit from a different default training schedule than
+# the global ``DEFAULT_*`` values above.  Entries in this mapping are
+# consulted *only* when the user has NOT passed the corresponding CLI
+# flag (``--epochs`` / ``--warmup-epochs`` / ``--batch-size``) and
+# ``--long-run`` is NOT active.  Each dict may define any subset of
+# ``epochs``, ``warmup_epochs`` and ``batch_size``; missing keys fall
+# back to the global defaults.
+#
+# CIFAR-100 is small and trains quickly, so the baseline config calls
+# for more epochs at a smaller global batch size.  Every other dataset
+# continues to use the 100-epoch / batch-1024 default.
+# ---------------------------------------------------------------------------
+
+DATASET_DEFAULT_OVERRIDES: Dict[str, Dict[str, int]] = {
+    "cifar100": {
+        "epochs": 200,
+        "warmup_epochs": 10,
+        "batch_size": 512,
+    },
+}
 
 
 def compute_schedule(
@@ -630,6 +653,18 @@ def build_experiment_name(
         "mosaic_center_ratio",
         "mosaic_scale_range",
         "mosaic_close_epochs",
+        # Baseline-flavor knobs whose state is already implied by the
+        # ``_baseline_variant`` token in the name (baseline / mixup /
+        # cutmix / bare / noaug / unbalanced). Excluding them keeps the
+        # experiment name short and stops literal ``None`` / ``True``
+        # tokens from leaking into folder names.
+        "mixup",
+        "cutmix",
+        "mixup_prob",
+        "mixup_switch_prob",
+        "cutmix_minmax",
+        "no_aug",
+        "balanced_mode",
     }
     for k, v in sorted(trial_overrides.items()):
         if k not in _covered and not k.startswith("_"):
@@ -696,6 +731,7 @@ def generate(
     cutmix: bool = False,
     bare: bool = False,
     noaug: bool = False,
+    unbalanced: bool = False,
     labelmix_variants: List[str] | None = None,
     epochs: int = DEFAULT_EPOCHS,
     warmup_epochs: int = DEFAULT_WARMUP_EPOCHS,
@@ -734,6 +770,14 @@ def generate(
         horizontal flip + random-resized-crop (scale/ratio).  Everything
         else -- RandAugment, color jitter, random erasing, mixup, cutmix,
         labelmix, aug_repeats, aug_splits -- is turned off.
+    unbalanced : bool
+        If True, acts as a *modifier* on existing baseline trials
+        (``baseline``, ``mixup``, ``cutmix``, ``bare``, ``noaug``): clears
+        ``balanced_mode`` so the DataLoader iterates the natural
+        (imbalanced) class distribution instead of the balanced sampler.
+        The augmentation profile of each underlying variant is preserved.
+        Appends ``-unbalanced`` to the variant name and emits the wandb
+        tag ``unbalanced``.
     labelmix_variants : list[str] | None
         List of LabelMix loss variants to emit.  Each entry must be a key of
         ``LABELMIX_LOSS_SPECS`` (``mixed``, ``pl``, ``sce``).  ``None`` or the
@@ -891,6 +935,19 @@ def generate(
             "_baseline_variant": "noaug",
         })
         print("Adding noaug baseline jobs (no_aug=True: all train-time augmentation disabled)")
+    
+    # Apply unbalanced modifier to existing baseline trials if requested
+    if unbalanced:
+        # Unbalanced: modifies existing baseline trials by clearing balanced_mode
+        # so the DataLoader uses the natural (imbalanced) class distribution
+        for trial in baseline_trials:
+            trial["balanced_mode"] = None
+            # Add unbalanced tag to the variant name
+            original_variant = trial.get("_baseline_variant", "baseline")
+            trial["_baseline_variant"] = f"{original_variant}-unbalanced"
+            # Add unbalanced tag
+            trial.setdefault("_tags", []).append("unbalanced")
+        print("Applying unbalanced modifier to baseline trials (balanced_mode=None)")
 
     # Tag each baseline trial with its variant name so the job-emission
     # loop can attach the corresponding wandb tag (e.g. ``baseline``,
@@ -930,8 +987,8 @@ def generate(
     if not candidate_trials:
         raise ValueError(
             "No candidate trials to generate. Pass --baseline, --mosaic, "
-            "--mixup, --cutmix, --bare, --noaug, or --labelmix {mixed,pl,sce} "
-            "(or --all to enable everything)."
+            "--mixup, --cutmix, --bare, --noaug, --unbalanced, or "
+            "--labelmix {mixed,pl,sce} (or --all to enable everything)."
         )
 
     # Apply model filter
@@ -1325,6 +1382,18 @@ def main() -> None:
              "Combinable with --baseline/--mixup/--cutmix/--bare.",
     )
     parser.add_argument(
+        "--unbalanced",
+        action="store_true",
+        help="Modifier flag: when set alongside --baseline/--mixup/--cutmix/"
+             "--bare/--noaug, clears --balanced-mode on those trials so the "
+             "DataLoader iterates the natural (imbalanced) class distribution "
+             "instead of the balanced sampler. Appends '-unbalanced' to the "
+             "baseline variant name and attaches the 'unbalanced' wandb tag. "
+             "The augmentation profile of the underlying variant is preserved "
+             "(e.g. --baseline --unbalanced keeps config mixup+cutmix intact; "
+             "--bare --unbalanced keeps mixup=0/cutmix=0; etc.).",
+    )
+    parser.add_argument(
         "--labelmix",
         dest="labelmix_variants",
         nargs="+",
@@ -1404,6 +1473,7 @@ def main() -> None:
         args.cutmix = True
         args.bare = True
         args.noaug = True
+        args.unbalanced = True
         args.mosaic = True
         _all_variants = sorted(LABELMIX_LOSS_SPECS.keys())
         _existing = list(args.labelmix_variants or [])
@@ -1421,14 +1491,20 @@ def main() -> None:
 
     # Resolve training-schedule preset (--long-run) and apply per-flag
     # overrides.  CLI flags take priority over the preset defaults.
+    # Additionally, when neither --long-run nor an explicit flag is set,
+    # consult DATASET_DEFAULT_OVERRIDES so datasets like CIFAR-100 can
+    # ship their own sensible defaults (e.g. 200 epochs, batch 512)
+    # without affecting the global 100-epoch / batch-1024 default used
+    # by ImageNet-1K, Places365, etc.
     if args.long_run:
         preset_epochs = LONG_RUN_EPOCHS
         preset_warmup = LONG_RUN_WARMUP_EPOCHS
         preset_batch = LONG_RUN_BATCH_SIZE
     else:
-        preset_epochs = DEFAULT_EPOCHS
-        preset_warmup = DEFAULT_WARMUP_EPOCHS
-        preset_batch = DEFAULT_BATCH_SIZE
+        dataset_overrides = DATASET_DEFAULT_OVERRIDES.get(args.dataset, {})
+        preset_epochs = dataset_overrides.get("epochs", DEFAULT_EPOCHS)
+        preset_warmup = dataset_overrides.get("warmup_epochs", DEFAULT_WARMUP_EPOCHS)
+        preset_batch = dataset_overrides.get("batch_size", DEFAULT_BATCH_SIZE)
     epochs = args.epochs if args.epochs is not None else preset_epochs
     warmup_epochs = args.warmup_epochs if args.warmup_epochs is not None else preset_warmup
     batch_size = args.batch_size if args.batch_size is not None else preset_batch
@@ -1452,6 +1528,7 @@ def main() -> None:
         cutmix=args.cutmix,
         bare=args.bare,
         noaug=args.noaug,
+        unbalanced=args.unbalanced,
         labelmix_variants=args.labelmix_variants,
         epochs=epochs,
         warmup_epochs=warmup_epochs,
