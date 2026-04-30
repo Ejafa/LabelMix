@@ -146,3 +146,8 @@ in1k-main
 mixed_loss
 
 detectron2_vitdet/datasets
+evaluation/data/processed
+detectron2_vitdet/converted/_conversion_manifest.csv
+.gitignore
+experiments/test_jobs.yaml
+evaluation/data
