@@ -7,24 +7,21 @@ produced, all reading from the *same* pool of source images so that
 visual differences between augmentations are attributable to the
 augmentation itself, not to a different image crop:
 
-    1. ``aug_comparison_{clean,vit_wee}/`` — one PNG per
-       (augmentation, panel) tile, for augmentations in
-       ``{none, mixup, cutmix, mosaic, labelmix}``.  ``clean`` applies a
-       resize + center-crop only; ``vit_wee`` additionally applies the
-       ViT-wee ImageNet-1k training augmentations on top
-       (see ``experiments/labelmix_imagenet1k/configs/vit-wee.yaml``).
+    1. ``aug_comparison_clean/`` — one PNG per augmentation in
+       ``{none, mixup, cutmix, mosaic, labelmix}``, rendered in its basic
+       form after resize + center-crop only.
 
     2. ``labelmix_randomness/`` — N PNGs of LabelMix with ``alpha=0.5``,
-       ``k=6`` and ``sampling_max_aspect=20``, one per seed; no
+       ``k=5`` and ``sampling_max_aspect=20``, one per seed; no
        single-image augmentation (color jitter, RandAugment,
        random-erasing, shear, ...) is applied.
 
     3. ``labelmix_k_sweep/`` — one PNG per ``k`` in ``[2, 10]``, all
-       with ``alpha=0.5`` and ``sampling_max_aspect=20``.
+       with ``alpha=5.0`` and ``sampling_max_aspect=15``.
 
     4. ``labelmix_alpha_sweep/`` — one PNG per ``alpha`` in
-       ``[0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0]``, all with ``k=6`` and
-       ``sampling_max_aspect=20``.
+       ``[0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0]``, all with ``k=5`` and
+       ``sampling_max_aspect=10``.
 
 Every PNG is written at two resolutions (256x256 and 1024x1024) and a
 render is skipped if the output PNG already exists.  The random seed is
@@ -59,7 +56,6 @@ Output
     │   ├── none__panel1_256.png  / _1024.png
     │   ├── mixup__panel1_256.png / _1024.png
     │   ├── ...
-    ├── aug_comparison_vit_wee/        (same layout as above)
     ├── labelmix_randomness/
     │   ├── metadata.json
     │   ├── panel1_256.png / _1024.png
@@ -140,20 +136,32 @@ VIT_WEE_AUG = dict(
 
 # LabelMix defaults used by the paper's main experiments.
 LABELMIX_ALPHA: float = 0.5
-LABELMIX_K: int = 6
+LABELMIX_K_SWEEP_ALPHA: float = 2.0
+LABELMIX_K: int = 5
 LABELMIX_MAX_ASPECT: float = 20.0
+LABELMIX_SWEEP_MAX_ASPECT: float = 15.0
+LABELMIX_ALPHA_SWEEP_MAX_ASPECT: float = 15.0
 LABELMIX_ALPHA_SWEEP: Tuple[float, ...] = (0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0)
+LABELMIX_RANKED_WEIGHT_FLOOR: float = 0.02
+LABELMIX_RANKED_LAYOUT_EPS: float = 1e-6
 
-# Mixup/CutMix defaults mirroring vit-wee.yaml.
-MIXUP_ALPHA: float = 0.8
-CUTMIX_ALPHA: float = 1.0
+# Basic-form defaults for the augmentation comparison figure.
+COMPARISON_LABELMIX_ALPHA: float = 1.0
+COMPARISON_LABELMIX_K: int = 4
+COMPARISON_MIXUP_ALPHA: float = 1.0
+COMPARISON_CUTMIX_ALPHA: float = 1.0
+COMPARISON_MOSAIC_CENTER_RATIO: Tuple[float, float] = (0.8, 1.2)
+COMPARISON_MOSAIC_POST_SCALE: Tuple[float, float] = (0.6, 0.9)
+COMPARISON_MOSAIC_FILL_VALUE: float = 0.5
 
 # How many source images we need at the most to render every figure.
 # - k-sweep needs up to k=10
-# - randomness uses 8 panels * K=6 but each panel draws from a disjoint
-#   slice so we oversample; same for aug_comparison Mosaic (4 per panel).
+# - randomness uses 8 panels * K=5, and k-sweep can use up to 10 images.
+#   The comparison uses one basic example per augmentation.
 # 128 is plenty and cheap to load.
 NUM_SOURCE_IMAGES: int = 128
+DEFAULT_PREFERRED_SOURCE_IDS: Tuple[int, ...] = (14, 20, 22, 30, 35, 43, 58, 64, 67, 68)
+SOURCE_ORDER_CACHE_LIMIT: int = 16
 
 # Default on-disk HuggingFace ``datasets`` cache for ILSVRC ImageNet-1k.
 # Laid out as ``<root>/ilsvrc___imagenet-1k/default/0.0.0/<fingerprint>/``
@@ -173,7 +181,8 @@ def _load_images_from_dir(
     source_dir: str,
     num: int,
     input_size: int,
-) -> List[torch.Tensor]:
+    preferred_source_ids: Sequence[int] = DEFAULT_PREFERRED_SOURCE_IDS,
+) -> Tuple[List[torch.Tensor], Tuple[str, ...]]:
     """Load the first ``num`` images from ``source_dir``, sorted by filename,
     as CHW float tensors in [0, 1] at native resolution (no crop/resize).
     Returned images will be resized/cropped later by the per-augmentation
@@ -186,6 +195,27 @@ def _load_images_from_dir(
         f for f in os.listdir(source_dir)
         if f.lower().endswith(exts)
     )
+    preferred_ids = tuple(int(i) for i in preferred_source_ids)
+    if preferred_ids:
+        by_stem = {os.path.splitext(f)[0]: f for f in files}
+        preferred_files: List[str] = []
+        seen = set()
+        for image_id in preferred_ids:
+            stems = (
+                f"imagenet1k_{image_id:04d}",
+                f"imagenet1k_{image_id}",
+                f"{image_id:04d}",
+                str(image_id),
+            )
+            for stem in stems:
+                fname = by_stem.get(stem)
+                if fname is not None and fname not in seen:
+                    preferred_files.append(fname)
+                    seen.add(fname)
+                    break
+        if preferred_files:
+            files = preferred_files + [f for f in files if f not in seen]
+            _logger.info("Prioritized source images: %s", ", ".join(preferred_files))
     if len(files) < num:
         raise RuntimeError(
             f"Need {num} source images, only found {len(files)} in {source_dir}. "
@@ -196,11 +226,11 @@ def _load_images_from_dir(
         path = os.path.join(source_dir, fname)
         with Image.open(path) as im:
             im = im.convert("RGB")
-            arr = np.asarray(im, dtype=np.uint8)
+            arr = np.array(im, dtype=np.uint8, copy=True)
         t = torch.from_numpy(arr).permute(2, 0, 1).contiguous().float() / 255.0
         imgs.append(t)
     _logger.info("Loaded %d source images from %s", len(imgs), source_dir)
-    return imgs
+    return imgs, tuple(files[:num])
 
 
 def _load_images_from_hfds_arrow(
@@ -330,7 +360,7 @@ def _load_images_from_timm(
                 f"timm dataset returned {type(img)} for sample {i}; "
                 "expected PIL.Image (set transform=None)."
             )
-        arr = np.asarray(img.convert("RGB"), dtype=np.uint8)
+        arr = np.array(img.convert("RGB"), dtype=np.uint8, copy=True)
         imgs.append(torch.from_numpy(arr).permute(2, 0, 1).contiguous().float() / 255.0)
     if len(imgs) < num:
         raise RuntimeError(
@@ -389,7 +419,7 @@ def _denormalize(
 def _build_clean_transform(size: int, crop_pct: float = 0.95) -> Callable[[Image.Image], torch.Tensor]:
     """A deterministic transform: resize + center crop + normalize."""
     def _apply(pil: Image.Image) -> torch.Tensor:
-        arr = np.asarray(pil.convert("RGB"), dtype=np.uint8)
+        arr = np.array(pil.convert("RGB"), dtype=np.uint8, copy=True)
         t = torch.from_numpy(arr).permute(2, 0, 1).contiguous().float() / 255.0
         t = _resize_centercrop(t, size=size, crop_pct=crop_pct)
         return _normalize(t)
@@ -519,12 +549,115 @@ def _sample_labelmix_layout(
     return _layout_to_pixel_boxes(base_layout_asc, H=H, W=W, canvas_size=1.0, eps=1e-7)
 
 
+def _ranked_labelmix_weights(k: int, alpha: float) -> torch.Tensor:
+    """Deterministic descending weights for ranked LabelMix sweep figures.
+
+    Source image 0 is largest, image 1 is second-largest, and so on.  Smaller
+    alpha values make the ranking steeper; larger alpha values move toward
+    equal regions while preserving strict order.
+    """
+    if k <= 0:
+        raise ValueError("k must be positive")
+    alpha = max(float(alpha), 1e-6)
+    rank = torch.arange(k, dtype=torch.float32)
+    beta = 2.0 / (alpha + 1.0)
+    weights = torch.exp(-beta * rank) + LABELMIX_RANKED_WEIGHT_FLOOR
+    return weights / weights.sum()
+
+
+def _boxes_max_aspect(boxes: torch.Tensor) -> float:
+    x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    widths = (x1 - x0).to(dtype=torch.float32)
+    heights = (y1 - y0).to(dtype=torch.float32)
+    min_side = torch.minimum(widths, heights)
+    max_side = torch.maximum(widths, heights)
+    aspect = max_side / torch.clamp(min_side, min=1.0)
+    return float(aspect.max().item())
+
+
+def _balanced_grid_boxes(k: int, H: int, W: int) -> torch.Tensor:
+    """Aspect-safe fallback boxes that tile exactly in source-rank order."""
+    boxes: List[Tuple[int, int, int, int]] = []
+
+    def _split(n: int, x0: int, y0: int, x1: int, y1: int) -> None:
+        if n == 1:
+            boxes.append((x0, y0, x1, y1))
+            return
+        n_first = (n + 1) // 2
+        n_second = n - n_first
+        w = x1 - x0
+        h = y1 - y0
+        if w >= h:
+            xm = x0 + int(round(w * (n_first / n)))
+            xm = min(x1 - 1, max(x0 + 1, xm))
+            _split(n_first, x0, y0, xm, y1)
+            _split(n_second, xm, y0, x1, y1)
+        else:
+            ym = y0 + int(round(h * (n_first / n)))
+            ym = min(y1 - 1, max(y0 + 1, ym))
+            _split(n_first, x0, y0, x1, ym)
+            _split(n_second, x0, ym, x1, y1)
+
+    _split(k, 0, 0, W, H)
+    return torch.tensor(boxes, dtype=torch.int64)
+
+
+def _layout_from_ranked_weights(
+    weights_desc: torch.Tensor,
+    *,
+    H: int,
+    W: int,
+    sampling_max_aspect: float,
+    sampling_min_side_px: int,
+) -> torch.Tensor:
+    """Build pixel boxes in source-rank order from descending weights."""
+    weights_desc = weights_desc.to(dtype=torch.float32)
+    k = int(weights_desc.numel())
+    if k <= 0:
+        raise ValueError("weights_desc must be non-empty")
+
+    base_layout_desc = squarify_core(weights_desc, canvas_size=1.0)
+    boxes = _layout_to_pixel_boxes(
+        base_layout_desc,
+        H=H,
+        W=W,
+        canvas_size=1.0,
+        eps=LABELMIX_RANKED_LAYOUT_EPS,
+    )
+    if _boxes_are_valid_and_tile(boxes, H=H, W=W):
+        x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        widths = (x1 - x0).to(dtype=torch.float32)
+        heights = (y1 - y0).to(dtype=torch.float32)
+        min_side = torch.minimum(widths, heights)
+        aspect_ok = True
+        if sampling_max_aspect > 0.0:
+            aspect_ok = _boxes_max_aspect(boxes) <= float(sampling_max_aspect)
+        if bool(torch.all(min_side >= float(sampling_min_side_px)).item()) and aspect_ok:
+            return boxes
+
+    fallback = _balanced_grid_boxes(k, H=H, W=W)
+    if (
+        _boxes_are_valid_and_tile(fallback, H=H, W=W)
+        and _boxes_max_aspect(fallback) <= float(sampling_max_aspect)
+    ):
+        _logger.warning(
+            "Ranked LabelMix layout fell back to balanced grid for k=%d.", k,
+        )
+        return fallback
+
+    raise RuntimeError(
+        "Could not construct a ranked LabelMix layout within "
+        f"sampling_max_aspect={sampling_max_aspect:g}."
+    )
+
+
 def _compose_labelmix(
     imgs: Sequence[torch.Tensor],
     *,
     alpha: float,
     k: int,
     sampling_max_aspect: float,
+    layout_weights_desc: Optional[torch.Tensor] = None,
     sampling_min_side_px: int = 6,
     max_attempts: int = 200,
     shift: int = 0,
@@ -546,15 +679,24 @@ def _compose_labelmix(
     _, C, H, W = batch.shape
     is_square = H == W
 
-    # 1) Sample a validated pixel layout in one shot (no second squarify
+    # 1) Build a validated pixel layout in one shot (no second squarify
     #    call, whose internal randomness would produce a different layout
     #    from the one that passed validation and potentially leave gaps).
-    base_boxes = _sample_labelmix_layout(
-        alpha=alpha, k=k, H=H, W=W,
-        sampling_min_side_px=sampling_min_side_px,
-        sampling_max_aspect=sampling_max_aspect,
-        max_attempts=max_attempts,
-    )
+    if layout_weights_desc is None:
+        base_boxes = _sample_labelmix_layout(
+            alpha=alpha, k=k, H=H, W=W,
+            sampling_min_side_px=sampling_min_side_px,
+            sampling_max_aspect=sampling_max_aspect,
+            max_attempts=max_attempts,
+        )
+    else:
+        base_boxes = _layout_from_ranked_weights(
+            layout_weights_desc,
+            H=H,
+            W=W,
+            sampling_min_side_px=sampling_min_side_px,
+            sampling_max_aspect=sampling_max_aspect,
+        )
     if not _boxes_are_valid_and_tile(base_boxes, H=H, W=W):
         # Defensive fallback: guaranteed-tiling vertical stripes with
         # uniform widths.  Never expected to trigger but keeps the
@@ -813,6 +955,7 @@ def _write_metadata(dir_path: str, meta: Dict) -> None:
 @dataclass
 class ShowcaseConfig:
     source_images: List[torch.Tensor]
+    source_image_names: Tuple[str, ...] = ()
     img_size: int = VIT_WEE_IMG_SIZE
     seed: int = 42
     out_dir: str = str(FIGURES_DIR / "augmentation_showcase")
@@ -822,6 +965,13 @@ class ShowcaseConfig:
     def dir_for(self, group: str) -> str:
         """Return the per-figure subdirectory for ``group``."""
         return os.path.join(self.out_dir, group)
+
+
+def _source_order_head(cfg: ShowcaseConfig, limit: int = SOURCE_ORDER_CACHE_LIMIT) -> List[str]:
+    """Small source-order key used to invalidate cached figure PNGs."""
+    if limit <= 0 or not cfg.source_image_names:
+        return []
+    return list(cfg.source_image_names[:limit])
 
 
 # Canonical augmentation ordering used by the comparison figure.
@@ -840,11 +990,11 @@ _AUG_SEED_SALT = {
 # downstream LLM can cite them verbatim when producing figure captions.
 _AUG_NOTES = {
     "none":     "Unmodified source image (no augmentation).",
-    "mixup":    f"Classic Mixup: out = lam*a + (1-lam)*b with alpha={MIXUP_ALPHA}.",
-    "cutmix":   f"Classic CutMix: paste a random bbox of b into a with alpha={CUTMIX_ALPHA}.",
-    "mosaic":   "4-tile Mosaic augmentation (square output).",
+    "mixup":    f"Classic Mixup: out = lam*a + (1-lam)*b with alpha={COMPARISON_MIXUP_ALPHA}.",
+    "cutmix":   f"Classic CutMix: paste a random bbox of b into a with alpha={COMPARISON_CUTMIX_ALPHA}.",
+    "mosaic":   "4-tile Mosaic augmentation with stronger zoom-out and grey filler.",
     "labelmix": (
-        f"LabelMix with alpha={LABELMIX_ALPHA}, k={LABELMIX_K}, "
+        f"LabelMix with alpha={COMPARISON_LABELMIX_ALPHA}, k={COMPARISON_LABELMIX_K}, "
         f"sampling_max_aspect={LABELMIX_MAX_ASPECT}."
     ),
 }
@@ -874,7 +1024,7 @@ def _panel_for_aug(
         "mixup": 2,
         "cutmix": 2,
         "mosaic": 4,
-        "labelmix": LABELMIX_K,
+        "labelmix": COMPARISON_LABELMIX_K,
     }[aug]
     salt = _AUG_SEED_SALT[aug]
     for p in range(num_panels):
@@ -893,18 +1043,22 @@ def _panel_for_aug(
         if aug == "none":
             out.append(chunk[0])
         elif aug == "mixup":
-            out.append(_compose_mixup(chunk, alpha=MIXUP_ALPHA))
+            out.append(_compose_mixup(chunk, alpha=COMPARISON_MIXUP_ALPHA))
         elif aug == "cutmix":
-            out.append(_compose_cutmix(chunk, alpha=CUTMIX_ALPHA))
+            out.append(_compose_cutmix(chunk, alpha=COMPARISON_CUTMIX_ALPHA))
         elif aug == "mosaic":
             out.append(_compose_mosaic(
                 chunk, output_size=(img_size, img_size),
+                center_ratio=COMPARISON_MOSAIC_CENTER_RATIO,
+                post_scale=COMPARISON_MOSAIC_POST_SCALE,
+                fill_value=COMPARISON_MOSAIC_FILL_VALUE,
                 seed=panel_seed + p,
             ))
         elif aug == "labelmix":
             out.append(_compose_labelmix(
                 chunk,
-                alpha=LABELMIX_ALPHA, k=LABELMIX_K,
+                alpha=COMPARISON_LABELMIX_ALPHA,
+                k=COMPARISON_LABELMIX_K,
                 sampling_max_aspect=LABELMIX_MAX_ASPECT,
             ))
         else:
@@ -916,14 +1070,13 @@ def render_aug_comparison(
     cfg: ShowcaseConfig,
     *,
     flavor: str,
-    num_panels: int = 4,
+    num_panels: int = 1,
 ) -> None:
-    """Set 1: one PNG per (augmentation, panel) for the given flavor.
+    """Set 1: one basic-form PNG per (augmentation, panel).
 
-    ``flavor`` is either ``"clean"`` (resize + center-crop only) or
-    ``"vit_wee"`` (additionally applies the ViT-wee ImageNet-1k
-    training-time single-image augmentations).  Output directory:
-    ``<out>/aug_comparison_<flavor>/``.
+    The default ``clean`` flavor applies resize + center-crop only; no
+    additional single-image training augmentations are applied.  Output
+    directory: ``<out>/aug_comparison_<flavor>/``.
     """
     group = f"aug_comparison_{flavor}"
     dir_path = cfg.dir_for(group)
@@ -943,8 +1096,34 @@ def render_aug_comparison(
     else:
         raise ValueError(f"unknown flavor: {flavor}")
 
+    metadata_path = os.path.join(dir_path, "metadata.json")
+    expected_params = {
+        "mixup_alpha": COMPARISON_MIXUP_ALPHA,
+        "cutmix_alpha": COMPARISON_CUTMIX_ALPHA,
+        "mosaic_tiles": 4,
+        "mosaic_center_ratio": list(COMPARISON_MOSAIC_CENTER_RATIO),
+        "mosaic_post_scale": list(COMPARISON_MOSAIC_POST_SCALE),
+        "mosaic_fill_value": COMPARISON_MOSAIC_FILL_VALUE,
+        "labelmix_alpha": COMPARISON_LABELMIX_ALPHA,
+        "labelmix_k": COMPARISON_LABELMIX_K,
+        "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
+        "source_order_head": _source_order_head(cfg),
+    }
+    overwrite_stale_comparison = not os.path.exists(metadata_path)
+    if not overwrite_stale_comparison:
+        try:
+            with open(metadata_path, "r") as f:
+                old_meta = json.load(f)
+            old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
+            overwrite_stale_comparison = any(
+                old_params.get(key) != value
+                for key, value in expected_params.items()
+            )
+        except (OSError, json.JSONDecodeError):
+            overwrite_stale_comparison = True
+
     # Skip compositing entirely if every PNG already exists.
-    all_paths_exist = True
+    all_paths_exist = not overwrite_stale_comparison
     for aug in _AUG_ROW_ORDER:
         for p in range(num_panels):
             stem = f"{aug}__panel{p+1}"
@@ -974,7 +1153,13 @@ def render_aug_comparison(
             )
             for p, tensor in enumerate(panels):
                 stem = f"{aug}__panel{p+1}"
-                _save_tensor_at_sizes(tensor, dir_path, stem, cfg.tile_sizes)
+                _save_tensor_at_sizes(
+                    tensor,
+                    dir_path,
+                    stem,
+                    cfg.tile_sizes,
+                    overwrite=overwrite_stale_comparison,
+                )
                 files_meta.append({
                     "stem": stem,
                     "aug": aug,
@@ -996,8 +1181,9 @@ def render_aug_comparison(
     _write_metadata(dir_path, {
         "group": group,
         "purpose": (
-            "Side-by-side comparison of data augmentations on shared source "
-            "images; used to illustrate what each method does in input space."
+            "Side-by-side comparison of basic data augmentations on shared "
+            "source images; no additional single-image training augmentations "
+            "are applied."
         ),
         "flavor": flavor,
         "flavor_description": flavor_desc,
@@ -1007,12 +1193,7 @@ def render_aug_comparison(
         "num_panels_per_aug": num_panels,
         "augmentations": list(_AUG_ROW_ORDER),
         "params": {
-            "mixup_alpha": MIXUP_ALPHA,
-            "cutmix_alpha": CUTMIX_ALPHA,
-            "mosaic_tiles": 4,
-            "labelmix_alpha": LABELMIX_ALPHA,
-            "labelmix_k": LABELMIX_K,
-            "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
+            **expected_params,
         },
         "files": files_meta,
     })
@@ -1040,6 +1221,7 @@ def render_labelmix_randomness(
     if len(shared_chunk) < LABELMIX_K:
         shared_chunk = (pre_imgs * (LABELMIX_K // len(pre_imgs) + 1))[:LABELMIX_K]
 
+    expected_source_order = _source_order_head(cfg, LABELMIX_K)
     metadata_path = os.path.join(dir_path, "metadata.json")
     overwrite_stale_cache = False
     if os.path.exists(metadata_path):
@@ -1047,7 +1229,11 @@ def render_labelmix_randomness(
             with open(metadata_path, "r") as f:
                 old_meta = json.load(f)
             old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
-            overwrite_stale_cache = not bool(old_params.get("shared_source_images_across_panels"))
+            overwrite_stale_cache = (
+                old_params.get("labelmix_k") != LABELMIX_K
+                or old_params.get("source_order_head") != expected_source_order
+                or not bool(old_params.get("shared_source_images_across_panels"))
+            )
         except (OSError, json.JSONDecodeError):
             overwrite_stale_cache = True
 
@@ -1101,6 +1287,7 @@ def render_labelmix_randomness(
             "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
             "single_image_aug": False,
             "shared_source_images_across_panels": True,
+            "source_order_head": expected_source_order,
         },
         "files": files_meta,
     })
@@ -1109,7 +1296,7 @@ def render_labelmix_randomness(
 def render_labelmix_k_sweep(
     cfg: ShowcaseConfig,
     *,
-    k_values: Sequence[int] = tuple(range(2, 11)),
+    k_values: Sequence[int] = tuple(range(2, 10)),
 ) -> None:
     """Set 3: one LabelMix PNG per ``k`` value, same alpha/aspect cap.
 
@@ -1124,6 +1311,26 @@ def render_labelmix_k_sweep(
     np.random.seed(cfg.seed)
     pre_imgs = _apply_transform(cfg.source_images, transform)
 
+    expected_source_order = _source_order_head(cfg, max(k_values) if k_values else 0)
+    ranked_weight_policy = "source_order_desc_exp_decay_alpha"
+    metadata_path = os.path.join(dir_path, "metadata.json")
+    overwrite_stale_cache = False
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r") as f:
+                old_meta = json.load(f)
+            old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
+            overwrite_stale_cache = (
+                old_params.get("source_order_head") != expected_source_order
+                or old_params.get("labelmix_alpha") != LABELMIX_K_SWEEP_ALPHA
+                or old_params.get("labelmix_max_aspect") != LABELMIX_SWEEP_MAX_ASPECT
+                or old_params.get("ranked_weight_policy") != ranked_weight_policy
+                or old_params.get("ranked_weight_floor") != LABELMIX_RANKED_WEIGHT_FLOOR
+                or old_params.get("ranked_layout_pixel_eps") != LABELMIX_RANKED_LAYOUT_EPS
+            )
+        except (OSError, json.JSONDecodeError):
+            overwrite_stale_cache = True
+
     files_meta: List[Dict] = []
     for i, k in enumerate(k_values):
         stem = f"k{k:02d}"
@@ -1131,23 +1338,47 @@ def render_labelmix_k_sweep(
             os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
             for tp in cfg.tile_sizes
         ]
-        if not all(existing):
+        if overwrite_stale_cache or not all(existing):
             # Re-seed per k so the layout isn't identical across panels.
             torch.manual_seed(cfg.seed + i * 13)
             np.random.seed(cfg.seed + i * 13)
             chunk = pre_imgs[:k]
             if len(chunk) < k:
                 chunk = (pre_imgs * (k // len(pre_imgs) + 1))[:k]
+            ranked_weights = _ranked_labelmix_weights(k, LABELMIX_K_SWEEP_ALPHA)
             composite = _compose_labelmix(
-                chunk, alpha=LABELMIX_ALPHA, k=k,
-                sampling_max_aspect=LABELMIX_MAX_ASPECT,
+                chunk, alpha=LABELMIX_K_SWEEP_ALPHA, k=k,
+                sampling_max_aspect=LABELMIX_SWEEP_MAX_ASPECT,
+                layout_weights_desc=ranked_weights,
             )
-            _save_tensor_at_sizes(composite, dir_path, stem, cfg.tile_sizes)
+            _save_tensor_at_sizes(
+                composite,
+                dir_path,
+                stem,
+                cfg.tile_sizes,
+                overwrite=overwrite_stale_cache,
+            )
+        torch.manual_seed(cfg.seed + i * 13)
+        ranked_weights_for_meta = _ranked_labelmix_weights(k, LABELMIX_K_SWEEP_ALPHA)
+        boxes_for_meta = _layout_from_ranked_weights(
+            ranked_weights_for_meta,
+            H=cfg.img_size,
+            W=cfg.img_size,
+            sampling_min_side_px=6,
+            sampling_max_aspect=LABELMIX_SWEEP_MAX_ASPECT,
+        )
         files_meta.append({
             "stem": stem,
             "aug": "labelmix",
             "k": int(k),
-            "notes": f"LabelMix composite with k={k} source images.",
+            "layout_weights_desc": [
+                float(w) for w in ranked_weights_for_meta.tolist()
+            ],
+            "layout_max_aspect": _boxes_max_aspect(boxes_for_meta),
+            "notes": (
+                f"LabelMix composite with k={k} source images; earlier "
+                "source images are assigned larger regions than later ones."
+            ),
         })
 
     _write_metadata(dir_path, {
@@ -1161,9 +1392,13 @@ def render_labelmix_k_sweep(
         "tile_sizes": list(cfg.tile_sizes),
         "k_values": list(int(k) for k in k_values),
         "params": {
-            "labelmix_alpha": LABELMIX_ALPHA,
-            "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
+            "labelmix_alpha": LABELMIX_K_SWEEP_ALPHA,
+            "labelmix_max_aspect": LABELMIX_SWEEP_MAX_ASPECT,
             "single_image_aug": False,
+            "source_order_head": expected_source_order,
+            "ranked_weight_policy": ranked_weight_policy,
+            "ranked_weight_floor": LABELMIX_RANKED_WEIGHT_FLOOR,
+            "ranked_layout_pixel_eps": LABELMIX_RANKED_LAYOUT_EPS,
         },
         "files": files_meta,
     })
@@ -1183,7 +1418,7 @@ def render_labelmix_alpha_sweep(
 
     Output directory: ``<out>/labelmix_alpha_sweep/``.  Every panel uses
     the same source images and same RNG seed base so visible differences
-    are attributable to the Dirichlet concentration alpha.
+    are attributable to the alpha-controlled ranked region weights.
     """
     group = "labelmix_alpha_sweep"
     dir_path = cfg.dir_for(group)
@@ -1197,6 +1432,26 @@ def render_labelmix_alpha_sweep(
     if len(shared_chunk) < LABELMIX_K:
         shared_chunk = (pre_imgs * (LABELMIX_K // len(pre_imgs) + 1))[:LABELMIX_K]
 
+    expected_source_order = _source_order_head(cfg, LABELMIX_K)
+    ranked_weight_policy = "source_order_desc_exp_decay_alpha"
+    metadata_path = os.path.join(dir_path, "metadata.json")
+    overwrite_stale_cache = False
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r") as f:
+                old_meta = json.load(f)
+            old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
+            overwrite_stale_cache = (
+                old_params.get("labelmix_k") != LABELMIX_K
+                or old_params.get("source_order_head") != expected_source_order
+                or old_params.get("labelmix_max_aspect") != LABELMIX_ALPHA_SWEEP_MAX_ASPECT
+                or old_params.get("ranked_weight_policy") != ranked_weight_policy
+                or old_params.get("ranked_weight_floor") != LABELMIX_RANKED_WEIGHT_FLOOR
+                or old_params.get("ranked_layout_pixel_eps") != LABELMIX_RANKED_LAYOUT_EPS
+            )
+        except (OSError, json.JSONDecodeError):
+            overwrite_stale_cache = True
+
     files_meta: List[Dict] = []
     for alpha in alpha_values:
         alpha = float(alpha)
@@ -1205,32 +1460,54 @@ def render_labelmix_alpha_sweep(
             os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
             for tp in cfg.tile_sizes
         ]
-        if not all(existing):
-            # Same seed base for every alpha: alpha changes the Dirichlet
-            # distribution, not the chosen source images or high-level seed.
+        if overwrite_stale_cache or not all(existing):
+            # Same seed base for every alpha: alpha changes the ranked
+            # region weights, not the chosen source images or high-level seed.
             torch.manual_seed(cfg.seed + 104729)
             np.random.seed(cfg.seed + 104729)
+            ranked_weights = _ranked_labelmix_weights(LABELMIX_K, alpha)
             composite = _compose_labelmix(
                 shared_chunk,
                 alpha=alpha, k=LABELMIX_K,
-                sampling_max_aspect=LABELMIX_MAX_ASPECT,
+                sampling_max_aspect=LABELMIX_ALPHA_SWEEP_MAX_ASPECT,
+                layout_weights_desc=ranked_weights,
             )
-            _save_tensor_at_sizes(composite, dir_path, stem, cfg.tile_sizes)
+            _save_tensor_at_sizes(
+                composite,
+                dir_path,
+                stem,
+                cfg.tile_sizes,
+                overwrite=overwrite_stale_cache,
+            )
+        torch.manual_seed(cfg.seed + 104729)
+        ranked_weights_for_meta = _ranked_labelmix_weights(LABELMIX_K, alpha)
+        boxes_for_meta = _layout_from_ranked_weights(
+            ranked_weights_for_meta,
+            H=cfg.img_size,
+            W=cfg.img_size,
+            sampling_min_side_px=6,
+            sampling_max_aspect=LABELMIX_ALPHA_SWEEP_MAX_ASPECT,
+        )
         files_meta.append({
             "stem": stem,
             "aug": "labelmix",
             "alpha": alpha,
+            "layout_weights_desc": [
+                float(w) for w in ranked_weights_for_meta.tolist()
+            ],
+            "layout_max_aspect": _boxes_max_aspect(boxes_for_meta),
             "notes": (
                 f"LabelMix composite with alpha={alpha:g}; source images, "
-                f"k={LABELMIX_K}, aspect cap, and seed base are fixed."
+                f"k={LABELMIX_K}, aspect cap, seed base, and source-size "
+                "ranking are fixed."
             ),
         })
 
     _write_metadata(dir_path, {
         "group": group,
         "purpose": (
-            "Shows how LabelMix layouts change as the Dirichlet concentration "
-            "alpha changes; all panels use the same source images and fixed k."
+            "Shows how LabelMix layouts change as alpha changes the ranked "
+            "region weights; all panels use the same source images and fixed k."
         ),
         "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
         "img_size": cfg.img_size,
@@ -1238,10 +1515,14 @@ def render_labelmix_alpha_sweep(
         "alpha_values": [float(a) for a in alpha_values],
         "params": {
             "labelmix_k": LABELMIX_K,
-            "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
+            "labelmix_max_aspect": LABELMIX_ALPHA_SWEEP_MAX_ASPECT,
             "single_image_aug": False,
             "shared_source_images_across_panels": True,
             "fixed_seed_base_across_alpha": True,
+            "source_order_head": expected_source_order,
+            "ranked_weight_policy": ranked_weight_policy,
+            "ranked_weight_floor": LABELMIX_RANKED_WEIGHT_FLOOR,
+            "ranked_layout_pixel_eps": LABELMIX_RANKED_LAYOUT_EPS,
         },
         "files": files_meta,
     })
@@ -1266,6 +1547,13 @@ def _parse_args() -> argparse.Namespace:
         "--source-name", type=str, default=None,
         help="Human-readable source name for metadata.json. If omitted, "
              "derived from --source-dir when possible.",
+    )
+    parser.add_argument(
+        "--preferred-source-ids", type=int, nargs="*",
+        default=list(DEFAULT_PREFERRED_SOURCE_IDS),
+        help="When --source-dir contains files named like imagenet1k_0014.jpg, "
+             "place these numeric ids first in the shared source-image pool. "
+             "Pass the flag with no ids to disable.",
     )
     parser.add_argument(
         "--hfds-cache-dir", type=str, default=DEFAULT_HFDS_CACHE_DIR,
@@ -1318,8 +1606,8 @@ def _parse_args() -> argparse.Namespace:
         help="Where to write PNG figures (directory will be created).",
     )
     parser.add_argument(
-        "--num-comparison-panels", type=int, default=4,
-        help="Panels per row in aug_comparison (figure 1).",
+        "--num-comparison-panels", type=int, default=1,
+        help="Basic examples per augmentation in aug_comparison (figure 1).",
     )
     parser.add_argument(
         "--num-randomness-panels", type=int, default=8,
@@ -1345,26 +1633,33 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_source_images(args: argparse.Namespace) -> List[torch.Tensor]:
+def _resolve_source_images(args: argparse.Namespace) -> Tuple[List[torch.Tensor], Tuple[str, ...]]:
     if args.source_dir:
         return _load_images_from_dir(
             args.source_dir,
             num=args.num_source_images,
             input_size=args.img_size,
+            preferred_source_ids=tuple(args.preferred_source_ids),
         )
     if args.use_timm_dataset:
-        return _load_images_from_timm(
-            dataset_spec=args.use_timm_dataset,
-            data_dir=args.timm_data_dir,
-            split=args.timm_split,
-            input_key=args.timm_input_key,
-            num=args.num_source_images,
+        return (
+            _load_images_from_timm(
+                dataset_spec=args.use_timm_dataset,
+                data_dir=args.timm_data_dir,
+                split=args.timm_split,
+                input_key=args.timm_input_key,
+                num=args.num_source_images,
+            ),
+            (),
         )
     if args.hfds_cache_dir and os.path.isdir(args.hfds_cache_dir):
-        return _load_images_from_hfds_arrow(
-            cache_dir=args.hfds_cache_dir,
-            num=args.num_source_images,
-            split=args.hfds_split,
+        return (
+            _load_images_from_hfds_arrow(
+                cache_dir=args.hfds_cache_dir,
+                num=args.num_source_images,
+                split=args.hfds_split,
+            ),
+            (),
         )
     raise SystemExit(
         "No source of images available. Either:\n"
@@ -1386,7 +1681,7 @@ def main() -> None:
     ensure_dirs()
     os.makedirs(args.out_dir, exist_ok=True)
 
-    images = _resolve_source_images(args)
+    images, source_image_names = _resolve_source_images(args)
 
     source_name = args.source_name
     if source_name is None:
@@ -1404,6 +1699,7 @@ def main() -> None:
 
     cfg = ShowcaseConfig(
         source_images=images,
+        source_image_names=source_image_names,
         img_size=args.img_size,
         seed=args.seed,
         out_dir=args.out_dir,
@@ -1411,9 +1707,8 @@ def main() -> None:
         source_name=source_name,
     )
 
-    # Figure 1 (two flavors).
+    # Figure 1: basic-form augmentations only.
     render_aug_comparison(cfg, flavor="clean", num_panels=args.num_comparison_panels)
-    render_aug_comparison(cfg, flavor="vit_wee", num_panels=args.num_comparison_panels)
     # Figure 2.
     render_labelmix_randomness(cfg, num_panels=args.num_randomness_panels)
     # Figure 3.

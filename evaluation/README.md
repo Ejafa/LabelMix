@@ -99,8 +99,14 @@ evaluation/
    ```
 
    A normal ``augmentation_showcase.py`` run renders all showcase image groups,
-   including ``labelmix_alpha_sweep/`` with the default alpha values
+   including one basic ``aug_comparison_clean/`` example per augmentation and
+   ``labelmix_alpha_sweep/`` with the default alpha values
    ``0.05 0.1 0.3 0.5 1.0 1.5 3.0 5.0``.
+   When the source directory contains ``imagenet1k_####.jpg`` files, the
+   showcase places the preferred animal sample ids
+   ``14 20 22 30 35 43 58 64 67 68`` first in the shared source-image pool.
+   Override with ``--preferred-source-ids`` or pass that flag with no ids to
+   keep pure filename ordering.
 
    This requires the ``datasets`` package and access to the gated
    ``ILSVRC/imagenet-1k`` dataset.  Pass ``--token`` or set ``HF_TOKEN`` if
