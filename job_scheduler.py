@@ -593,7 +593,7 @@ def _build_profile_cmd_timm(
         if tok.startswith("--output="):
             final_tokens.append("--output=/tmp/profile_runs")
             continue
-            final_tokens.append(tok)
+        final_tokens.append(tok)
 
     # Mirror the detectron2 profiler: pin `python` to the scheduler's own
     # interpreter so we never depend on whatever `python` happens to be
