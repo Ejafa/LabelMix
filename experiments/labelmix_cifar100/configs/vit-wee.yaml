@@ -1,4 +1,4 @@
-aa: rand-m5-inc1-mstd1.0-n3
+aa: rand-m2-inc1-mstd1.0-n3
 amp: true
 amp_dtype: float16
 amp_impl: native
@@ -35,7 +35,7 @@ decay_rate: 0.1
 device: cuda
 device_modules: null
 dist_bn: reduce
-drop: 0.0
+drop: 0.1
 drop_block: null
 drop_connect: null
 drop_path: 0.2
@@ -67,9 +67,9 @@ local_rank: 0
 log_interval: 50
 log_wandb: false
 lr: null
-lr_base: 1.5e-3
+lr_base: 5e-3
 lr_base_scale: ''
-lr_base_size: 1024
+lr_base_size: 512
 lr_cycle_decay: 0.5
 lr_cycle_limit: 1
 lr_cycle_mul: 1.0

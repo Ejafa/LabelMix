@@ -88,6 +88,7 @@ def write_results_csv(
     cfg: EvalConfig,
     errors: Mapping[str, str],
     mapping: Mapping[str, str],
+    merge_existing: bool = False,
 ) -> None:
     """Serialize evaluation results + per-run errors to a single CSV.
 
@@ -97,10 +98,36 @@ def write_results_csv(
 
     Metric columns are the stable sorted union across all runs, so adding a
     new metric to ``METRIC_REGISTRY`` extends the CSV automatically.
+
+    When ``merge_existing`` is set and ``path`` already exists, rows from the
+    old file are preserved for every ``name`` that is not in ``results`` or
+    ``errors`` of this call. This keeps partial progress across resumed runs.
     """
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
 
     metric_keys = sorted({k for r in results for k in r.metrics.keys()})
+
+    preserved_rows: list[dict[str, Any]] = []
+    existing_metric_keys: set[str] = set()
+    if merge_existing and os.path.isfile(path):
+        current_names = {r.name for r in results} | set(errors.keys())
+        try:
+            with open(path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                fieldnames = reader.fieldnames or []
+                known = set(cfg.fixed_columns) | set(cfg.args_columns) | {
+                    "eval_time_s", "error"
+                }
+                existing_metric_keys = {c for c in fieldnames if c not in known}
+                for row in reader:
+                    n = row.get("name")
+                    if n and n not in current_names:
+                        preserved_rows.append(row)
+        except Exception:  # noqa: BLE001 - ignore corrupt CSV, start fresh.
+            preserved_rows = []
+            existing_metric_keys = set()
+
+    metric_keys = sorted(set(metric_keys) | existing_metric_keys)
     header = (
         list(cfg.fixed_columns)
         + list(cfg.args_columns)
@@ -108,9 +135,15 @@ def write_results_csv(
         + ["eval_time_s", "error"]
     )
 
-    with open(path, "w", newline="") as f:
+    # Write to a sibling tempfile and rename to make the write atomic.
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=header)
         writer.writeheader()
+
+        for old in preserved_rows:
+            row = {k: old.get(k, "") for k in header}
+            writer.writerow(row)
 
         for r in results:
             row: Dict[str, Any] = {
@@ -133,3 +166,5 @@ def write_results_csv(
             row["run_dir"] = mapping.get(name, "")
             row["error"] = err
             writer.writerow(row)
+
+    os.replace(tmp_path, path)

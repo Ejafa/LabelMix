@@ -1,4 +1,4 @@
-aa: rand-m6-inc1-mstd1.0-n3
+aa: rand-m3-inc1-mstd1.0-n3
 amp: true
 amp_dtype: bfloat16
 amp_impl: native
