@@ -146,3 +146,4 @@ in1k-main
 mixed_loss
 
 detectron2_vitdet/datasets
+evaluation/data
