@@ -2,7 +2,7 @@
 """Render the augmentation-showcase *images* for the LabelMix paper.
 
 This script emits raw per-image PNGs only — the final figures (captions,
-column labels, etc.) are composed in LaTeX later.  Three image sets are
+column labels, etc.) are composed in LaTeX later.  Four image sets are
 produced, all reading from the *same* pool of source images so that
 visual differences between augmentations are attributable to the
 augmentation itself, not to a different image crop:
@@ -21,6 +21,10 @@ augmentation itself, not to a different image crop:
 
     3. ``labelmix_k_sweep/`` — one PNG per ``k`` in ``[2, 10]``, all
        with ``alpha=0.5`` and ``sampling_max_aspect=20``.
+
+    4. ``labelmix_alpha_sweep/`` — one PNG per ``alpha`` in
+       ``[0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0]``, all with ``k=6`` and
+       ``sampling_max_aspect=20``.
 
 Every PNG is written at two resolutions (256x256 and 1024x1024) and a
 render is skipped if the output PNG already exists.  The random seed is
@@ -60,9 +64,13 @@ Output
     │   ├── metadata.json
     │   ├── panel1_256.png / _1024.png
     │   └── ...
-    └── labelmix_k_sweep/
+    ├── labelmix_k_sweep/
         ├── metadata.json
         ├── k2_256.png / _1024.png
+        └── ...
+    └── labelmix_alpha_sweep/
+        ├── metadata.json
+        ├── alpha0_05_256.png / _1024.png
         └── ...
 """
 from __future__ import annotations
@@ -134,6 +142,7 @@ VIT_WEE_AUG = dict(
 LABELMIX_ALPHA: float = 0.5
 LABELMIX_K: int = 6
 LABELMIX_MAX_ASPECT: float = 20.0
+LABELMIX_ALPHA_SWEEP: Tuple[float, ...] = (0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0)
 
 # Mixup/CutMix defaults mirroring vit-wee.yaml.
 MIXUP_ALPHA: float = 0.8
@@ -730,12 +739,12 @@ def _resize_uint8(arr: np.ndarray, size: int) -> np.ndarray:
     return np.asarray(im, dtype=np.uint8)
 
 
-def _save_png(arr_hwc_uint8: np.ndarray, path: str) -> None:
+def _save_png(arr_hwc_uint8: np.ndarray, path: str, *, overwrite: bool = False) -> None:
     """Write an HWC uint8 array to ``path`` (parent dir created on demand).
 
-    Idempotent: does nothing if ``path`` already exists.
+    Idempotent by default: does nothing if ``path`` already exists.
     """
-    if os.path.exists(path):
+    if os.path.exists(path) and not overwrite:
         return
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     Image.fromarray(arr_hwc_uint8).save(path, format="PNG", optimize=False)
@@ -746,6 +755,8 @@ def _save_tensor_at_sizes(
     dir_path: str,
     stem: str,
     tile_sizes: Sequence[int],
+    *,
+    overwrite: bool = False,
 ) -> List[str]:
     """Save ``t`` (CHW float) as ``dir_path/<stem>_<size>.png`` for each size.
 
@@ -755,8 +766,8 @@ def _save_tensor_at_sizes(
     written: List[str] = []
     for tile_px in tile_sizes:
         out_path = os.path.join(dir_path, f"{stem}_{tile_px}.png")
-        if not os.path.exists(out_path):
-            _save_png(_resize_uint8(base, tile_px), out_path)
+        if overwrite or not os.path.exists(out_path):
+            _save_png(_resize_uint8(base, tile_px), out_path, overwrite=overwrite)
             _logger.info("Wrote %s", out_path)
         written.append(out_path)
     return written
@@ -806,6 +817,7 @@ class ShowcaseConfig:
     seed: int = 42
     out_dir: str = str(FIGURES_DIR / "augmentation_showcase")
     tile_sizes: Tuple[int, ...] = (256, 1024)
+    source_name: str = "ImageNet-1k"
 
     def dir_for(self, group: str) -> str:
         """Return the per-figure subdirectory for ``group``."""
@@ -989,7 +1001,7 @@ def render_aug_comparison(
         ),
         "flavor": flavor,
         "flavor_description": flavor_desc,
-        "source": "ImageNet-1k (shared source images across augmentations)",
+        "source": f"{cfg.source_name} (shared source images across augmentations)",
         "img_size": cfg.img_size,
         "tile_sizes": list(cfg.tile_sizes),
         "num_panels_per_aug": num_panels,
@@ -1024,6 +1036,20 @@ def render_labelmix_randomness(
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     pre_imgs = _apply_transform(cfg.source_images, transform)
+    shared_chunk = pre_imgs[:LABELMIX_K]
+    if len(shared_chunk) < LABELMIX_K:
+        shared_chunk = (pre_imgs * (LABELMIX_K // len(pre_imgs) + 1))[:LABELMIX_K]
+
+    metadata_path = os.path.join(dir_path, "metadata.json")
+    overwrite_stale_cache = False
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r") as f:
+                old_meta = json.load(f)
+            old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
+            overwrite_stale_cache = not bool(old_params.get("shared_source_images_across_panels"))
+        except (OSError, json.JSONDecodeError):
+            overwrite_stale_cache = True
 
     files_meta: List[Dict] = []
     for p in range(num_panels):
@@ -1032,35 +1058,40 @@ def render_labelmix_randomness(
             os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
             for tp in cfg.tile_sizes
         ]
-        if not all(existing):
+        if overwrite_stale_cache or not all(existing):
             # Deterministic, independent seed per panel.
             torch.manual_seed(cfg.seed + p * 7919)
             np.random.seed(cfg.seed + p * 7919)
-            start = p * LABELMIX_K
-            chunk = pre_imgs[start:start + LABELMIX_K]
-            if len(chunk) < LABELMIX_K:
-                chunk = (pre_imgs + pre_imgs)[start:start + LABELMIX_K]
             composite = _compose_labelmix(
-                chunk,
+                shared_chunk,
                 alpha=LABELMIX_ALPHA, k=LABELMIX_K,
                 sampling_max_aspect=LABELMIX_MAX_ASPECT,
             )
-            _save_tensor_at_sizes(composite, dir_path, stem, cfg.tile_sizes)
+            _save_tensor_at_sizes(
+                composite,
+                dir_path,
+                stem,
+                cfg.tile_sizes,
+                overwrite=overwrite_stale_cache,
+            )
         files_meta.append({
             "stem": stem,
             "aug": "labelmix",
             "panel": p + 1,
-            "notes": "Independent LabelMix draw; differs from other panels only in seed.",
+            "notes": (
+                "Independent LabelMix draw using the same source images as "
+                "every other panel; differs only in seed/layout."
+            ),
         })
 
     _write_metadata(dir_path, {
         "group": group,
         "purpose": (
             "Illustrates the randomness of LabelMix layouts: every PNG uses "
-            "the same (alpha, k, aspect-cap) hyperparameters, only the "
-            "random seed changes."
+            "the same source images and the same (alpha, k, aspect-cap) "
+            "hyperparameters; only the random seed changes."
         ),
-        "source": "ImageNet-1k, clean (resize + center-crop) transform only",
+        "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
         "img_size": cfg.img_size,
         "tile_sizes": list(cfg.tile_sizes),
         "num_panels": num_panels,
@@ -1069,6 +1100,7 @@ def render_labelmix_randomness(
             "labelmix_k": LABELMIX_K,
             "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
             "single_image_aug": False,
+            "shared_source_images_across_panels": True,
         },
         "files": files_meta,
     })
@@ -1124,7 +1156,7 @@ def render_labelmix_k_sweep(
             "Shows how LabelMix layouts scale with the number of mixed "
             "images k; all other hyperparameters are held fixed."
         ),
-        "source": "ImageNet-1k, clean (resize + center-crop) transform only",
+        "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
         "img_size": cfg.img_size,
         "tile_sizes": list(cfg.tile_sizes),
         "k_values": list(int(k) for k in k_values),
@@ -1132,6 +1164,84 @@ def render_labelmix_k_sweep(
             "labelmix_alpha": LABELMIX_ALPHA,
             "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
             "single_image_aug": False,
+        },
+        "files": files_meta,
+    })
+
+
+def _alpha_stem(alpha: float) -> str:
+    """Stable filename stem for an alpha value."""
+    return f"alpha{alpha:g}".replace(".", "_").replace("-", "m")
+
+
+def render_labelmix_alpha_sweep(
+    cfg: ShowcaseConfig,
+    *,
+    alpha_values: Sequence[float] = LABELMIX_ALPHA_SWEEP,
+) -> None:
+    """Set 4: one LabelMix PNG per ``alpha`` value, same k/aspect cap.
+
+    Output directory: ``<out>/labelmix_alpha_sweep/``.  Every panel uses
+    the same source images and same RNG seed base so visible differences
+    are attributable to the Dirichlet concentration alpha.
+    """
+    group = "labelmix_alpha_sweep"
+    dir_path = cfg.dir_for(group)
+    os.makedirs(dir_path, exist_ok=True)
+
+    transform = _build_clean_transform(cfg.img_size)
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    pre_imgs = _apply_transform(cfg.source_images, transform)
+    shared_chunk = pre_imgs[:LABELMIX_K]
+    if len(shared_chunk) < LABELMIX_K:
+        shared_chunk = (pre_imgs * (LABELMIX_K // len(pre_imgs) + 1))[:LABELMIX_K]
+
+    files_meta: List[Dict] = []
+    for alpha in alpha_values:
+        alpha = float(alpha)
+        stem = _alpha_stem(alpha)
+        existing = [
+            os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
+            for tp in cfg.tile_sizes
+        ]
+        if not all(existing):
+            # Same seed base for every alpha: alpha changes the Dirichlet
+            # distribution, not the chosen source images or high-level seed.
+            torch.manual_seed(cfg.seed + 104729)
+            np.random.seed(cfg.seed + 104729)
+            composite = _compose_labelmix(
+                shared_chunk,
+                alpha=alpha, k=LABELMIX_K,
+                sampling_max_aspect=LABELMIX_MAX_ASPECT,
+            )
+            _save_tensor_at_sizes(composite, dir_path, stem, cfg.tile_sizes)
+        files_meta.append({
+            "stem": stem,
+            "aug": "labelmix",
+            "alpha": alpha,
+            "notes": (
+                f"LabelMix composite with alpha={alpha:g}; source images, "
+                f"k={LABELMIX_K}, aspect cap, and seed base are fixed."
+            ),
+        })
+
+    _write_metadata(dir_path, {
+        "group": group,
+        "purpose": (
+            "Shows how LabelMix layouts change as the Dirichlet concentration "
+            "alpha changes; all panels use the same source images and fixed k."
+        ),
+        "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
+        "img_size": cfg.img_size,
+        "tile_sizes": list(cfg.tile_sizes),
+        "alpha_values": [float(a) for a in alpha_values],
+        "params": {
+            "labelmix_k": LABELMIX_K,
+            "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
+            "single_image_aug": False,
+            "shared_source_images_across_panels": True,
+            "fixed_seed_base_across_alpha": True,
         },
         "files": files_meta,
     })
@@ -1151,6 +1261,11 @@ def _parse_args() -> argparse.Namespace:
         "--source-dir", type=str, default=None,
         help="Directory of at least %d source images (.jpg/.png). "
              "If set, used instead of the HF Arrow cache." % NUM_SOURCE_IMAGES,
+    )
+    parser.add_argument(
+        "--source-name", type=str, default=None,
+        help="Human-readable source name for metadata.json. If omitted, "
+             "derived from --source-dir when possible.",
     )
     parser.add_argument(
         "--hfds-cache-dir", type=str, default=DEFAULT_HFDS_CACHE_DIR,
@@ -1215,6 +1330,11 @@ def _parse_args() -> argparse.Namespace:
         help="k values to render in labelmix_k_sweep (figure 3).",
     )
     parser.add_argument(
+        "--alpha-sweep", type=float, nargs="+", default=list(LABELMIX_ALPHA_SWEEP),
+        help="alpha values to render in labelmix_alpha_sweep (figure 4). "
+             "Rendered by default.",
+    )
+    parser.add_argument(
         "--tile-sizes", type=int, nargs="+", default=[256, 1024],
         help="Per-tile output resolutions; one PNG per size per figure.",
     )
@@ -1268,12 +1388,27 @@ def main() -> None:
 
     images = _resolve_source_images(args)
 
+    source_name = args.source_name
+    if source_name is None:
+        source_name = "ImageNet-1k"
+        if args.source_dir:
+            source_dir_name = os.path.basename(os.path.normpath(args.source_dir)).lower()
+            if "picsum" in source_dir_name:
+                source_name = "Lorem Picsum"
+            elif "commons" in source_dir_name:
+                source_name = "Wikimedia Commons object photos"
+            elif "imagenet" in source_dir_name and "animal" in source_dir_name:
+                source_name = "Hugging Face ImageNet-1k animal samples"
+            elif "imagenet" in source_dir_name:
+                source_name = "Hugging Face ImageNet-1k samples"
+
     cfg = ShowcaseConfig(
         source_images=images,
         img_size=args.img_size,
         seed=args.seed,
         out_dir=args.out_dir,
         tile_sizes=tuple(args.tile_sizes),
+        source_name=source_name,
     )
 
     # Figure 1 (two flavors).
@@ -1283,6 +1418,8 @@ def main() -> None:
     render_labelmix_randomness(cfg, num_panels=args.num_randomness_panels)
     # Figure 3.
     render_labelmix_k_sweep(cfg, k_values=tuple(args.k_sweep))
+    # Figure 4.
+    render_labelmix_alpha_sweep(cfg, alpha_values=tuple(args.alpha_sweep))
 
 
 if __name__ == "__main__":

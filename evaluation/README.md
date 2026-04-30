@@ -74,6 +74,42 @@ evaluation/
    python -m evaluation.plots.calibration_ece_bars
    ```
 
+   The augmentation showcase can be rendered without a local ImageNet cache by
+   first pulling a small Lorem Picsum image pool:
+
+   ```bash
+   python evaluation/scripts/download_picsum_images.py
+   python evaluation/figures/augmentation_showcase.py \
+       --source-dir evaluation/data/raw/picsum_augmentation_showcase_diverse
+   ```
+
+   By default the downloader samples 128 images from a larger Picsum catalog
+   window and balances the selection across authors.  Change ``--seed`` for a
+   different reproducible pool, or increase ``--catalog-pages`` to sample from
+   a wider catalog slice.
+
+   To use animal-focused ImageNet-1k samples without downloading the full
+   dataset, stream only the required samples from Hugging Face:
+
+   ```bash
+   python evaluation/scripts/download_hf_imagenet_samples.py
+   python evaluation/figures/augmentation_showcase.py \
+       --source-dir evaluation/data/raw/hf_imagenet1k_animal_samples \
+       --out-dir evaluation/data/processed/figures/augmentation_showcase_hf_imagenet1k_animals
+   ```
+
+   A normal ``augmentation_showcase.py`` run renders all showcase image groups,
+   including ``labelmix_alpha_sweep/`` with the default alpha values
+   ``0.05 0.1 0.3 0.5 1.0 1.5 3.0 5.0``.
+
+   This requires the ``datasets`` package and access to the gated
+   ``ILSVRC/imagenet-1k`` dataset.  Pass ``--token`` or set ``HF_TOKEN`` if
+   your Hugging Face login is not already configured.  The downloader defaults
+   to the animal class preset (ImageNet labels 0..397), saves at most two
+   images per class for diversity, and filters before decoding images.  Set
+   ``--num-images`` lower for a smaller smoke test, or use
+   ``--class-preset all`` to disable the animal filter.
+
 ## Adding a new metric
 
 1. Create `evaluation/metrics/my_metric.py`:
