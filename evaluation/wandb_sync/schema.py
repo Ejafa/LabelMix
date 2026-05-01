@@ -12,6 +12,12 @@ Each run is stored under ``<root>/<group>/<run_id>/`` with this exact layout:
 
 If a run has no group, it is stored under ``<root>/_ungrouped/<run_id>/``.
 
+When a run comes from a non-root W&B project, the group folder is prefixed
+with the project name (e.g. ``<root>/<project>_<group>/<run_id>/``) so
+artifacts from different projects never collide under a shared ``--root``.
+The root project (see ``DEFAULT_PROJECT`` in ``wandb_sync.config``) keeps
+the bare ``<group>/`` layout for backwards compatibility.
+
 ``run_id`` is the W&B primary key; ``run.name`` is *not* unique across a
 project so we never put it into the directory name.
 """
@@ -43,9 +49,21 @@ def slug(name: str) -> str:
     return _SLUG_RE.sub("_", name).strip("_") or "run"
 
 
-def run_dir(root: Path, run_id: str, group: Optional[str] = None) -> Path:
-    """Canonical directory for a single run, nested under its W&B group."""
+def run_dir(
+    root: Path,
+    run_id: str,
+    group: Optional[str] = None,
+    project_prefix: Optional[str] = None,
+) -> Path:
+    """Canonical directory for a single run, nested under its W&B group.
+
+    When ``project_prefix`` is given (typically only for non-root projects),
+    the group folder is renamed to ``<project_prefix>_<group_slug>`` so runs
+    from different projects stay isolated even when sharing a ``--root``.
+    """
     group_slug = slug(group) if group else UNGROUPED_DIR
+    if project_prefix:
+        group_slug = f"{slug(project_prefix)}_{group_slug}"
     return Path(root) / group_slug / run_id
 
 

@@ -58,7 +58,7 @@ local_rank: 0
 log_interval: 50
 log_wandb: false
 lr: null
-lr_base: 0.4
+lr_base: 0.02
 lr_base_scale: ''
 lr_base_size: 1024
 lr_cycle_decay: 0.5
@@ -88,7 +88,7 @@ no_ddp_bb: false
 no_prefetcher: false
 no_resume_opt: false
 num_classes: null
-opt: sgd
+opt: muon
 opt_betas: null
 opt_eps: 1.0e-08
 opt_kwargs: {}

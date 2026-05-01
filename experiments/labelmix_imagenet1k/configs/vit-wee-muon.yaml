@@ -1,11 +1,13 @@
-aa: rand-m7-inc1-mstd1.0-n3
+aa: rand-m6-inc1-mstd1.0-n3
 amp: true
 amp_dtype: float16
 amp_impl: native
-aug_repeats: 3.0
+aug_repeats: 0
 aug_splits: 0
 batch_size: 1024
 bce_loss: false
+bce_pos_weight: null
+bce_sum: false
 bce_target_thresh: null
 bn_eps: null
 bn_momentum: null
@@ -15,12 +17,13 @@ class_map: ''
 clip_grad: null
 clip_mode: norm
 color_jitter: null
+color_jitter_prob: null
 cooldown_epochs: 10
 crop_pct: 0.95
 cutmix: 1.0
 cutmix_minmax: null
 data: null
-data_dir: /data/imagenet/
+data_dir: /data/f/imagenet/
 dataset: imagenet
 dataset_download: false
 decay_epochs: 100
@@ -29,6 +32,8 @@ decay_milestones:
 - 180
 - 270
 decay_rate: 0.1
+device: cuda
+device_modules: null
 dist_bn: reduce
 drop: 0.0
 drop_block: null
@@ -41,15 +46,19 @@ experiment: ''
 fast_norm: false
 force_cpu: false
 fuser: ''
+gaussian_blur_prob: null
 gp: null
 grad_accum_steps: 1
 grad_checkpointing: false
+grayscale_prob: null
 head_init_bias: null
 head_init_scale: 0.0
 hflip: 0.5
 img_size: 256
 in_chans: null
 initial_checkpoint: ''
+input_img_mode: null
+input_key: null
 input_size: null
 interpolation: ''
 jsd_loss: false
@@ -58,7 +67,7 @@ local_rank: 0
 log_interval: 50
 log_wandb: false
 lr: null
-lr_base: 0.4
+lr_base: 0.02
 lr_base_scale: ''
 lr_base_size: 1024
 lr_cycle_decay: 0.5
@@ -75,10 +84,11 @@ mixup_mode: batch
 mixup_off_epoch: 0
 mixup_prob: 1.0
 mixup_switch_prob: 0.5
-model: vit_medium_patch16_reg1_gap_256
-model_ema: false
+model: vit_wee_patch16_reg1_gap_256
+model_ema: true
 model_ema_decay: 0.9998
 model_ema_force_cpu: false
+model_ema_warmup: true
 model_kwargs:
   fix_init: true
   img_size: 256
@@ -88,7 +98,7 @@ no_ddp_bb: false
 no_prefetcher: false
 no_resume_opt: false
 num_classes: null
-opt: sgd
+opt: muon
 opt_betas: null
 opt_eps: 1.0e-08
 opt_kwargs: {}
@@ -96,6 +106,7 @@ output: ''
 patience_epochs: 10
 pin_mem: true
 pretrained: false
+pretrained_path: null
 ratio:
 - 0.75
 - 1.3333333333333333
@@ -118,12 +129,16 @@ start_epoch: null
 std: null
 sync_bn: false
 synchronize_step: false
+target_key: null
 torchcompile: inductor
 torchscript: false
+train_crop_mode: null
 train_interpolation: random
+train_num_samples: null
 train_split: train
 tta: 0
 use_multi_epochs_loader: false
+val_num_samples: null
 val_split: validation
 validation_batch_size: null
 vflip: 0.0

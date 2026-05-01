@@ -391,7 +391,14 @@ def sync_project(
                 run.id, getattr(run, "display_name", "unnamed"),
                 run_group, getattr(run, "state", "unknown"),
             )
-            dest = schema_run_dir(root, run.id, group=run_group)
+            # Non-root projects get their name prefixed onto the group folder
+            # so artifacts from different projects never collide when users
+            # share a single ``--root``.  The root project keeps the bare
+            # ``<group>/<run_id>/`` layout for backwards compatibility.
+            project_prefix = project if project != DEFAULT_PROJECT else None
+            dest = schema_run_dir(
+                root, run.id, group=run_group, project_prefix=project_prefix,
+            )
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 _download_one(run, dest, include_files=include_files)
