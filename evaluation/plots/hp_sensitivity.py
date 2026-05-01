@@ -17,11 +17,11 @@ Produces three figures from
    min–max over α).  Provides the complementary view of the same grid.
 
 3. ``hp_sensitivity_heatmaps_vit_wee.pdf`` (appendix, 2x2 grid):
-   rows = metric, cols = loss.  Each cell is an 8x8 α × k heatmap of
-   Δ = metric − baseline (the ``baseline`` row of the combined CSV is the
-   zero).  Colour uses a symmetric linear scale centred on zero
-   (blue = better than baseline, red = worse).  The bare ``single-aug``
-   value is printed in each panel title for context.
+   rows = metric, cols = loss.  Each cell is an 8x8 α × k heatmap of the
+   *absolute* metric value.  Colour uses a symmetric linear scale centred
+   on the ``baseline`` mean (blue = better than baseline, red = worse).
+   Baseline and ``single-aug`` reference values with their ±std are
+   printed in each panel subtitle for context.
 
 Every rendered PDF is accompanied by a ``*.meta.json`` sidecar that records
 the plot id, axes, reference values and headline numbers so an agent can
@@ -58,7 +58,8 @@ INPUT_FILE = PROCESSED_DIR / "hyperparameter_sensitivity_vit_wee_with_baselines.
 HP_FIGURES_DIR = FIGURES_DIR / "hyperparameter"
 OUTPUT_SENSITIVITY = HP_FIGURES_DIR / "hp_sensitivity_vit_wee.pdf"
 OUTPUT_SENSITIVITY_K = HP_FIGURES_DIR / "hp_sensitivity_k_vit_wee.pdf"
-OUTPUT_HEATMAPS = HP_FIGURES_DIR / "hp_sensitivity_heatmaps_vit_wee.pdf"
+OUTPUT_HEATMAPS_TOP1 = HP_FIGURES_DIR / "hp_sensitivity_heatmaps_top1_vit_wee.pdf"
+OUTPUT_HEATMAPS_ECE = HP_FIGURES_DIR / "hp_sensitivity_heatmaps_ece_vit_wee.pdf"
 
 # Human-readable loss names. Internal CSV keys ('pl_loss', 'soft_ce') are
 # left untouched for backward compatibility with the extraction script.
@@ -225,7 +226,7 @@ def plot_sensitivity(df: pd.DataFrame, *, sweep: str = "alpha") -> plt.Figure:
     _plot_metric(axes[1], lm, "ece", baselines, sweep=sweep, yscale="log")
     axes[1].set_ylabel(r"ECE@15 (%, $\downarrow$, log)")
 
-    # Single shared legend above the panels.
+    # Single shared legend below the panels.
     handles, labels = axes[0].get_legend_handles_labels()
     # De-duplicate while preserving order.
     seen = set()
@@ -233,13 +234,15 @@ def plot_sensitivity(df: pd.DataFrame, *, sweep: str = "alpha") -> plt.Figure:
     fig.legend(
         [h for h, _ in uniq],
         [l for _, l in uniq],
-        loc="upper center",
+        loc="lower center",
         ncol=len(uniq),
-        bbox_to_anchor=(0.5, 1.02),
+        bbox_to_anchor=(0.5, -0.02),
         handlelength=2.0,
         columnspacing=1.2,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    # Leave room at the bottom for the shared legend; the top is flush so
+    # the panels can use the full vertical budget.
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
     return fig
 
 
@@ -356,31 +359,79 @@ def _pivot(lm: pd.DataFrame, loss: str, metric: str) -> pd.DataFrame:
     return piv
 
 
-def _linear_sym_norm(delta: np.ndarray) -> Normalize:
-    """Plain symmetric linear normalisation around zero (vmin = -vmax).
+def _sym_norm_around(
+    center: float,
+    values: np.ndarray,
+    *,
+    clip_quantile: float | None = 0.90,
+    min_half_span: float = 1.5,
+) -> tuple[Normalize, bool]:
+    """Symmetric linear normalisation centred on ``center``.
 
-    We deliberately let the largest |Δ| drive ``vmax`` so the colour scale is
-    honest: strong outliers look strong, and the zero point stays exactly at
-    the colourmap midpoint.
+    A single severe outlier (e.g. the α=3, k=10 Top-1 collapse) would
+    otherwise stretch the full-range symmetric scale so much that the
+    ±2 pp neighbourhood around the baseline — where all interesting
+    LabelMix cells live — is compressed into a narrow pale band.  We
+    therefore clip the half-span to the ``clip_quantile`` of
+    |value − center|, so outliers saturate (the colourbar grows
+    "extend" arrows) while the baseline neighbourhood gets real
+    dynamic range.
+
+    Parameters
+    ----------
+    clip_quantile:
+        Quantile of |value − center| used to set the half-span.
+        ``None`` disables clipping (old behaviour, = full range).
+    min_half_span:
+        Lower bound on the half-span.  Prevents an almost-flat panel
+        from collapsing to a zero-range scale.
+
+    Returns
+    -------
+    (norm, clipped):
+        ``norm`` is the :class:`~matplotlib.colors.Normalize`; ``clipped``
+        is ``True`` iff at least one finite cell lies outside
+        ``[vmin, vmax]`` (so the colourbar should grow ``extend='both'``).
     """
-    vmax = float(np.nanmax(np.abs(delta))) if np.isfinite(delta).any() else 1.0
-    vmax = max(vmax, 1e-6)
-    return Normalize(vmin=-vmax, vmax=vmax)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return Normalize(vmin=center - 1.0, vmax=center + 1.0), False
+
+    deviations = np.abs(finite - center)
+    full_half = float(deviations.max())
+    if clip_quantile is None:
+        half = full_half
+    else:
+        half = float(np.quantile(deviations, clip_quantile))
+    half = max(half, min_half_span, 1e-6)
+    clipped = full_half > half + 1e-9
+    return Normalize(vmin=center - half, vmax=center + half), clipped
 
 
-def _draw_heatmap(ax, piv: pd.DataFrame, baseline_val: float, single_aug_val: float,
-                  *, lower_is_better: bool, title: str):
-    delta = piv.values - baseline_val
-    norm = _linear_sym_norm(delta)
+def _draw_heatmap(
+    ax,
+    piv: pd.DataFrame,
+    baseline_mean: float,
+    baseline_std: float,
+    single_aug_mean: float,
+    single_aug_std: float,
+    *,
+    lower_is_better: bool,
+    title: str,
+    norm: Normalize | None = None,
+):
+    values = piv.values
+    if norm is None:
+        norm, _ = _sym_norm_around(baseline_mean, values)
     # Invariant: blue = better than baseline, red = worse.
-    #   - Top-1 (higher better): "better" = delta > 0. RdBu maps high values
-    #     to blue, so use RdBu.
-    #   - ECE  (lower  better): "better" = delta < 0. RdBu maps low values to
-    #     red -- inverted from what we want -- so use RdBu_r (which flips).
+    #   - Top-1 (higher better): "better" = value > baseline. RdBu maps high
+    #     values to blue, so use RdBu.
+    #   - ECE  (lower  better): "better" = value < baseline. RdBu maps low
+    #     values to red -- inverted from what we want -- so use RdBu_r.
     cmap = "RdBu_r" if lower_is_better else "RdBu"
 
     im = ax.imshow(
-        delta,
+        values,
         aspect="auto",
         cmap=cmap,
         norm=norm,
@@ -393,158 +444,214 @@ def _draw_heatmap(ax, piv: pd.DataFrame, baseline_val: float, single_aug_val: fl
     ax.set_yticks(np.arange(piv.shape[0]))
     ax.set_yticklabels([str(k) for k in piv.index])
 
-    # Annotate each cell with the *delta* (what the colour encodes).  Use a
-    # compact format and pick white text on strongly-coloured cells for
-    # contrast.  Colour-strength from the norm covers both halves of the
-    # symlog range consistently.
+    # Annotate each cell with the *absolute* metric value (what the colour
+    # encodes).  White text on strongly-coloured cells keeps contrast.
     for i in range(piv.shape[0]):
         for j in range(piv.shape[1]):
-            d = delta[i, j]
-            if not np.isfinite(d):
+            v = values[i, j]
+            if not np.isfinite(v):
                 continue
-            rel = norm(d)  # in [0, 1], with 0.5 at delta = 0
+            rel = norm(v)  # in [0, 1], with 0.5 at value = baseline
             txt_colour = "white" if abs(rel - 0.5) > 0.40 else "black"
-            # Signed, compact; two decimals is enough for both scales.
-            fmt = f"{d:+.2f}"
-            ax.text(j, i, fmt,
+            ax.text(j, i, f"{v:.2f}",
                     ha="center", va="center",
                     fontsize=5.5, color=txt_colour)
 
     ax.set_xlabel(r"$\alpha$")
     ax.set_ylabel(r"$k$")
-    # Title: baseline on line 1, bare single-aug value on line 2
-    # (Δ is already encoded by the cell colour and cell text).
-    ax.set_title(f"{title}\n"
-                 f"(baseline={baseline_val:.2f}, single-aug={single_aug_val:.2f})",
-                 fontsize=8)
+    # Title: panel label on line 1, baseline / single-aug means ± std on
+    # line 2 so the reader can read the absolute cell values directly
+    # against both references.
+    ax.set_title(
+        f"{title}\n"
+        f"(baseline={baseline_mean:.2f}\u00B1{baseline_std:.2f}, "
+        f"single-aug={single_aug_mean:.2f}\u00B1{single_aug_std:.2f})",
+        fontsize=8,
+    )
     return im
 
 
-def plot_heatmaps(df: pd.DataFrame) -> plt.Figure:
+_METRIC_CFG = {
+    # metric -> (lower_is_better, label)
+    "top1": (False, "Top-1 (%)"),
+    "ece":  (True,  "ECE@15 (%)"),
+}
+
+
+def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
+    """One heatmap row (two losses, side-by-side) for a single ``metric``.
+
+    ``metric`` is one of ``"top1"`` or ``"ece"``.  The figure is a 1×2 grid
+    of heatmaps (one per loss variant) with a shared horizontal colourbar
+    underneath, using the same symmetric-linear-about-baseline colour
+    scale as before.
+    """
+    if metric not in _METRIC_CFG:
+        raise ValueError(f"Unknown metric {metric!r}; expected 'top1' or 'ece'.")
+    lower_is_better, metric_label = _METRIC_CFG[metric]
+
     apply_paper_style()
     lm, baselines = _split(df)
-    bl_top1 = baselines[BASELINE_KEY]["top1_mean"]
-    bl_ece = baselines[BASELINE_KEY]["ece_mean"]
-    sa_top1 = baselines.get(SINGLE_AUG_KEY, {}).get("top1_mean", np.nan)
-    sa_ece = baselines.get(SINGLE_AUG_KEY, {}).get("ece_mean", np.nan)
+    bl = baselines[BASELINE_KEY]
+    sa = baselines.get(SINGLE_AUG_KEY, {})
+    bl_m = bl[f"{metric}_mean"]
+    bl_s = bl[f"{metric}_std"]
+    sa_m = sa.get(f"{metric}_mean", float("nan"))
+    sa_s = sa.get(f"{metric}_std", float("nan"))
 
-    # Widen the figure a touch so the two-decimal Δ text has room to breathe
-    # without having to shrink the font further.
+    # Build a *shared* symmetric norm from the pooled values of all
+    # panels for this metric, so PL and SCE are directly comparable.
+    # Clipping at a high quantile (default 0.90) prevents a single
+    # collapse-cell from draining the colour budget of the entire
+    # baseline neighbourhood; overshoot cells still saturate the
+    # colourmap and are advertised by the colourbar's extend arrows.
+    pooled = np.concatenate([
+        _pivot(lm, loss, metric).values.ravel() for loss in LOSS_ORDER
+    ])
+    shared_norm, clipped = _sym_norm_around(bl_m, pooled, clip_quantile=0.90)
+
+    # 1 row × 2 cols (one panel per loss).  Extra vertical budget at the
+    # bottom reserves room for the shared horizontal colourbar.
     fig, axes = plt.subplots(
-        2, 2,
-        figsize=(DOUBLE_COL_WIDTH * 1.15, 5.6),
+        1, 2,
+        figsize=(DOUBLE_COL_WIDTH * 1.15, 3.4),
         constrained_layout=True,
     )
 
-    cfg = [
-        # (metric, lower_is_better, row, baseline_val, single_aug_val, row_label)
-        ("top1", False, 0, bl_top1, sa_top1, "Top-1 (%)"),
-        ("ece", True, 1, bl_ece, sa_ece, "ECE@15 (%)"),
-    ]
-
-    for metric, lower_is_better, row, bl_val, sa_val, metric_label in cfg:
-        last_im = None
-        for col, loss in enumerate(LOSS_ORDER):
-            piv = _pivot(lm, loss, metric)
-            ax = axes[row, col]
-            title = f"{metric_label} — {LOSS_LABELS[loss]}"
-            last_im = _draw_heatmap(
-                ax, piv, baseline_val=bl_val, single_aug_val=sa_val,
-                lower_is_better=lower_is_better, title=title,
-            )
-        # Shared colorbar per row (Δ vs baseline, symmetric log).
-        cbar = fig.colorbar(last_im, ax=axes[row, :], shrink=0.85, pad=0.02)
-        cbar.set_label(
-            f"Δ{metric_label} vs. baseline  (blue = better)",
-            fontsize=7,
+    last_im = None
+    for col, loss in enumerate(LOSS_ORDER):
+        piv = _pivot(lm, loss, metric)
+        ax = axes[col]
+        title = f"{metric_label} — {LOSS_LABELS[loss]}"
+        last_im = _draw_heatmap(
+            ax, piv,
+            baseline_mean=bl_m, baseline_std=bl_s,
+            single_aug_mean=sa_m, single_aug_std=sa_s,
+            lower_is_better=lower_is_better, title=title,
+            norm=shared_norm,
         )
-        cbar.ax.tick_params(labelsize=7)
+
+    # Single shared horizontal colourbar underneath both panels.
+    # ``extend='both'`` grows pointy ends that advertise the clipped
+    # outliers so the figure stays honest.
+    cbar = fig.colorbar(
+        last_im, ax=axes[:],
+        location="bottom", orientation="horizontal",
+        shrink=0.7, pad=0.08, aspect=40,
+        extend="both" if clipped else "neither",
+    )
+    cbar.set_label(
+        f"{metric_label}  (blue = better than baseline"
+        + ("; arrows: clipped outliers)" if clipped else ")"),
+        fontsize=7,
+    )
+    cbar.ax.tick_params(labelsize=7)
 
     return fig
 
 
-def build_heatmap_metadata(df: pd.DataFrame, out_path: Path) -> dict:
-    """Build a JSON-serialisable metadata dict for the heatmap figure."""
+def build_heatmap_metadata(
+    df: pd.DataFrame, out_path: Path, metric: str = "top1"
+) -> dict:
+    """Build a JSON-serialisable metadata dict for a single-metric heatmap."""
+    if metric not in _METRIC_CFG:
+        raise ValueError(f"Unknown metric {metric!r}; expected 'top1' or 'ece'.")
+    lower_is_better, metric_label = _METRIC_CFG[metric]
+    direction = "lower is better" if lower_is_better else "higher is better"
+
     lm, baselines = _split(df)
     bl = baselines[BASELINE_KEY]
     sa = baselines.get(SINGLE_AUG_KEY, {})
+    bl_val = bl[f"{metric}_mean"]
 
     per_panel = []
-    for metric, direction, bl_val in [
-        ("top1", "higher is better", bl["top1_mean"]),
-        ("ece", "lower is better", bl["ece_mean"]),
-    ]:
-        for loss in LOSS_ORDER:
-            piv = _pivot(lm, loss, metric)
-            if piv.empty:
-                continue
-            delta = piv.values - bl_val
-            best_idx = np.unravel_index(
-                (np.nanargmin if metric == "ece" else np.nanargmax)(piv.values),
-                piv.values.shape,
-            )
-            per_panel.append({
-                "metric": metric,
-                "loss": LOSS_LABELS[loss],
-                "direction": direction,
-                "alpha_grid": [float(a) for a in piv.columns.tolist()],
-                "k_grid": [int(k) for k in piv.index.tolist()],
-                "baseline_value": float(bl_val),
-                "delta": {
-                    "min": float(np.nanmin(delta)),
-                    "max": float(np.nanmax(delta)),
-                    "mean": float(np.nanmean(delta)),
-                    "n_better_than_baseline": int(
-                        (delta < 0).sum() if metric == "ece" else (delta > 0).sum()
-                    ),
-                    "n_total": int(np.isfinite(delta).sum()),
-                },
-                "best_cell": {
-                    "k": int(piv.index[best_idx[0]]),
-                    "alpha": float(piv.columns[best_idx[1]]),
-                    "value": float(piv.values[best_idx]),
-                    "delta_vs_baseline": float(piv.values[best_idx] - bl_val),
-                },
-            })
+    for loss in LOSS_ORDER:
+        piv = _pivot(lm, loss, metric)
+        if piv.empty:
+            continue
+        values = piv.values
+        delta = values - bl_val
+        best_idx = np.unravel_index(
+            (np.nanargmin if lower_is_better else np.nanargmax)(values),
+            values.shape,
+        )
+        per_panel.append({
+            "metric": metric,
+            "loss": LOSS_LABELS[loss],
+            "direction": direction,
+            "alpha_grid": [float(a) for a in piv.columns.tolist()],
+            "k_grid": [int(k) for k in piv.index.tolist()],
+            "baseline_value": float(bl_val),
+            "value": {
+                "min": float(np.nanmin(values)),
+                "max": float(np.nanmax(values)),
+                "mean": float(np.nanmean(values)),
+            },
+            "delta_vs_baseline": {
+                "min": float(np.nanmin(delta)),
+                "max": float(np.nanmax(delta)),
+                "mean": float(np.nanmean(delta)),
+                "n_better_than_baseline": int(
+                    (delta < 0).sum() if lower_is_better else (delta > 0).sum()
+                ),
+                "n_total": int(np.isfinite(delta).sum()),
+            },
+            "best_cell": {
+                "k": int(piv.index[best_idx[0]]),
+                "alpha": float(piv.columns[best_idx[1]]),
+                "value": float(values[best_idx]),
+                "delta_vs_baseline": float(values[best_idx] - bl_val),
+            },
+        })
 
     meta = {
-        "plot_id": "hp_sensitivity_heatmaps_vit_wee",
-        "title": "LabelMix α × k heatmaps (Δ vs. baseline) — ViT-Wee / ImageNet-1k",
-        "kind": "heatmap_grid_2x2",
-        "layout": "rows=metrics (Top-1, ECE@15), cols=losses (PL, SCE)",
+        "plot_id": f"hp_sensitivity_heatmaps_{metric}_vit_wee",
+        "title": (
+            f"LabelMix α × k heatmap — {metric_label} — "
+            "ViT-Wee / ImageNet-1k"
+        ),
+        "kind": "heatmap_grid_1x2",
+        "layout": f"single row ({metric_label}), cols=losses (PL, SCE)",
+        "metric": metric,
+        "metric_label": metric_label,
         "encoding": {
-            "cell_value_printed": "Δ = metric − baseline",
-            "colour_norm": "symmetric linear (vmin = -max|Δ|, vmax = +max|Δ|)",
+            "cell_value_printed": "absolute metric value",
+            "colour_norm": (
+                "symmetric linear centred on the baseline mean, with the "
+                "half-span clipped at the 90th percentile of "
+                "|value − baseline| pooled across both loss panels so "
+                "outliers do not drain contrast from the baseline "
+                "neighbourhood; cells outside the clipped range saturate "
+                "the colourmap and are flagged by the colourbar's "
+                "extend arrows"
+            ),
             "colour_semantics": "blue = better than baseline, red = worse",
+            "shared_across_panels": True,
+            "panel_subtitle": (
+                "baseline=mean\u00B1std, single-aug=mean\u00B1std (absolute values)"
+            ),
         },
         "references": {
             "baseline": {
                 "display": BASELINE_DISPLAY,
-                "top1_mean": bl["top1_mean"],
-                "ece_mean": bl["ece_mean"],
+                "mean": float(bl_val),
+                "std": float(bl[f"{metric}_std"]),
             },
             "single_aug": {
                 "display": SINGLE_AUG_DISPLAY,
-                "top1_mean": sa.get("top1_mean"),
-                "ece_mean": sa.get("ece_mean"),
-                "delta_top1_vs_baseline": (
-                    None if "top1_mean" not in sa
-                    else sa["top1_mean"] - bl["top1_mean"]
-                ),
-                "delta_ece_vs_baseline": (
-                    None if "ece_mean" not in sa
-                    else sa["ece_mean"] - bl["ece_mean"]
-                ),
+                "mean": sa.get(f"{metric}_mean"),
+                "std": sa.get(f"{metric}_std"),
             },
         },
         "panels": per_panel,
         "caption_hint": (
-            "α × k sensitivity of LabelMix on ViT-Wee / ImageNet-1k, reported "
-            "as Δ against the Mixup+CutMix baseline (baseline = 0). Columns "
-            "contrast the PL and SCE variants; rows show Top-1 (top) and "
-            "ECE@15 (bottom). Colour uses a symmetric linear scale centred "
-            "on zero. Blue cells beat the baseline; red cells lag. The bare "
-            "single-aug reference value is printed in every panel title."
+            f"α × k sensitivity of LabelMix ({metric_label}) on ViT-Wee / "
+            "ImageNet-1k. Cells show the absolute metric value; the two "
+            "panels contrast the PL and SCE variants. Colour uses a "
+            "symmetric linear scale centred on the baseline mean (blue "
+            "cells beat the baseline, red cells lag). Each panel subtitle "
+            "prints the baseline and single-aug reference values as "
+            "mean\u00B1std."
         ),
         "file": {
             "pdf": out_path.with_suffix(".pdf").name,
@@ -589,7 +696,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--input", type=Path, default=INPUT_FILE)
     p.add_argument("--out-sensitivity", type=Path, default=OUTPUT_SENSITIVITY)
     p.add_argument("--out-sensitivity-k", type=Path, default=OUTPUT_SENSITIVITY_K)
-    p.add_argument("--out-heatmaps", type=Path, default=OUTPUT_HEATMAPS)
+    p.add_argument("--out-heatmaps-top1", type=Path, default=OUTPUT_HEATMAPS_TOP1)
+    p.add_argument("--out-heatmaps-ece", type=Path, default=OUTPUT_HEATMAPS_ECE)
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
     setup_logging(args.log_level)
@@ -603,7 +711,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args.out_sensitivity.parent.mkdir(parents=True, exist_ok=True)
     args.out_sensitivity_k.parent.mkdir(parents=True, exist_ok=True)
-    args.out_heatmaps.parent.mkdir(parents=True, exist_ok=True)
+    args.out_heatmaps_top1.parent.mkdir(parents=True, exist_ok=True)
+    args.out_heatmaps_ece.parent.mkdir(parents=True, exist_ok=True)
 
     # Figure 1: α sweep.
     fig1 = plot_sensitivity(df, sweep="alpha")
@@ -623,14 +732,23 @@ def main(argv: list[str] | None = None) -> int:
     _logger.info("Wrote %s", meta_k_path)
     plt.close(fig_k)
 
-    # Figure 3: heatmaps.
-    fig2 = plot_heatmaps(df)
-    savefig(fig2, str(args.out_heatmaps))
-    meta2 = build_heatmap_metadata(df, args.out_heatmaps)
-    meta2_path = _write_metadata(meta2, args.out_heatmaps)
-    _logger.info("Wrote %s", args.out_heatmaps)
-    _logger.info("Wrote %s", meta2_path)
-    plt.close(fig2)
+    # Figure 3a: Top-1 heatmap (one row, two losses).
+    fig_top1 = plot_heatmaps(df, metric="top1")
+    savefig(fig_top1, str(args.out_heatmaps_top1))
+    meta_top1 = build_heatmap_metadata(df, args.out_heatmaps_top1, metric="top1")
+    meta_top1_path = _write_metadata(meta_top1, args.out_heatmaps_top1)
+    _logger.info("Wrote %s", args.out_heatmaps_top1)
+    _logger.info("Wrote %s", meta_top1_path)
+    plt.close(fig_top1)
+
+    # Figure 3b: ECE@15 heatmap (one row, two losses).
+    fig_ece = plot_heatmaps(df, metric="ece")
+    savefig(fig_ece, str(args.out_heatmaps_ece))
+    meta_ece = build_heatmap_metadata(df, args.out_heatmaps_ece, metric="ece")
+    meta_ece_path = _write_metadata(meta_ece, args.out_heatmaps_ece)
+    _logger.info("Wrote %s", args.out_heatmaps_ece)
+    _logger.info("Wrote %s", meta_ece_path)
+    plt.close(fig_ece)
     return 0
 
 
