@@ -1,11 +1,11 @@
-"""Plot: LabelMix hyperparameter sensitivity (α, k) for ViT-Wee on ImageNet-1k.
+"""Plot: TreemapMix hyperparameter sensitivity (α, k) for ViT-Wee on ImageNet-1k.
 
 Produces three figures from
 ``data/processed/hyperparameter_sensitivity_vit_wee_with_baselines.csv``:
 
 1. ``hp_sensitivity_vit_wee.pdf`` (main text, two panels):
    x = α on a uniform (categorical) axis, y = Top-1 (left panel, linear)
-   and ECE@15 (right panel, log).  For each LabelMix loss we plot the
+   and ECE@15 (right panel, log).  For each TreemapMix loss we plot the
    median-over-k as a solid line and the min-to-max-over-k range as a shaded
    band.  Two horizontal references show the ``baseline`` (mixup + cutmix)
    and ``single-aug`` (single image aug only) seeds, each with a thin ±std
@@ -64,8 +64,8 @@ OUTPUT_HEATMAPS_ECE = HP_FIGURES_DIR / "hp_sensitivity_heatmaps_ece_vit_wee.pdf"
 # Human-readable loss names. Internal CSV keys ('pl_loss', 'soft_ce') are
 # left untouched for backward compatibility with the extraction script.
 LOSS_LABELS: dict[str, str] = {
-    "pl_loss": "LabelMix (PL)",
-    "soft_ce": "LabelMix (SCE)",
+    "pl_loss": "TreemapMix (PL)",
+    "soft_ce": "TreemapMix (SCE)",
 }
 # Fixed draw order -> stable colours.
 LOSS_ORDER: list[str] = ["pl_loss", "soft_ce"]
@@ -93,7 +93,7 @@ SINGLE_AUG_COLOUR = "#8c8c8c" # mid grey
 
 
 def _split(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
-    """Split the combined CSV into a LabelMix long-form frame and a dict of
+    """Split the combined CSV into a TreemapMix long-form frame and a dict of
     baseline scalars keyed by the CSV's ``label`` column
     ('baseline', 'bare').
     """
@@ -258,7 +258,7 @@ def build_sensitivity_metadata(
     band describes min–max over the *other* variable.
     """
     lm, baselines = _split(df)
-    alphas = sorted(lm["alpha"].unique())
+    alphas = sorted(float(a) for a in lm["alpha"].unique())
     ks = sorted(int(k) for k in lm["k"].dropna().unique())
     other = "k" if sweep == "alpha" else "alpha"
     other_values = ks if sweep == "alpha" else alphas
@@ -289,9 +289,9 @@ def build_sensitivity_metadata(
             else "hp_sensitivity_k_vit_wee"
         ),
         "title": (
-            "LabelMix hyperparameter sensitivity (α, k) \u2014 ViT-Wee / ImageNet-1k"
+            "TreemapMix hyperparameter sensitivity (α, k) \u2014 ViT-Wee / ImageNet-1k"
             if sweep == "alpha"
-            else "LabelMix hyperparameter sensitivity over k \u2014 ViT-Wee / ImageNet-1k"
+            else "TreemapMix hyperparameter sensitivity over k \u2014 ViT-Wee / ImageNet-1k"
         ),
         "kind": "line_with_band",
         "panels": [
@@ -329,13 +329,13 @@ def build_sensitivity_metadata(
         },
         "per_loss_stats": per_loss,
         "caption_hint": (
-            "Hyperparameter sensitivity of LabelMix on ViT-Wee / ImageNet-1k. "
+            "Hyperparameter sensitivity of TreemapMix on ViT-Wee / ImageNet-1k. "
             f"The x-axis sweeps {sweep}; each solid line is the median Top-1 "
             f"(left, linear) / ECE@15 (right, log) over {other} \u2208 "
             f"{other_values}; the shaded band shows the min\u2013max envelope "
             f"over {other}. The dark grey line is the baseline (Mixup+CutMix); "
             "the dashed grey line is single-aug (single image aug only). "
-            "LabelMix matches or beats the baseline in Top-1 across the full "
+            "TreemapMix matches or beats the baseline in Top-1 across the full "
             "sweep and reduces ECE by a large margin."
         ),
         "file": {
@@ -371,7 +371,7 @@ def _sym_norm_around(
     A single severe outlier (e.g. the α=3, k=10 Top-1 collapse) would
     otherwise stretch the full-range symmetric scale so much that the
     ±2 pp neighbourhood around the baseline — where all interesting
-    LabelMix cells live — is compressed into a narrow pale band.  We
+    TreemapMix cells live — is compressed into a narrow pale band.  We
     therefore clip the half-span to the ``clip_quantile`` of
     |value − center|, so outliers saturate (the colourbar grows
     "extend" arrows) while the baseline neighbourhood gets real
@@ -607,7 +607,7 @@ def build_heatmap_metadata(
     meta = {
         "plot_id": f"hp_sensitivity_heatmaps_{metric}_vit_wee",
         "title": (
-            f"LabelMix α × k heatmap — {metric_label} — "
+            f"TreemapMix α × k heatmap — {metric_label} — "
             "ViT-Wee / ImageNet-1k"
         ),
         "kind": "heatmap_grid_1x2",
@@ -645,7 +645,7 @@ def build_heatmap_metadata(
         },
         "panels": per_panel,
         "caption_hint": (
-            f"α × k sensitivity of LabelMix ({metric_label}) on ViT-Wee / "
+            f"α × k sensitivity of TreemapMix ({metric_label}) on ViT-Wee / "
             "ImageNet-1k. Cells show the absolute metric value; the two "
             "panels contrast the PL and SCE variants. Colour uses a "
             "symmetric linear scale centred on the baseline mean (blue "
