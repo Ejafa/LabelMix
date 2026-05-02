@@ -334,6 +334,17 @@ MODEL_CONFIG_FILES: Dict[str, str] = {
     "vit-wee": "vit-wee.yaml",
     "vit-little": "vit-little.yaml",
     "vit-betwixt": "vit-betwixt.yaml",
+    # Optimizer-sweep variants (ImageNet-1K): each file differs from its
+    # un-suffixed sibling only in the ``opt:`` field.  Registered here so
+    # --model-filter can pick them up.
+    "vit-wee-adamw": "vit-wee-adamw.yaml",
+    "vit-betwixt-adamw": "vit-betwixt-adamw.yaml",
+    "vit-medium-adamw": "vit-medium-adamw.yaml",
+    "vit-little-adamw": "vit-little-adamw.yaml",
+    "vit-wee-muon": "vit-wee-muon.yaml",
+    "vit-betwixt-muon": "vit-betwixt-muon.yaml",
+    "vit-medium-muon": "vit-medium-muon.yaml",
+    "vit-little-muon": "vit-little-muon.yaml",
 #    "convnextv2-base": "convnextv2-base.yaml",
 #    "convnextv2-tiny": "convnextv2-tiny.yaml",
 #    "resnet50": "resnet-50.yaml",
@@ -361,6 +372,15 @@ MODELS_REQUIRING_IMG_SIZE_KWARG: set[str] = {
     "vit-medium",
     "vit-little",
     "vit-wee",
+    # Optimizer-sweep ViT variants — same architecture, different opt.
+    "vit-wee-adamw",
+    "vit-betwixt-adamw",
+    "vit-medium-adamw",
+    "vit-little-adamw",
+    "vit-wee-muon",
+    "vit-betwixt-muon",
+    "vit-medium-muon",
+    "vit-little-muon",
 }
 
 # ---------------------------------------------------------------------------

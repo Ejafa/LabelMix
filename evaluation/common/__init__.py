@@ -1,6 +1,7 @@
 """Shared helpers (paths, logging) used across the evaluation package."""
 from .paths import (
     DATA_DIR,
+    DIAGNOSTIC_DIR,
     FIGURES_DIR,
     PACKAGE_DIR,
     PROCESSED_DIR,
@@ -19,6 +20,7 @@ __all__ = [
     "RAW_LOGITS_DIR",
     "RAW_EVAL_DIR",
     "WANDB_RAW_DIR",
+    "DIAGNOSTIC_DIR",
     "PROCESSED_DIR",
     "FIGURES_DIR",
     "ensure_dirs",

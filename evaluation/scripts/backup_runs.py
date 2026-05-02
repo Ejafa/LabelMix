@@ -30,7 +30,7 @@ Layout::
 
 2. VitDet / detectron2 pipeline (new)
 -------------------------------------
-Walks every immediate subdirectory of ``detectron2_vitdet/output/``
+Walks every immediate subdirectory of ``evaluation/data/raw/vitdet_output/``
 (overridable via ``--vitdet-output-root``) and, for each one that has
 already finished training (sentinel: a ``model_final.pth`` at the top
 of the run dir), copies:
@@ -151,8 +151,13 @@ VITDET_FINISHED_SENTINEL: str = "model_final.pth"
 
 #: Default on-disk location of the detectron2 output dir (relative to the
 #: repository root, which is ``PROJECT_ROOT``).
+#:
+#: The vitdet training outputs were relocated under the evaluation package
+#: at ``evaluation/data/raw/vitdet_output/`` to keep every evaluation input
+#: in a single tree. Override via the CLI ``--vitdet-output-root`` flag if
+#: the tree lives elsewhere.
 DEFAULT_VITDET_OUTPUT_ROOT: Path = (
-    PROJECT_ROOT / "detectron2_vitdet" / "output"
+    PROJECT_ROOT / "evaluation" / "data" / "raw" / "vitdet_output"
 ).resolve()
 
 #: Subdirectory name under ``<backup_root>`` where vitdet backups land, so

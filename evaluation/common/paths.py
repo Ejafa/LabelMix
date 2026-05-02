@@ -33,6 +33,10 @@ RAW_EVAL_DIR: Path = RAW_DIR / "eval_csv"
 #: Raw W&B run materializations (one subdir per run_id).
 WANDB_RAW_DIR: Path = RAW_DIR / "wandb"
 
+#: Diagnostic pipeline artifacts (composed samples, per-model logits,
+#: Gradient x Input attribution maps).  See ``evaluation/diagnostic``.
+DIAGNOSTIC_DIR: Path = RAW_DIR / "diagnostic"
+
 #: Processed, tidy tables that plots and analyses consume.
 PROCESSED_DIR: Path = DATA_DIR / "processed"
 
@@ -47,6 +51,7 @@ def ensure_dirs() -> None:
         RAW_LOGITS_DIR,
         RAW_EVAL_DIR,
         WANDB_RAW_DIR,
+        DIAGNOSTIC_DIR,
         PROCESSED_DIR,
         FIGURES_DIR,
     ):

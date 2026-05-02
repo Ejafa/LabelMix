@@ -45,6 +45,30 @@ Canonical invocations::
     python -m evaluation.scripts.make_all_plots
 
     # 8. Back up finished training runs (W&B/timm + vitdet/detectron2).
-    python -m evaluation.scripts.backup_runs \\
+    python -m evaluation.scripts.backup_runs \\\\
         --backup-root ../backup
+
+    # --- Diagnostic (composed ImageNet) pipeline --------------------------
+
+    # D1. Compose the diagnostic evaluation set from ImageNet val.
+    python -m evaluation.scripts.diag_generate \\\\
+        --out-dir evaluation/data/raw/diagnostic/composed \\\\
+        --k-values 3 4 5 6 \\\\
+        --samples-per-k 500 \\\\
+        --alpha 0.5 \\\\
+        --sampling-max-aspect 15 \\\\
+        --split validation
+
+    # D2. Run the trained models over the composed set and dump ``logits.pt``.
+    python -m evaluation.scripts.diag_export_logits \\\\
+        --manifest evaluation/data/raw/diagnostic/composed/manifest.jsonl \\\\
+        --mapping  evaluation/diagnostic/area_logit_models.yaml \\\\
+        --out-dir  evaluation/data/raw/diagnostic/logits
+
+    # D3. Compute area-vs-logit diagnostic metrics (per-k and aggregated).
+    python -m evaluation.scripts.diag_area_logit_metrics \\\\
+        --mapping    evaluation/diagnostic/area_logit_models.yaml \\\\
+        --manifest   evaluation/data/raw/diagnostic/composed/manifest.jsonl \\\\
+        --logits-dir evaluation/data/raw/diagnostic/logits \\\\
+        --out-csv    evaluation/data/processed/diagnostic_area_logit_metrics.csv
 """

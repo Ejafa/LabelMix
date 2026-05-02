@@ -1,0 +1,26 @@
+# Mapping {short_name: run_dir} consumed by
+# ``evaluation/scripts/diag_area_logit_metrics.py`` and
+# ``evaluation/diagnostic/infer.py``.
+#
+# Scope: vit-betwixt, seed=42. Two groups of configs:
+#
+#   LabelMix + CE reference
+#     - baseline:      plain cross-entropy training (cutmix + mixup)
+#     - labelmix-pl:   LabelMix with pl-loss   (k=6, alpha 0.1..0.5 cosine)
+#     - labelmix-sce:  LabelMix with soft-ce   (k=4, alpha 0.1..0.5 cosine)
+#
+#   Augmentation ablation (all cross-entropy, vary only the input-aug policy)
+#     - noaug:         timm --no-aug, all train-time augmentation disabled
+#     - bare:          no cutmix, no mixup (single-image augmentation only)
+#     - cutmix:        cutmix-only      (mixup_switch_prob=1.0 -> pure cutmix)
+#     - mixup:         mixup-only       (mixup_switch_prob=0.0 -> pure mixup)
+#     - mosaic:        mosaic augmentation
+
+baseline: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/daemon/__vit-betwixt__in1k__img256__baseline__baseline__seed=42
+labelmix-pl: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/daemon/model_ablation__vit-betwixt__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
+labelmix-sce: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/daemon/model_ablation__vit-betwixt__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+noaug: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/noaug/vit-betwixt__in1k__img256__noaug_no_aug=True__seed=42
+bare: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/betwixt-jobs/vit-betwixt__in1k__img256__bare_cutmix=0_cutmix_minmax=None_mixup=0_mixup_prob=0.0__seed=42
+cutmix: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/betwixt-jobs/vit-betwixt__in1k__img256__cutmix_mixup_switch_prob=1.0__seed=42
+mixup: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/betwixt-jobs/vit-betwixt__in1k__img256__mixup_mixup_switch_prob=0.0__seed=42
+mosaic: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/mosaic_jobs/vit-betwixt__in1k__img256__mosaic__mosaic__seed=42

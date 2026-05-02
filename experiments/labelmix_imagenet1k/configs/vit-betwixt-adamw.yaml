@@ -35,7 +35,7 @@ drop_block: null
 drop_connect: null
 drop_path: 0.2
 epoch_repeats: 0.0
-epochs: 100
+epochs: 600
 eval_metric: top1
 experiment: ''
 fast_norm: false
@@ -88,7 +88,7 @@ no_ddp_bb: false
 no_prefetcher: false
 no_resume_opt: false
 num_classes: null
-opt: nadamw
+opt: adamw
 opt_betas: null
 opt_eps: 1.0e-08
 opt_kwargs: {}
@@ -127,7 +127,7 @@ use_multi_epochs_loader: false
 val_split: validation
 validation_batch_size: null
 vflip: 0.0
-warmup_epochs: 10
+warmup_epochs: 20
 warmup_lr: 5.0e-07
 warmup_prefix: false
 weight_decay: 0.08
