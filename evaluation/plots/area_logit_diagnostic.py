@@ -23,10 +23,11 @@ clutter an already eight-line plot) but is captured in the ``.meta.json``
 sidecar so downstream tooling can quote headline numbers without
 re-reading the CSV.
 
-Styling is inherited verbatim from :mod:`evaluation.plots.hp_sensitivity`
-via :mod:`evaluation.plots._style` (paper rcParams, double-column width,
-categorical uniform x-axis, dotted horizontal grid, bottom-centred shared
-legend, ``.pdf`` + ``.png`` siblings via :func:`._style.savefig`).
+Styling is inherited from :mod:`evaluation.plots._style` (paper rcParams,
+categorical x-axis, dotted horizontal grid, ``.pdf`` + ``.png`` siblings
+via :func:`._style.savefig`).  The shared legend is rendered separately in
+horizontal and vertical variants so the three metric panels can be reused
+without repeating the same legend.
 
 Naming note: the ``labelmix-*`` runs in the source CSV are rendered as
 ``TreemapMix (...)`` in every user-facing string (legend labels, titles,
@@ -36,6 +37,8 @@ Input   : ``data/processed/diagnostic_area_logit_metrics.csv``
 Output  : ``data/processed/figures/diagnostic_area_logit/area_logit_spearman.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_pair_acc.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_top_acc.pdf``
+          ``data/processed/figures/diagnostic_area_logit/area_logit_legend_horizontal.pdf``
+          ``data/processed/figures/diagnostic_area_logit/area_logit_legend_vertical.pdf``
           (+ ``.png`` and ``.meta.json`` siblings for each)
 """
 from __future__ import annotations
@@ -48,12 +51,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
-from ._style import DOUBLE_COL_WIDTH, apply_paper_style, savefig
+from ._style import apply_paper_style, savefig
 
 
 _logger = logging.getLogger(__name__)
@@ -67,6 +71,8 @@ DIAG_FIGURES_DIR = FIGURES_DIR / "diagnostic_area_logit"
 OUTPUT_SPEARMAN = DIAG_FIGURES_DIR / "area_logit_spearman.pdf"
 OUTPUT_PAIR_ACC = DIAG_FIGURES_DIR / "area_logit_pair_acc.pdf"
 OUTPUT_TOP_ACC = DIAG_FIGURES_DIR / "area_logit_top_acc.pdf"
+OUTPUT_LEGEND_HORIZONTAL = DIAG_FIGURES_DIR / "area_logit_legend_horizontal.pdf"
+OUTPUT_LEGEND_VERTICAL = DIAG_FIGURES_DIR / "area_logit_legend_vertical.pdf"
 
 # ---------------------------------------------------------------------------
 # Model catalogue
@@ -98,12 +104,52 @@ MODEL_ORDER: Sequence[ModelStyle] = (
 )
 
 K_VALUES: Sequence[int] = (3, 4, 5, 6)
+DIAG_FIG_WIDTH = 4.6
+K_DISPLAY_SPACING = 0.55
+K_EDGE_PAD = 0.10
+
+DIAG_RC = {
+    "font.size": 14,
+    "axes.titlesize": 14,
+    "axes.labelsize": 14,
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "legend.fontsize": 13,
+}
+
+
+def _apply_diag_style() -> None:
+    apply_paper_style()
+    plt.rcParams.update(DIAG_RC)
+
+
+def _k_positions() -> dict[int, float]:
+    raw = np.arange(len(K_VALUES), dtype=float)
+    centered = (raw - raw.mean()) * K_DISPLAY_SPACING + raw.mean()
+    return {k: float(x) for k, x in zip(K_VALUES, centered)}
+
+
+def _legend_handles() -> list[Line2D]:
+    return [
+        Line2D(
+            [0],
+            [0],
+            color=style.colour,
+            linestyle=style.linestyle,
+            marker=style.marker,
+            markersize=3.8,
+            lw=1.3,
+            label=style.display,
+        )
+        for style in MODEL_ORDER
+    ]
+
 
 # metric key -> (csv column, pretty label, direction, y-pad fraction)
 _METRICS = {
     "spearman": {
         "column": "spearman_mean",
-        "label": r"Mean Spearman $\rho$(area, logit) ($\uparrow$)",
+        "label": r"Mean Spearman $\rho$ ($\uparrow$)",
         "title": "Area-logit Spearman correlation",
         "direction": "higher is better",
         "filename": "area_logit_spearman",
@@ -111,7 +157,7 @@ _METRICS = {
     },
     "pair_acc": {
         "column": "pair_acc",
-        "label": r"Present-class pair ranking accuracy ($\uparrow$)",
+        "label": r"Pair ranking accuracy ($\uparrow$)",
         "title": "Pairwise area-vs-logit ranking accuracy",
         "direction": "higher is better",
         "filename": "area_logit_pair_acc",
@@ -119,7 +165,7 @@ _METRICS = {
     },
     "top_acc": {
         "column": "top_acc",
-        "label": r"Largest-area $=$ top-logit accuracy ($\uparrow$)",
+        "label": r"Largest area $=$ top logit ($\uparrow$)",
         "title": "Largest-area top-logit accuracy",
         "direction": "higher is better",
         "filename": "area_logit_top_acc",
@@ -169,7 +215,7 @@ def _plot_metric(
     ylabel: str,
 ) -> None:
     """Draw one metric panel (x = k, one line per model)."""
-    pos = {k: i for i, k in enumerate(K_VALUES)}
+    pos = _k_positions()
     x = np.asarray([pos[k] for k in K_VALUES], dtype=float)
 
     for style in MODEL_ORDER:
@@ -190,8 +236,8 @@ def _plot_metric(
 
     ax.set_xticks(list(pos.values()))
     ax.set_xticklabels([str(k) for k in K_VALUES])
-    ax.set_xlim(-0.3, len(K_VALUES) - 0.7)
-    ax.set_xlabel(r"Composed-sample class count $k$")
+    ax.set_xlim(x.min() - K_EDGE_PAD, x.max() + K_EDGE_PAD)
+    ax.set_xlabel(r"Number of patches $k$ per image")
     ax.set_ylabel(ylabel)
     ax.grid(axis="y", ls=":", lw=0.5, alpha=0.6)
     ax.set_axisbelow(True)
@@ -200,32 +246,47 @@ def _plot_metric(
 def plot_metric(df: pd.DataFrame, metric: str) -> plt.Figure:
     """Render a single-panel figure for ``metric`` (one of ``_METRICS``)."""
     cfg = _METRICS[metric]
-    apply_paper_style()
+    _apply_diag_style()
 
     wide = _per_k(df, cfg["column"])
 
-    fig, ax = plt.subplots(figsize=(DOUBLE_COL_WIDTH, 2.8))
+    fig, ax = plt.subplots(figsize=(DIAG_FIG_WIDTH, 3.6))
     _plot_metric(ax, wide, ylabel=cfg["label"])
+    fig.tight_layout()
+    return fig
 
-    # Bottom-centred shared legend (matches hp_sensitivity layout).
-    handles, labels = ax.get_legend_handles_labels()
-    # De-duplicate while preserving MODEL_ORDER.
-    seen: set[str] = set()
-    uniq = [(h, l) for h, l in zip(handles, labels) if not (l in seen or seen.add(l))]
-    ncol = min(len(uniq), 4)
+
+def plot_legend(orientation: str) -> plt.Figure:
+    """Render the shared model legend as a standalone figure."""
+    _apply_diag_style()
+
+    handles = _legend_handles()
+    labels = [h.get_label() for h in handles]
+
+    if orientation == "horizontal":
+        figsize = (5.2, 1.3)
+        ncol = int(np.ceil(len(handles) / 2))
+        handlelength = 1.4
+        columnspacing = 0.9
+    elif orientation == "vertical":
+        figsize = (2.8, 2.6)
+        ncol = 1
+        handlelength = 1.5
+        columnspacing = 0.8
+    else:
+        raise ValueError(f"Unknown legend orientation: {orientation}")
+
+    fig = plt.figure(figsize=figsize)
     fig.legend(
-        [h for h, _ in uniq],
-        [l for _, l in uniq],
+        handles,
+        labels,
         loc="lower center",
         ncol=ncol,
-        bbox_to_anchor=(0.5, -0.02),
-        handlelength=2.0,
-        columnspacing=1.2,
+        bbox_to_anchor=(0.5, 0.0),
+        handlelength=handlelength,
+        columnspacing=columnspacing,
+        borderaxespad=0.0,
     )
-    # Reserve bottom space for the legend; rows of labels scale the pad.
-    n_rows = int(np.ceil(len(uniq) / ncol))
-    bottom = 0.10 + 0.06 * (n_rows - 1)
-    fig.tight_layout(rect=(0, bottom, 1, 1))
     return fig
 
 
@@ -329,6 +390,34 @@ def _write_metadata(meta: dict, out_path: Path) -> Path:
     return meta_path
 
 
+def build_legend_metadata(out_path: Path, orientation: str) -> dict:
+    return {
+        "plot_id": f"diagnostic_area_logit_legend_{orientation}",
+        "title": f"Area-logit diagnostic legend ({orientation})",
+        "kind": "standalone_legend",
+        "orientation": orientation,
+        "entries": [
+            {
+                "model_key": style.key,
+                "display": style.display,
+                "colour": style.colour,
+                "linestyle": style.linestyle,
+                "marker": style.marker,
+            }
+            for style in MODEL_ORDER
+        ],
+        "renaming": {
+            "labelmix-pl": "TreemapMix (PL)",
+            "labelmix-sce": "TreemapMix (SCE)",
+        },
+        "file": {
+            "pdf": out_path.with_suffix(".pdf").name,
+            "png": out_path.with_suffix(".png").name,
+            "directory": str(out_path.parent),
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -340,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out-spearman", type=Path, default=OUTPUT_SPEARMAN)
     p.add_argument("--out-pair-acc", type=Path, default=OUTPUT_PAIR_ACC)
     p.add_argument("--out-top-acc", type=Path, default=OUTPUT_TOP_ACC)
+    p.add_argument("--out-legend-horizontal", type=Path, default=OUTPUT_LEGEND_HORIZONTAL)
+    p.add_argument("--out-legend-vertical", type=Path, default=OUTPUT_LEGEND_VERTICAL)
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
     setup_logging(args.log_level)
@@ -361,6 +452,20 @@ def main(argv: list[str] | None = None) -> int:
         fig = plot_metric(df, metric)
         savefig(fig, str(out_path))
         meta = build_metric_metadata(df, metric, out_path)
+        meta_path = _write_metadata(meta, out_path)
+        _logger.info("Wrote %s", out_path)
+        _logger.info("Wrote %s", meta_path)
+        plt.close(fig)
+
+    legends = {
+        "horizontal": args.out_legend_horizontal,
+        "vertical": args.out_legend_vertical,
+    }
+    for orientation, out_path in legends.items():
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig = plot_legend(orientation)
+        savefig(fig, str(out_path))
+        meta = build_legend_metadata(out_path, orientation)
         meta_path = _write_metadata(meta, out_path)
         _logger.info("Wrote %s", out_path)
         _logger.info("Wrote %s", meta_path)

@@ -455,7 +455,7 @@ def _draw_heatmap(
             txt_colour = "white" if abs(rel - 0.5) > 0.40 else "black"
             ax.text(j, i, f"{v:.2f}",
                     ha="center", va="center",
-                    fontsize=5.5, color=txt_colour)
+                    fontsize=6.8, color=txt_colour)
 
     ax.set_xlabel(r"$\alpha$")
     ax.set_ylabel(r"$k$")
@@ -466,7 +466,7 @@ def _draw_heatmap(
         f"{title}\n"
         f"(baseline={baseline_mean:.2f}\u00B1{baseline_std:.2f}, "
         f"single-aug={single_aug_mean:.2f}\u00B1{single_aug_std:.2f})",
-        fontsize=8,
+        fontsize=9,
     )
     return im
 
@@ -543,7 +543,7 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
     cbar.set_label(
         f"{metric_label}  (blue = better than baseline"
         + ("; arrows: clipped outliers)" if clipped else ")"),
-        fontsize=7,
+        fontsize=9,
     )
     cbar.ax.tick_params(labelsize=7)
 
