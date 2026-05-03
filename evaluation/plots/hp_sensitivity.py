@@ -7,7 +7,7 @@ Produces three figures from
    x = α on a uniform (categorical) axis, y = Top-1 (left panel, linear)
    and ECE@15 (right panel, log).  For each TreemapMix loss we plot the
    median-over-k as a solid line and the min-to-max-over-k range as a shaded
-   band.  Two horizontal references show the ``baseline`` (mixup + cutmix)
+   band.  Two horizontal references show the Cutmix + Mixup
    and ``single-aug`` (single image aug only) seeds, each with a thin ±std
    band.  The ECE panel uses a log y-axis so the near-baseline region does
    not get crushed by the high-α explosion.
@@ -19,8 +19,8 @@ Produces three figures from
 3. ``hp_sensitivity_heatmaps_vit_wee.pdf`` (appendix, 2x2 grid):
    rows = metric, cols = loss.  Each cell is an 8x8 α × k heatmap of the
    *absolute* metric value.  Colour uses a symmetric linear scale centred
-   on the ``baseline`` mean (blue = better than baseline, red = worse).
-   Baseline and ``single-aug`` reference values with their ±std are
+   on the Cutmix + Mixup mean (blue = better than Cutmix + Mixup, red = worse).
+   Cutmix + Mixup and ``single-aug`` reference values with their ±std are
    printed in each panel subtitle for context.
 
 Every rendered PDF is accompanied by a ``*.meta.json`` sidecar that records
@@ -80,8 +80,8 @@ LOSS_COLOURS: dict[str, str] = {
 # mixup and no cutmix) and avoids the ambiguous "bare".
 BASELINE_KEY = "baseline"     # mixup + cutmix         — our zero
 SINGLE_AUG_KEY = "bare"       # single-image aug only  — secondary reference
-BASELINE_DISPLAY = "baseline (Mixup+CutMix)"
-SINGLE_AUG_DISPLAY = "single-aug (single image aug only)"
+BASELINE_DISPLAY = "CutMix + Mixup"
+SINGLE_AUG_DISPLAY = "Single-Image Aug"
 
 BASELINE_COLOUR = "#404040"   # dark grey
 SINGLE_AUG_COLOUR = "#8c8c8c" # mid grey
@@ -333,9 +333,9 @@ def build_sensitivity_metadata(
             f"The x-axis sweeps {sweep}; each solid line is the median Top-1 "
             f"(left, linear) / ECE@15 (right, log) over {other} \u2208 "
             f"{other_values}; the shaded band shows the min\u2013max envelope "
-            f"over {other}. The dark grey line is the baseline (Mixup+CutMix); "
-            "the dashed grey line is single-aug (single image aug only). "
-            "TreemapMix matches or beats the baseline in Top-1 across the full "
+            f"over {other}. The dark grey line is Cutmix + Mixup; "
+            "the dashed grey line is Single-Image Aug. "
+            "TreemapMix matches or beats Cutmix + Mixup in Top-1 across the full "
             "sweep and reduces ECE by a large margin."
         ),
         "file": {
@@ -459,14 +459,34 @@ def _draw_heatmap(
 
     ax.set_xlabel(r"$\alpha$")
     ax.set_ylabel(r"$k$")
-    # Title: panel label on line 1, baseline / single-aug means ± std on
-    # line 2 so the reader can read the absolute cell values directly
-    # against both references.
-    ax.set_title(
-        f"{title}\n"
-        f"(baseline={baseline_mean:.2f}\u00B1{baseline_std:.2f}, "
-        f"single-aug={single_aug_mean:.2f}\u00B1{single_aug_std:.2f})",
+    # Keep the reference values in their own smaller subtitle so the main
+    # panel label remains easy to scan.
+    baseline_label = BASELINE_DISPLAY.replace(" + ", "+")
+    ax.text(
+        0.5, 1.24, title,
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
         fontsize=9,
+        clip_on=False,
+    )
+    ax.text(
+        0.5, 1.155,
+        f"{baseline_label}={baseline_mean:.2f}\u00B1{baseline_std:.2f}",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=8.6,
+        clip_on=False,
+    )
+    ax.text(
+        0.5, 1.075,
+        f"{SINGLE_AUG_DISPLAY}={single_aug_mean:.2f}\u00B1{single_aug_std:.2f}",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=8.6,
+        clip_on=False,
     )
     return im
 
@@ -541,7 +561,7 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
         extend="both" if clipped else "neither",
     )
     cbar.set_label(
-        f"{metric_label}  (blue = better than baseline"
+        f"{metric_label}  (blue = better than {BASELINE_DISPLAY}"
         + ("; arrows: clipped outliers)" if clipped else ")"),
         fontsize=9,
     )
@@ -617,18 +637,19 @@ def build_heatmap_metadata(
         "encoding": {
             "cell_value_printed": "absolute metric value",
             "colour_norm": (
-                "symmetric linear centred on the baseline mean, with the "
+                "symmetric linear centred on the Cutmix + Mixup mean, with the "
                 "half-span clipped at the 90th percentile of "
-                "|value − baseline| pooled across both loss panels so "
-                "outliers do not drain contrast from the baseline "
+                "|value − Cutmix + Mixup| pooled across both loss panels so "
+                "outliers do not drain contrast from the Cutmix + Mixup "
                 "neighbourhood; cells outside the clipped range saturate "
                 "the colourmap and are flagged by the colourbar's "
                 "extend arrows"
             ),
-            "colour_semantics": "blue = better than baseline, red = worse",
+            "colour_semantics": "blue = better than Cutmix + Mixup, red = worse",
             "shared_across_panels": True,
             "panel_subtitle": (
-                "baseline=mean\u00B1std, single-aug=mean\u00B1std (absolute values)"
+                "CutMix+Mixup=mean\u00B1std\n"
+                "Single-Image Aug=mean\u00B1std (absolute values)"
             ),
         },
         "references": {
@@ -648,9 +669,9 @@ def build_heatmap_metadata(
             f"α × k sensitivity of TreemapMix ({metric_label}) on ViT-Wee / "
             "ImageNet-1k. Cells show the absolute metric value; the two "
             "panels contrast the PL and SCE variants. Colour uses a "
-            "symmetric linear scale centred on the baseline mean (blue "
-            "cells beat the baseline, red cells lag). Each panel subtitle "
-            "prints the baseline and single-aug reference values as "
+            "symmetric linear scale centred on the Cutmix + Mixup mean (blue "
+            "cells beat Cutmix + Mixup, red cells lag). Each panel subtitle "
+            "prints the Cutmix + Mixup and single-aug reference values as "
             "mean\u00B1std."
         ),
         "file": {

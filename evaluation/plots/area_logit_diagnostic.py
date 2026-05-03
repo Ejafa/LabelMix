@@ -98,7 +98,7 @@ MODEL_ORDER: Sequence[ModelStyle] = (
     ModelStyle("baseline",     "Baseline (Mixup+CutMix)",   "#000000", "-",  "o"),
     ModelStyle("cutmix",       "CutMix only",               "#ff7f0e", "-",  "^"),
     ModelStyle("mixup",        "MixUp only",                "#9467bd", "-",  "v"),
-    ModelStyle("mosaic",       "Mosaic",                    "#2ca02c", "-",  "D"),
+    ModelStyle("mosaic",       "RICAP",                    "#2ca02c", "-",  "D"),
     ModelStyle("labelmix-sce", "TreemapMix (SCE)",          "#d62728", "-",  "o"),
     ModelStyle("labelmix-pl",  "TreemapMix (PL)",           "#1f77b4", "-",  "o"),
 )
