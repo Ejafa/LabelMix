@@ -37,6 +37,9 @@ Input   : ``data/processed/diagnostic_area_logit_metrics.csv``
 Output  : ``data/processed/figures/diagnostic_area_logit/area_logit_spearman.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_pair_acc.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_top_acc.pdf``
+          ``data/processed/figures/diagnostic_area_logit/area_logit_spearman_with_std.pdf``
+          ``data/processed/figures/diagnostic_area_logit/area_logit_pair_acc_with_std.pdf``
+          ``data/processed/figures/diagnostic_area_logit/area_logit_top_acc_with_std.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_legend_horizontal.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_legend_vertical.pdf``
           (+ ``.png`` and ``.meta.json`` siblings for each)
@@ -71,6 +74,9 @@ DIAG_FIGURES_DIR = FIGURES_DIR / "diagnostic_area_logit"
 OUTPUT_SPEARMAN = DIAG_FIGURES_DIR / "area_logit_spearman.pdf"
 OUTPUT_PAIR_ACC = DIAG_FIGURES_DIR / "area_logit_pair_acc.pdf"
 OUTPUT_TOP_ACC = DIAG_FIGURES_DIR / "area_logit_top_acc.pdf"
+OUTPUT_SPEARMAN_STD = DIAG_FIGURES_DIR / "area_logit_spearman_with_std.pdf"
+OUTPUT_PAIR_ACC_STD = DIAG_FIGURES_DIR / "area_logit_pair_acc_with_std.pdf"
+OUTPUT_TOP_ACC_STD = DIAG_FIGURES_DIR / "area_logit_top_acc_with_std.pdf"
 OUTPUT_LEGEND_HORIZONTAL = DIAG_FIGURES_DIR / "area_logit_legend_horizontal.pdf"
 OUTPUT_LEGEND_VERTICAL = DIAG_FIGURES_DIR / "area_logit_legend_vertical.pdf"
 
@@ -151,29 +157,38 @@ def _legend_handles() -> list[Line2D]:
 _METRICS = {
     "spearman": {
         "column": "spearman_mean_mean",
+        "std_column": "spearman_mean_std",
         "label": r"Mean Spearman $\rho$ ($\uparrow$)",
         "title": "Area-logit Spearman correlation",
         "direction": "higher is better",
         "filename": "area_logit_spearman",
         "out_path": OUTPUT_SPEARMAN,
+        "out_path_std": OUTPUT_SPEARMAN_STD,
     },
     "pair_acc": {
         "column": "pair_acc_mean",
+        "std_column": "pair_acc_std",
         "label": r"Pair ranking accuracy ($\uparrow$)",
         "title": "Pairwise area-vs-logit ranking accuracy",
         "direction": "higher is better",
         "filename": "area_logit_pair_acc",
         "out_path": OUTPUT_PAIR_ACC,
+        "out_path_std": OUTPUT_PAIR_ACC_STD,
     },
     "top_acc": {
         "column": "top_acc_mean",
+        "std_column": "top_acc_std",
         "label": r"Largest area $=$ top logit ($\uparrow$)",
         "title": "Largest-area top-logit accuracy",
         "direction": "higher is better",
         "filename": "area_logit_top_acc",
         "out_path": OUTPUT_TOP_ACC,
+        "out_path_std": OUTPUT_TOP_ACC_STD,
     },
 }
+
+# Shading alpha for the mean +/- std band in the *_with_std variants.
+STD_BAND_ALPHA = 0.15
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -215,8 +230,13 @@ def _plot_metric(
     wide: pd.DataFrame,
     *,
     ylabel: str,
+    wide_std: pd.DataFrame | None = None,
 ) -> None:
-    """Draw one metric panel (x = k, one line per model)."""
+    """Draw one metric panel (x = k, one line per model).
+
+    When ``wide_std`` is provided, also draws a shaded mean +/- std band
+    behind each line in the same colour at ``STD_BAND_ALPHA`` alpha.
+    """
     pos = _k_positions()
     x = np.asarray([pos[k] for k in K_VALUES], dtype=float)
 
@@ -226,6 +246,22 @@ def _plot_metric(
         y = wide.loc[style.key, list(K_VALUES)].to_numpy(dtype=float)
         if not np.isfinite(y).any():
             continue
+
+        if wide_std is not None and style.key in wide_std.index:
+            y_std = wide_std.loc[style.key, list(K_VALUES)].to_numpy(dtype=float)
+            # Only draw the band where both mean and std are finite.
+            mask = np.isfinite(y) & np.isfinite(y_std)
+            if mask.any():
+                lo = np.where(mask, y - y_std, np.nan)
+                hi = np.where(mask, y + y_std, np.nan)
+                ax.fill_between(
+                    x, lo, hi,
+                    color=style.colour,
+                    alpha=STD_BAND_ALPHA,
+                    linewidth=0,
+                    zorder=1,
+                )
+
         ax.plot(
             x, y,
             color=style.colour,
@@ -234,6 +270,7 @@ def _plot_metric(
             markersize=3.8,
             lw=1.3,
             label=style.display,
+            zorder=2,
         )
 
     ax.set_xticks(list(pos.values()))
@@ -245,15 +282,20 @@ def _plot_metric(
     ax.set_axisbelow(True)
 
 
-def plot_metric(df: pd.DataFrame, metric: str) -> plt.Figure:
-    """Render a single-panel figure for ``metric`` (one of ``_METRICS``)."""
+def plot_metric(df: pd.DataFrame, metric: str, *, with_std: bool = False) -> plt.Figure:
+    """Render a single-panel figure for ``metric`` (one of ``_METRICS``).
+
+    If ``with_std`` is True, each line is accompanied by a shaded
+    mean +/- 1 std band drawn from the ``*_std`` columns of the CSV.
+    """
     cfg = _METRICS[metric]
     _apply_diag_style()
 
     wide = _per_k(df, cfg["column"])
+    wide_std = _per_k(df, cfg["std_column"]) if with_std else None
 
     fig, ax = plt.subplots(figsize=(DIAG_FIG_WIDTH, 3.6))
-    _plot_metric(ax, wide, ylabel=cfg["label"])
+    _plot_metric(ax, wide, ylabel=cfg["label"], wide_std=wide_std)
     fig.tight_layout()
     return fig
 
@@ -297,10 +339,18 @@ def plot_legend(orientation: str) -> plt.Figure:
 # ---------------------------------------------------------------------------
 
 
-def build_metric_metadata(df: pd.DataFrame, metric: str, out_path: Path) -> dict:
+def build_metric_metadata(
+    df: pd.DataFrame,
+    metric: str,
+    out_path: Path,
+    *,
+    with_std: bool = False,
+) -> dict:
     cfg = _METRICS[metric]
     wide = _per_k(df, cfg["column"])
+    wide_std = _per_k(df, cfg["std_column"])
     all_row = _all_row(df, cfg["column"])
+    all_row_std = _all_row(df, cfg["std_column"])
 
     per_model: list[dict] = []
     for style in MODEL_ORDER:
@@ -309,6 +359,11 @@ def build_metric_metadata(df: pd.DataFrame, metric: str, out_path: Path) -> dict
         values = wide.loc[style.key, list(K_VALUES)].to_numpy(dtype=float)
         if not np.isfinite(values).any():
             continue
+        stds = (
+            wide_std.loc[style.key, list(K_VALUES)].to_numpy(dtype=float)
+            if style.key in wide_std.index
+            else np.full(len(K_VALUES), np.nan)
+        )
         per_model.append({
             "model_key": style.key,
             "display": style.display,
@@ -316,7 +371,12 @@ def build_metric_metadata(df: pd.DataFrame, metric: str, out_path: Path) -> dict
                 int(k): (float(v) if np.isfinite(v) else None)
                 for k, v in zip(K_VALUES, values)
             },
+            "per_k_std": {
+                int(k): (float(s) if np.isfinite(s) else None)
+                for k, s in zip(K_VALUES, stds)
+            },
             "aggregate_all_k": all_row.get(style.key),
+            "aggregate_all_k_std": all_row_std.get(style.key),
             "min": float(np.nanmin(values)),
             "max": float(np.nanmax(values)),
             "mean": float(np.nanmean(values)),
@@ -330,10 +390,19 @@ def build_metric_metadata(df: pd.DataFrame, metric: str, out_path: Path) -> dict
         reverse=True,
     )
 
+    plot_id_suffix = "_with_std" if with_std else ""
+    kind = "line_per_model_with_std_band" if with_std else "line_per_model"
+    caption_std = (
+        " Shaded bands show mean \u00b1 1 std across 3 training seeds "
+        "(42, 43, 44)."
+        if with_std else ""
+    )
+
     meta = {
-        "plot_id": f"diagnostic_{cfg['filename']}",
-        "title": cfg["title"],
-        "kind": "line_per_model",
+        "plot_id": f"diagnostic_{cfg['filename']}{plot_id_suffix}",
+        "title": cfg["title"] + (" (mean \u00b1 std)" if with_std else ""),
+        "kind": kind,
+        "shows_std_band": with_std,
         "panels": [{
             "axis": "single",
             "metric": cfg["label"],
@@ -357,16 +426,18 @@ def build_metric_metadata(df: pd.DataFrame, metric: str, out_path: Path) -> dict
                 "model_key": entry["model_key"],
                 "display": entry["display"],
                 "aggregate_all_k": entry["aggregate_all_k"],
+                "aggregate_all_k_std": entry["aggregate_all_k_std"],
             }
             for i, entry in enumerate(ranked)
         ],
         "caption_hint": (
             f"{cfg['title']} on the composed ImageNet diagnostic dataset "
-            "(ViT-Betwixt, seed 42). Each line traces one training "
-            "configuration across the composed-sample class count "
+            "(ViT-Betwixt). Each line traces one training configuration "
+            "across the composed-sample class count "
             f"k \u2208 {list(K_VALUES)}; the ``k=all'' aggregate is "
             "reported in the metadata sidecar, not plotted. ``TreemapMix'' "
             "replaces the internal name ``LabelMix''."
+            + caption_std
         ),
         "file": {
             "pdf": out_path.with_suffix(".pdf").name,
@@ -431,6 +502,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out-spearman", type=Path, default=OUTPUT_SPEARMAN)
     p.add_argument("--out-pair-acc", type=Path, default=OUTPUT_PAIR_ACC)
     p.add_argument("--out-top-acc", type=Path, default=OUTPUT_TOP_ACC)
+    p.add_argument("--out-spearman-std", type=Path, default=OUTPUT_SPEARMAN_STD,
+                   help="Spearman panel with mean +/- std band.")
+    p.add_argument("--out-pair-acc-std", type=Path, default=OUTPUT_PAIR_ACC_STD,
+                   help="Pair-acc panel with mean +/- std band.")
+    p.add_argument("--out-top-acc-std", type=Path, default=OUTPUT_TOP_ACC_STD,
+                   help="Top-acc panel with mean +/- std band.")
     p.add_argument("--out-legend-horizontal", type=Path, default=OUTPUT_LEGEND_HORIZONTAL)
     p.add_argument("--out-legend-vertical", type=Path, default=OUTPUT_LEGEND_VERTICAL)
     p.add_argument("--log-level", default="INFO")
@@ -454,6 +531,21 @@ def main(argv: list[str] | None = None) -> int:
         fig = plot_metric(df, metric)
         savefig(fig, str(out_path))
         meta = build_metric_metadata(df, metric, out_path)
+        meta_path = _write_metadata(meta, out_path)
+        _logger.info("Wrote %s", out_path)
+        _logger.info("Wrote %s", meta_path)
+        plt.close(fig)
+
+    outputs_std = {
+        "spearman": args.out_spearman_std,
+        "pair_acc": args.out_pair_acc_std,
+        "top_acc":  args.out_top_acc_std,
+    }
+    for metric, out_path in outputs_std.items():
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig = plot_metric(df, metric, with_std=True)
+        savefig(fig, str(out_path))
+        meta = build_metric_metadata(df, metric, out_path, with_std=True)
         meta_path = _write_metadata(meta, out_path)
         _logger.info("Wrote %s", out_path)
         _logger.info("Wrote %s", meta_path)
