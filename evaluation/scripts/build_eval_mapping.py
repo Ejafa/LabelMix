@@ -12,7 +12,7 @@ checkpoint. This lets us stitch together runs from sibling checkouts (e.g.
 
 Usage::
 
-    python -m evaluation.scripts.build_in1k_mapping \\
+    python -m evaluation.scripts.build_eval_mapping \\
         --output evaluation/data/raw/in1k_mapping.yaml \\
         --checkpoint-name model_best.pth.tar \\
         --extra-root /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/labelmix

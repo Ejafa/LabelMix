@@ -14,7 +14,7 @@ Canonical invocations::
         --entity my-team --project labelmix --tags in1k
 
     # 2. Build a ``{run_name: run_dir}`` YAML mapping for a W&B group.
-    python -m evaluation.scripts.build_in1k_mapping \\
+    python -m evaluation.scripts.build_eval_mapping \\
         --output evaluation/data/raw/in1k_mapping.yaml \\
         --checkpoint-name model_best.pth.tar
 
@@ -35,6 +35,27 @@ Canonical invocations::
         --input  evaluation/data/raw/eval_csv/in1k.csv \\
         --output evaluation/data/processed/in1k_per_experiment.csv \\
         --table-out evaluation/data/processed/in1k_per_experiment.md
+
+    # 5b. Build the muon/adamw-vs-nadamw comparison table for the W&B
+    #     ``optimizers`` group. All runs are single-seed (seed 42), so no
+    #     aggregation happens: each optimizer row is emitted as-is and
+    #     joined against the nadamw baseline in ``in1k.csv`` on the strict
+    #     key ``(type, model, dataset, long_horizon, seed)``. The script
+    #     aborts loudly if any optimizer key has no (or an ambiguous)
+    #     nadamw counterpart, so the reference table can be fixed before
+    #     re-running. Output columns mirror ``in1k.csv`` (raw per-run
+    #     metrics, no ``_mean``/``_std``) plus a new ``optimizer`` column
+    #     taking values ``muon``, ``adamw`` or ``nadamw``.
+    #
+    #     Prerequisite: run steps 2 + 4 pointed at the ``optimizers``
+    #     group, i.e. ``--wandb-dir evaluation/data/raw/wandb/optimizers
+    #     --group optimizers`` for ``build_eval_mapping``, then
+    #     ``--output-csv evaluation/data/raw/eval_csv/optimizers.csv`` for
+    #     ``run_eval``.
+    python -m evaluation.scripts.aggregate_optimizers \\
+        --input      evaluation/data/raw/eval_csv/optimizers.csv \\
+        --nadamw-ref evaluation/data/raw/eval_csv/in1k.csv \\
+        --output     evaluation/data/processed/optimizers_per_experiment.csv
 
     # 6. Turn raw eval CSVs into tidy per-(model, method) tables.
     python -m evaluation.scripts.process_results \\
