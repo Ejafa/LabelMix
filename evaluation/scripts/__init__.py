@@ -65,10 +65,16 @@ Canonical invocations::
         --mapping  evaluation/diagnostic/area_logit_models.yaml \\\\
         --out-dir  evaluation/data/raw/diagnostic/logits
 
-    # D3. Compute area-vs-logit diagnostic metrics (per-k and aggregated).
+    # D3. Compute area-vs-logit diagnostic metrics across seeds
+    #     (per-k and aggregated, reported as mean +/- std). Always multi-seed;
+    #     exactly 3 seeds are required (default ``--seeds 42 43 44``) and
+    #     every model must evaluate successfully on every seed -- the script
+    #     errors out otherwise. Writes a single CSV:
+    #     ``diagnostic_area_logit_metrics.csv``.
     python -m evaluation.scripts.diag_area_logit_metrics \\\\
         --mapping    evaluation/diagnostic/area_logit_models.yaml \\\\
         --manifest   evaluation/data/raw/diagnostic/composed/manifest.jsonl \\\\
-        --logits-dir evaluation/data/raw/diagnostic/logits \\\\
+        --logits-dir evaluation/data/raw/diagnostic/logits_multiseed \\\\
+        --seeds 42 43 44 \\\\
         --out-csv    evaluation/data/processed/diagnostic_area_logit_metrics.csv
 """

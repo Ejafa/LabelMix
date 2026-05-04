@@ -145,10 +145,12 @@ def _legend_handles() -> list[Line2D]:
     ]
 
 
-# metric key -> (csv column, pretty label, direction, y-pad fraction)
+# metric key -> (csv column, pretty label, direction, y-pad fraction).
+# Column names match the across-seed mean produced by
+# ``evaluation/scripts/diag_area_logit_metrics.py``.
 _METRICS = {
     "spearman": {
-        "column": "spearman_mean",
+        "column": "spearman_mean_mean",
         "label": r"Mean Spearman $\rho$ ($\uparrow$)",
         "title": "Area-logit Spearman correlation",
         "direction": "higher is better",
@@ -156,7 +158,7 @@ _METRICS = {
         "out_path": OUTPUT_SPEARMAN,
     },
     "pair_acc": {
-        "column": "pair_acc",
+        "column": "pair_acc_mean",
         "label": r"Pair ranking accuracy ($\uparrow$)",
         "title": "Pairwise area-vs-logit ranking accuracy",
         "direction": "higher is better",
@@ -164,7 +166,7 @@ _METRICS = {
         "out_path": OUTPUT_PAIR_ACC,
     },
     "top_acc": {
-        "column": "top_acc",
+        "column": "top_acc_mean",
         "label": r"Largest area $=$ top logit ($\uparrow$)",
         "title": "Largest-area top-logit accuracy",
         "direction": "higher is better",
