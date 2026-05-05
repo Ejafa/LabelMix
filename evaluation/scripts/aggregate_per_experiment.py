@@ -93,6 +93,30 @@ _DEFAULT_METRICS: Sequence[str] = (
 
 _EXPECTED_SEEDS: Sequence[int] = (42, 43, 44)
 
+# Rounding policy for the aggregated CSV.
+#
+# The project-wide default is 4 decimal places -- small cross-seed differences
+# matter for every calibration/loss metric we track, so under-rounding is
+# strictly worse than a slightly wider CSV.
+#
+# ``_PERCENT_METRICS`` are on a 0-100 scale; ``_HIGH_PRECISION_METRICS`` are
+# on a 0-1 scale but are typically reported x100 in the paper (e.g. ECE in
+# percentage points, NLL and Brier at higher precision). Both get the same
+# 4-decimal budget as the default; the separate constants are kept so a
+# future caller can tighten one bucket without touching the others.
+_PERCENT_METRICS: frozenset[str] = frozenset({"top1_acc", "top5_acc"})
+_HIGH_PRECISION_METRICS: frozenset[str] = frozenset({
+    "nll",
+    "brier",
+    "ece/n_bins=5",
+    "ece/n_bins=10",
+    "ece/n_bins=15",
+    "ece/n_bins=20",
+})
+_DEFAULT_DECIMALS: int = 4
+_PERCENT_DECIMALS: int = 4
+_HIGH_PRECISION_DECIMALS: int = 4
+
 # Ordered primary-keyword table. ``unbalanced`` is handled separately and
 # first; the remaining rules are applied in this order — first match wins.
 # The order is chosen so that specific/long tokens dominate ambiguous ones
@@ -196,6 +220,45 @@ def _numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def _decimals_for(metric: str) -> int:
+    """Return the number of decimal places to use for ``metric``.
+
+    All metrics currently use 4 decimal places. The dispatch on bucket is
+    preserved so a future caller can lower precision for one family (e.g.
+    accuracy) without touching the calibration metrics.
+
+    - ``top1_acc`` / ``top5_acc``: ``_PERCENT_DECIMALS`` (4).
+    - ``nll``, ``brier``, ``ece/n_bins=*``: ``_HIGH_PRECISION_DECIMALS`` (4).
+      Stored on a 0-1 scale; 4 decimals here => 2 decimals after the
+      conventional x100 conversion (e.g. ``0.0456`` -> ``4.56 pp``).
+    - Everything else: ``_DEFAULT_DECIMALS`` (4).
+    """
+    if metric in _PERCENT_METRICS:
+        return _PERCENT_DECIMALS
+    if metric in _HIGH_PRECISION_METRICS:
+        return _HIGH_PRECISION_DECIMALS
+    return _DEFAULT_DECIMALS
+
+
+def round_aggregated(agg: pd.DataFrame) -> pd.DataFrame:
+    """Round every ``<metric>_mean`` / ``<metric>_std`` pair in-place.
+
+    Every metric is rounded to 4 decimal places (see :func:`_decimals_for`
+    for the per-bucket dispatch). The frame is copied so the caller's
+    object is not mutated.
+    """
+    out = agg.copy()
+    for col in out.columns:
+        for suffix in ("_mean", "_std"):
+            if not col.endswith(suffix):
+                continue
+            metric = col[: -len(suffix)]
+            out[col] = pd.to_numeric(out[col], errors="coerce").round(
+                _decimals_for(metric)
+            )
+    return out
+
+
 def aggregate_by_type(df: pd.DataFrame, metrics: Iterable[str]) -> pd.DataFrame:
     """Group sanitized rows by ``(type, dataset, model)`` and compute mean/std
     of each metric, plus seed completeness metadata.
@@ -278,9 +341,8 @@ def _render_table(agg: pd.DataFrame, metrics: Sequence[str] | None = None) -> st
         mean, std = row[f"{m}_mean"], row[f"{m}_std"]
         if pd.isna(mean):
             return "-"
-        if m in ("top1_acc", "top5_acc"):
-            return f"{mean:.2f} +/- {std:.2f}"
-        return f"{mean:.4f} +/- {std:.4f}"
+        d = _decimals_for(m)
+        return f"{mean:.{d}f} +/- {std:.{d}f}"
 
     header = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
@@ -376,6 +438,11 @@ def main(argv: list[str] | None = None) -> int:
 
     short_df = agg.loc[~agg["long_horizon"].astype(bool)].reset_index(drop=True)
     long_df = agg.loc[agg["long_horizon"].astype(bool)].reset_index(drop=True)
+
+    # Round metric columns for human-readable CSV output: every metric gets
+    # 4 decimal places (see ``_decimals_for`` for the per-bucket dispatch).
+    short_df = round_aggregated(short_df)
+    long_df = round_aggregated(long_df)
 
     short_df.to_csv(short_path, index=False)
     long_df.to_csv(long_path, index=False)
