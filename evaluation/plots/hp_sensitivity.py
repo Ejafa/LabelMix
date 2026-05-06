@@ -5,21 +5,26 @@ Produces three figures from
 
 1. ``hp_sensitivity_vit_wee.pdf`` (main text, two panels):
    x = α on a uniform (categorical) axis, y = Top-1 (left panel, linear)
-   and ECE@15 (right panel, log).  For each TreemapMix loss we plot the
+   and ECE (p.p.) (right panel, log).  For each TreemapMix loss we plot the
    median-over-k as a solid line and the min-to-max-over-k range as a shaded
    band.  Two horizontal references show the Cutmix + Mixup
    and ``single-aug`` (single image aug only) seeds, each with a thin ±std
    band.  The ECE panel uses a log y-axis so the near-baseline region does
    not get crushed by the high-α explosion.
+   The legend is rendered separately as
+   ``hp_sensitivity_vit_wee_legend.pdf``.
 
 2. ``hp_sensitivity_k_vit_wee.pdf`` (main text companion, two panels):
    identical layout to (1) but sweeping x = k (with bands showing the
    min–max over α).  Provides the complementary view of the same grid.
+   The legend is rendered separately as
+   ``hp_sensitivity_k_vit_wee_legend.pdf``.
 
 3. ``hp_sensitivity_heatmaps_vit_wee.pdf`` (appendix, 2x2 grid):
    rows = metric, cols = loss.  Each cell is an 8x8 α × k heatmap of the
    *absolute* metric value.  Colour uses a symmetric linear scale centred
-   on the Cutmix + Mixup mean (blue = better than Cutmix + Mixup, red = worse).
+   on the Cutmix + Mixup mean and the dark global TreemapMix method colours
+   (blue = better than Cutmix + Mixup, red = worse).
    Cutmix + Mixup and ``single-aug`` reference values with their ±std are
    printed in each panel subtitle for context.
 
@@ -30,7 +35,9 @@ the raw CSV.
 
 Input   : ``data/processed/hyperparameter_sensitivity_vit_wee_with_baselines.csv``
 Output  : ``data/processed/figures/hyperparameter/hp_sensitivity_vit_wee.pdf``
+          ``data/processed/figures/hyperparameter/hp_sensitivity_vit_wee_legend.pdf``
           ``data/processed/figures/hyperparameter/hp_sensitivity_k_vit_wee.pdf``
+          ``data/processed/figures/hyperparameter/hp_sensitivity_k_vit_wee_legend.pdf``
           ``data/processed/figures/hyperparameter/hp_sensitivity_heatmaps_vit_wee.pdf``
           (+ ``.png`` and ``.meta.json`` siblings for each)
 """
@@ -45,7 +52,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import Normalize
+from matplotlib.colors import LinearSegmentedColormap, Normalize, TwoSlopeNorm
+from matplotlib.lines import Line2D
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
 from ._style import (
@@ -64,7 +72,9 @@ INPUT_FILE = PROCESSED_DIR / "hyperparameter_sensitivity_vit_wee_with_baselines.
 # All hyperparameter plots live under a dedicated subfolder.
 HP_FIGURES_DIR = FIGURES_DIR / "hyperparameter"
 OUTPUT_SENSITIVITY = HP_FIGURES_DIR / "hp_sensitivity_vit_wee.pdf"
+OUTPUT_SENSITIVITY_LEGEND = HP_FIGURES_DIR / "hp_sensitivity_vit_wee_legend.pdf"
 OUTPUT_SENSITIVITY_K = HP_FIGURES_DIR / "hp_sensitivity_k_vit_wee.pdf"
+OUTPUT_SENSITIVITY_K_LEGEND = HP_FIGURES_DIR / "hp_sensitivity_k_vit_wee_legend.pdf"
 OUTPUT_HEATMAPS_TOP1 = HP_FIGURES_DIR / "hp_sensitivity_heatmaps_top1_vit_wee.pdf"
 OUTPUT_HEATMAPS_ECE = HP_FIGURES_DIR / "hp_sensitivity_heatmaps_ece_vit_wee.pdf"
 
@@ -85,6 +95,14 @@ LOSS_COLOURS: dict[str, str] = {
     "pl_loss": METHOD_COLORS_DARK["labelmix-pl"],   # green (deep)
     "soft_ce": METHOD_COLORS_DARK["labelmix-sce"],  # red  (deep)
 }
+
+# Heatmaps use the same dark paper-wide method colours as the line plots,
+# rather than Matplotlib's built-in diverging maps.
+HEATMAP_BETTER_COLOUR = METHOD_COLORS_DARK["labelmix-pl"]
+HEATMAP_WORSE_COLOUR = METHOD_COLORS_DARK["labelmix-sce"]
+HEATMAP_NEUTRAL_COLOUR = "#FFFFFF"
+HEATMAP_BETTER_LABEL = "Blue"
+HEATMAP_WORSE_LABEL = "Red"
 
 # Display names for the two reference rows in the combined CSV.
 # The internal label 'bare' is renamed on the fly to 'Single-Image Aug' —
@@ -233,25 +251,58 @@ def plot_sensitivity(df: pd.DataFrame, *, sweep: str = "alpha") -> plt.Figure:
 
     # ECE is log-scaled so the low-ECE plateau is legible.
     _plot_metric(axes[1], lm, "ece", baselines, sweep=sweep, yscale="log")
-    axes[1].set_ylabel(r"ECE@15 (%, $\downarrow$, log)")
+    axes[1].set_ylabel(r"ECE (p.p., $\downarrow$, log)")
 
-    # Single shared legend below the panels.
-    handles, labels = axes[0].get_legend_handles_labels()
-    # De-duplicate while preserving order.
-    seen = set()
-    uniq = [(h, l) for h, l in zip(handles, labels) if not (l in seen or seen.add(l))]
+    fig.tight_layout()
+    return fig
+
+
+def _sensitivity_legend_handles() -> list[Line2D]:
+    """Legend handles matching the sensitivity line plots."""
+    return [
+        Line2D(
+            [0], [0],
+            color=LOSS_COLOURS[loss],
+            lw=1.3,
+            marker="o",
+            markersize=3.0,
+            label=LOSS_LABELS[loss],
+        )
+        for loss in LOSS_ORDER
+    ] + [
+        Line2D(
+            [0], [0],
+            color=BASELINE_COLOUR,
+            lw=1.0,
+            linestyle="-",
+            label=BASELINE_DISPLAY,
+        ),
+        Line2D(
+            [0], [0],
+            color=SINGLE_AUG_COLOUR,
+            lw=1.0,
+            linestyle="--",
+            label=SINGLE_AUG_DISPLAY,
+        ),
+    ]
+
+
+def plot_sensitivity_legend() -> plt.Figure:
+    """Render the shared sensitivity legend as a standalone figure."""
+    apply_paper_style()
+    handles = _sensitivity_legend_handles()
+    labels = [h.get_label() for h in handles]
+
+    fig = plt.figure(figsize=(DOUBLE_COL_WIDTH, 0.55))
     fig.legend(
-        [h for h, _ in uniq],
-        [l for _, l in uniq],
-        loc="lower center",
-        ncol=len(uniq),
-        bbox_to_anchor=(0.5, -0.02),
+        handles,
+        labels,
+        loc="center",
+        ncol=len(handles),
         handlelength=2.0,
         columnspacing=1.2,
+        borderaxespad=0.0,
     )
-    # Leave room at the bottom for the shared legend; the top is flush so
-    # the panels can use the full vertical budget.
-    fig.tight_layout(rect=(0, 0.12, 1, 1))
     return fig
 
 
@@ -260,6 +311,7 @@ def build_sensitivity_metadata(
     out_path: Path,
     *,
     sweep: str = "alpha",
+    legend_path: Path | None = None,
 ) -> dict:
     """Build a JSON-serialisable metadata dict for a sensitivity figure.
 
@@ -303,10 +355,19 @@ def build_sensitivity_metadata(
             else "TreemapMix hyperparameter sensitivity over k \u2014 ViT-Wee / ImageNet-1k"
         ),
         "kind": "line_with_band",
+        "legend": (
+            {
+                "rendered_separately": True,
+                "pdf": legend_path.with_suffix(".pdf").name,
+                "png": legend_path.with_suffix(".png").name,
+            }
+            if legend_path is not None
+            else {"rendered_separately": True}
+        ),
         "panels": [
             {"axis": "left", "metric": "Top-1 accuracy (%)",
              "direction": "higher is better", "yscale": "linear"},
-            {"axis": "right", "metric": "ECE@15 (%)",
+            {"axis": "right", "metric": "ECE (p.p.)",
              "direction": "lower is better", "yscale": "log"},
         ],
         "x": {"name": sweep, "scale": "categorical_uniform",
@@ -340,7 +401,7 @@ def build_sensitivity_metadata(
         "caption_hint": (
             "Hyperparameter sensitivity of TreemapMix on ViT-Wee / ImageNet-1k. "
             f"The x-axis sweeps {sweep}; each solid line is the median Top-1 "
-            f"(left, linear) / ECE@15 (right, log) over {other} \u2208 "
+            f"(left, linear) / ECE (p.p.) (right, log) over {other} \u2208 "
             f"{other_values}; the shaded band shows the min\u2013max envelope "
             f"over {other}. The dark grey line is Cutmix + Mixup; "
             "the dashed grey line is Single-Image Aug. "
@@ -354,6 +415,35 @@ def build_sensitivity_metadata(
         },
     }
     return meta
+
+
+def build_sensitivity_legend_metadata(out_path: Path, *, sweep: str) -> dict:
+    """Build metadata for a standalone sensitivity legend."""
+    return {
+        "plot_id": (
+            "hp_sensitivity_vit_wee_legend" if sweep == "alpha"
+            else "hp_sensitivity_k_vit_wee_legend"
+        ),
+        "title": (
+            "TreemapMix hyperparameter sensitivity legend"
+            if sweep == "alpha"
+            else "TreemapMix hyperparameter k-sweep sensitivity legend"
+        ),
+        "kind": "standalone_legend",
+        "applies_to": (
+            "hp_sensitivity_vit_wee" if sweep == "alpha"
+            else "hp_sensitivity_k_vit_wee"
+        ),
+        "entries": [
+            {"label": handle.get_label()}
+            for handle in _sensitivity_legend_handles()
+        ],
+        "file": {
+            "pdf": out_path.with_suffix(".pdf").name,
+            "png": out_path.with_suffix(".png").name,
+            "directory": str(out_path.parent),
+        },
+    }
 
 # --------------------------------------------------------------------------
 # Figure 2: Δ-vs-baseline heatmaps (symmetric log colour)
@@ -374,11 +464,12 @@ def _sym_norm_around(
     *,
     clip_quantile: float | None = 0.90,
     min_half_span: float = 1.5,
+    lower_bound: float | None = None,
 ) -> tuple[Normalize, bool]:
-    """Symmetric linear normalisation centred on ``center``.
+    """Diverging normalisation centred on ``center``.
 
     A single severe outlier (e.g. the α=3, k=10 Top-1 collapse) would
-    otherwise stretch the full-range symmetric scale so much that the
+    otherwise stretch the full-range scale so much that the
     ±2 pp neighbourhood around the baseline — where all interesting
     TreemapMix cells live — is compressed into a narrow pale band.  We
     therefore clip the half-span to the ``clip_quantile`` of
@@ -394,6 +485,8 @@ def _sym_norm_around(
     min_half_span:
         Lower bound on the half-span.  Prevents an almost-flat panel
         from collapsing to a zero-range scale.
+    lower_bound:
+        Optional lower bound for metrics that cannot be negative, such as ECE.
 
     Returns
     -------
@@ -404,7 +497,10 @@ def _sym_norm_around(
     """
     finite = values[np.isfinite(values)]
     if finite.size == 0:
-        return Normalize(vmin=center - 1.0, vmax=center + 1.0), False
+        vmin = center - 1.0
+        if lower_bound is not None:
+            vmin = max(float(lower_bound), vmin)
+        return TwoSlopeNorm(vmin=vmin, vcenter=center, vmax=center + 1.0), False
 
     deviations = np.abs(finite - center)
     full_half = float(deviations.max())
@@ -413,8 +509,27 @@ def _sym_norm_around(
     else:
         half = float(np.quantile(deviations, clip_quantile))
     half = max(half, min_half_span, 1e-6)
-    clipped = full_half > half + 1e-9
-    return Normalize(vmin=center - half, vmax=center + half), clipped
+    vmin = center - half
+    if lower_bound is not None:
+        vmin = max(float(lower_bound), vmin)
+    vmax = center + half
+    clipped = bool(np.any((finite < vmin) | (finite > vmax)))
+    return TwoSlopeNorm(vmin=vmin, vcenter=center, vmax=vmax), clipped
+
+
+def _global_heatmap_cmap(*, lower_is_better: bool) -> LinearSegmentedColormap:
+    """Return a diverging heatmap cmap built from the dark method colours."""
+    if lower_is_better:
+        low_colour = HEATMAP_BETTER_COLOUR
+        high_colour = HEATMAP_WORSE_COLOUR
+    else:
+        low_colour = HEATMAP_WORSE_COLOUR
+        high_colour = HEATMAP_BETTER_COLOUR
+    return LinearSegmentedColormap.from_list(
+        "treemapmix_global_heatmap",
+        [low_colour, HEATMAP_NEUTRAL_COLOUR, high_colour],
+        N=256,
+    )
 
 
 def _draw_heatmap(
@@ -432,12 +547,8 @@ def _draw_heatmap(
     values = piv.values
     if norm is None:
         norm, _ = _sym_norm_around(baseline_mean, values)
-    # Invariant: blue = better than baseline, red = worse.
-    #   - Top-1 (higher better): "better" = value > baseline. RdBu maps high
-    #     values to blue, so use RdBu.
-    #   - ECE  (lower  better): "better" = value < baseline. RdBu maps low
-    #     values to red -- inverted from what we want -- so use RdBu_r.
-    cmap = "RdBu_r" if lower_is_better else "RdBu"
+    # Invariant: blue marks cells better than baseline; red marks worse.
+    cmap = _global_heatmap_cmap(lower_is_better=lower_is_better)
 
     im = ax.imshow(
         values,
@@ -502,8 +613,8 @@ def _draw_heatmap(
 
 _METRIC_CFG = {
     # metric -> (lower_is_better, label)
-    "top1": (False, "Top-1 (%)"),
-    "ece":  (True,  "ECE@15 (%)"),
+    "top1": (False, "Accuracy (%)"),
+    "ece":  (True,  "ECE (p.p.)"),
 }
 
 
@@ -537,7 +648,12 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
     pooled = np.concatenate([
         _pivot(lm, loss, metric).values.ravel() for loss in LOSS_ORDER
     ])
-    shared_norm, clipped = _sym_norm_around(bl_m, pooled, clip_quantile=0.90)
+    shared_norm, clipped = _sym_norm_around(
+        bl_m,
+        pooled,
+        clip_quantile=0.90,
+        lower_bound=0.0 if metric == "ece" else None,
+    )
 
     # 1 row × 2 cols (one panel per loss).  Extra vertical budget at the
     # bottom reserves room for the shared horizontal colourbar.
@@ -570,8 +686,7 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
         extend="both" if clipped else "neither",
     )
     cbar.set_label(
-        f"{metric_label}  (blue = better than {BASELINE_DISPLAY}"
-        + ("; arrows: clipped outliers)" if clipped else ")"),
+        f"{HEATMAP_BETTER_LABEL} = better; {HEATMAP_WORSE_LABEL.lower()} = worse",
         fontsize=9,
     )
     cbar.ax.tick_params(labelsize=7)
@@ -646,15 +761,27 @@ def build_heatmap_metadata(
         "encoding": {
             "cell_value_printed": "absolute metric value",
             "colour_norm": (
-                "symmetric linear centred on the Cutmix + Mixup mean, with the "
+                "diverging linear scale centred on the Cutmix + Mixup mean, with the "
                 "half-span clipped at the 90th percentile of "
                 "|value − Cutmix + Mixup| pooled across both loss panels so "
                 "outliers do not drain contrast from the Cutmix + Mixup "
                 "neighbourhood; cells outside the clipped range saturate "
                 "the colourmap and are flagged by the colourbar's "
                 "extend arrows"
+                + (
+                    ". ECE is lower-bounded at zero so its colourbar does not "
+                    "show impossible negative scores"
+                    if metric == "ece"
+                    else ""
+                )
             ),
-            "colour_semantics": "blue = better than Cutmix + Mixup, red = worse",
+            "colour_palette": (
+                "global METHOD_COLORS_DARK palette"
+            ),
+            "colour_semantics": (
+                f"{HEATMAP_BETTER_LABEL} = better than Cutmix + Mixup; "
+                f"{HEATMAP_WORSE_LABEL.lower()} = worse"
+            ),
             "shared_across_panels": True,
             "panel_subtitle": (
                 "CutMix+Mixup=mean\u00B1std\n"
@@ -678,10 +805,9 @@ def build_heatmap_metadata(
             f"α × k sensitivity of TreemapMix ({metric_label}) on ViT-Wee / "
             "ImageNet-1k. Cells show the absolute metric value; the two "
             "panels contrast the PL and SCE variants. Colour uses a "
-            "symmetric linear scale centred on the Cutmix + Mixup mean (blue "
-            "cells beat Cutmix + Mixup, red cells lag). Each panel subtitle "
-            "prints the Cutmix + Mixup and single-aug reference values as "
-            "mean\u00B1std."
+            "diverging scale centred on the Cutmix + Mixup mean: blue cells "
+            "beat Cutmix + Mixup, red cells lag. Each panel subtitle prints "
+            "the Cutmix + Mixup and single-aug reference values as mean\u00B1std."
         ),
         "file": {
             "pdf": out_path.with_suffix(".pdf").name,
@@ -725,7 +851,17 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input", type=Path, default=INPUT_FILE)
     p.add_argument("--out-sensitivity", type=Path, default=OUTPUT_SENSITIVITY)
+    p.add_argument(
+        "--out-sensitivity-legend",
+        type=Path,
+        default=OUTPUT_SENSITIVITY_LEGEND,
+    )
     p.add_argument("--out-sensitivity-k", type=Path, default=OUTPUT_SENSITIVITY_K)
+    p.add_argument(
+        "--out-sensitivity-k-legend",
+        type=Path,
+        default=OUTPUT_SENSITIVITY_K_LEGEND,
+    )
     p.add_argument("--out-heatmaps-top1", type=Path, default=OUTPUT_HEATMAPS_TOP1)
     p.add_argument("--out-heatmaps-ece", type=Path, default=OUTPUT_HEATMAPS_ECE)
     p.add_argument("--log-level", default="INFO")
@@ -740,29 +876,69 @@ def main(argv: list[str] | None = None) -> int:
     df = pd.read_csv(args.input)
 
     args.out_sensitivity.parent.mkdir(parents=True, exist_ok=True)
+    args.out_sensitivity_legend.parent.mkdir(parents=True, exist_ok=True)
     args.out_sensitivity_k.parent.mkdir(parents=True, exist_ok=True)
+    args.out_sensitivity_k_legend.parent.mkdir(parents=True, exist_ok=True)
     args.out_heatmaps_top1.parent.mkdir(parents=True, exist_ok=True)
     args.out_heatmaps_ece.parent.mkdir(parents=True, exist_ok=True)
 
     # Figure 1: α sweep.
     fig1 = plot_sensitivity(df, sweep="alpha")
     savefig(fig1, str(args.out_sensitivity))
-    meta1 = build_sensitivity_metadata(df, args.out_sensitivity, sweep="alpha")
+    meta1 = build_sensitivity_metadata(
+        df,
+        args.out_sensitivity,
+        sweep="alpha",
+        legend_path=args.out_sensitivity_legend,
+    )
     meta1_path = _write_metadata(meta1, args.out_sensitivity)
     _logger.info("Wrote %s", args.out_sensitivity)
     _logger.info("Wrote %s", meta1_path)
     plt.close(fig1)
 
+    fig1_legend = plot_sensitivity_legend()
+    savefig(fig1_legend, str(args.out_sensitivity_legend))
+    meta1_legend = build_sensitivity_legend_metadata(
+        args.out_sensitivity_legend,
+        sweep="alpha",
+    )
+    meta1_legend_path = _write_metadata(
+        meta1_legend,
+        args.out_sensitivity_legend,
+    )
+    _logger.info("Wrote %s", args.out_sensitivity_legend)
+    _logger.info("Wrote %s", meta1_legend_path)
+    plt.close(fig1_legend)
+
     # Figure 2: k sweep (companion to the α figure).
     fig_k = plot_sensitivity(df, sweep="k")
     savefig(fig_k, str(args.out_sensitivity_k))
-    meta_k = build_sensitivity_metadata(df, args.out_sensitivity_k, sweep="k")
+    meta_k = build_sensitivity_metadata(
+        df,
+        args.out_sensitivity_k,
+        sweep="k",
+        legend_path=args.out_sensitivity_k_legend,
+    )
     meta_k_path = _write_metadata(meta_k, args.out_sensitivity_k)
     _logger.info("Wrote %s", args.out_sensitivity_k)
     _logger.info("Wrote %s", meta_k_path)
     plt.close(fig_k)
 
-    # Figure 3a: Top-1 heatmap (one row, two losses).
+    fig_k_legend = plot_sensitivity_legend()
+    savefig(fig_k_legend, str(args.out_sensitivity_k_legend))
+    meta_k_legend = build_sensitivity_legend_metadata(
+        args.out_sensitivity_k_legend,
+        sweep="k",
+    )
+    meta_k_legend_path = _write_metadata(
+        meta_k_legend,
+        args.out_sensitivity_k_legend,
+    )
+    _logger.info("Wrote %s", args.out_sensitivity_k_legend)
+    _logger.info("Wrote %s", meta_k_legend_path)
+    plt.close(fig_k_legend)
+
+    # Figure 3a: Accuracy heatmap (one row, two losses).
     fig_top1 = plot_heatmaps(df, metric="top1")
     savefig(fig_top1, str(args.out_heatmaps_top1))
     meta_top1 = build_heatmap_metadata(df, args.out_heatmaps_top1, metric="top1")

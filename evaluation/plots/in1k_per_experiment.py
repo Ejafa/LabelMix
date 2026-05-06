@@ -176,9 +176,9 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
 
     fig, (ax_top, ax_ece) = plt.subplots(
         2, 1,
-        figsize=(DOUBLE_COL_WIDTH, 4.2),
+        figsize=(DOUBLE_COL_WIDTH, 4.6),
         sharex=True,
-        gridspec_kw={"hspace": 0.12},
+        gridspec_kw={"hspace": 0.34},
     )
 
     for i, t in enumerate(types):
@@ -227,12 +227,16 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
 
     # --- Axis cosmetics -----------------------------------------------------
     model_labels = [_MODEL_LABELS.get(m, m) for m in models]
-    ax_ece.set_xticks(x)
-    ax_ece.set_xticklabels(model_labels)
-    ax_ece.set_xlabel("Model")
+    for ax in (ax_top, ax_ece):
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_labels)
+        # ``sharex=True`` hides upper tick labels by default; these stacked
+        # panels are often placed one after another, so each panel repeats the
+        # model names without repeating an extra x-axis label.
+        ax.tick_params(axis="x", labelbottom=True)
 
-    ax_top.set_ylabel("Top-1 accuracy (%)")
-    ax_ece.set_ylabel(f"ECE ($n_{{bins}}={_ECE_BINS}$, pp)")
+    ax_top.set_ylabel("Accuracy (%)")
+    ax_ece.set_ylabel("ECE (p.p.)")
 
     # Auto-zoom Top-1 so <1 pp differences remain visible.
     top1_vals = df["top1_acc_mean"].dropna()

@@ -119,13 +119,13 @@ METHOD_COLORS: dict[str, str] = {
     # Non-LabelMix methods.
     "bare":           PALETTE[7],   # grey
     "noaug":          PALETTE[8],   # olive
-    "baseline":       PALETTE[0],   # blue
+    "baseline":       PALETTE[2],   # green
     "mixup":          PALETTE[9],   # cyan
     "cutmix":         PALETTE[5],   # brown
     "mosaic":         PALETTE[4],   # purple
     # LabelMix family — kept clearly distinct from the non-LabelMix block.
     "labelmix-mixed": PALETTE[1],   # orange
-    "labelmix-pl":    PALETTE[2],   # green
+    "labelmix-pl":    PALETTE[0],   # blue
     "labelmix-sce":   PALETTE[3],   # red
 }
 
@@ -148,13 +148,13 @@ METHOD_COLORS_DARK: dict[str, str] = {
     # Non-LabelMix methods.
     "bare":           PALETTE_DARK[7],   # grey
     "noaug":          PALETTE_DARK[8],   # olive
-    "baseline":       PALETTE_DARK[0],   # blue
+    "baseline":       PALETTE_DARK[2],   # green
     "mixup":          PALETTE_DARK[9],   # cyan
     "cutmix":         PALETTE_DARK[5],   # brown
     "mosaic":         PALETTE_DARK[4],   # purple
     # LabelMix family — kept clearly distinct from the non-LabelMix block.
     "labelmix-mixed": PALETTE_DARK[1],   # orange
-    "labelmix-pl":    PALETTE_DARK[2],   # green
+    "labelmix-pl":    PALETTE_DARK[0],   # blue
     "labelmix-sce":   PALETTE_DARK[3],   # red
 }
 
@@ -179,15 +179,15 @@ def method_color_dark(method: str, default: str = REF_DARK_GREY) -> str:
 METHOD_DISPLAY: dict[str, str] = {
     # Non-LabelMix methods.
     "bare":           "Single-Image Aug",
-    "noaug":          "No Augmentation",
-    "baseline":       "Cutmix + Mixup",
+    "noaug":          "No Aug",
+    "baseline":       "Mixup+CutMix",
     "mixup":          "Mixup",
     "cutmix":         "CutMix",
     "mosaic":         "RICAP",
     # LabelMix family — canonical TreemapMix naming for every paper plot.
-    "labelmix-mixed": "TreemapMix (mixed)",
-    "labelmix-pl":    "TreemapMix (PL)",
-    "labelmix-sce":   "TreemapMix (SCE)",
+    "labelmix-mixed": "TreemapMix-mixed",
+    "labelmix-pl":    "TreemapMix-PL",
+    "labelmix-sce":   "TreemapMix-SCE",
 }
 
 
