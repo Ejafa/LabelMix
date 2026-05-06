@@ -4,7 +4,7 @@ The training-time LabelMix pipeline lives in
 ``timm.data.balanced_dataset.BalancedBucketDataset._mix_group_labelmix``.
 For diagnostic evaluation we only need a single composed sample (no K-way
 circular batch, no target mixing), so we reuse the distilled single-output
-helpers in :mod:`evaluation.figures.augmentation_showcase` and wrap them so
+helpers in :mod:`evaluation.plots.augmentation_showcase` and wrap them so
 that we additionally return:
 
     * ``slot_boxes``     -- (k, 4) int64 pixel boxes (x0, y0, x1, y1) in
@@ -30,7 +30,7 @@ from typing import List, Sequence
 import torch
 import torch.nn.functional as F
 
-from evaluation.figures.augmentation_showcase import (
+from evaluation.plots.augmentation_showcase import (
     _apply_box_symmetry,
     _apply_box_symmetry_rect,
     _boxes_are_valid_and_tile,
@@ -73,7 +73,7 @@ def compose_labelmix_with_mask(
 ) -> ComposedSample:
     """Compose ``k`` preprocessed source tensors into one LabelMix canvas.
 
-    This mirrors :func:`evaluation.figures.augmentation_showcase._compose_labelmix`
+    This mirrors :func:`evaluation.plots.augmentation_showcase._compose_labelmix`
     (which in turn mirrors the training path), and *additionally* materializes
     the per-pixel patch mask + per-slot boxes/areas needed for diagnostic
     analysis.  All RNG is driven by the ambient ``torch``/``numpy`` state so

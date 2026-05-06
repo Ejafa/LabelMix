@@ -9,7 +9,7 @@ via ``--source-dir``.
 Usage::
 
     python evaluation/scripts/download_hf_imagenet_samples.py
-    python evaluation/figures/augmentation_showcase.py \\
+    python evaluation/plots/augmentation_showcase.py \\
         --source-dir evaluation/data/raw/hf_imagenet1k_animal_samples
 """
 from __future__ import annotations
@@ -486,7 +486,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Downloaded ImageNet sample pool: {output_dir}")
     print(
         "Run showcase with: "
-        f"python evaluation/figures/augmentation_showcase.py --source-dir {output_dir}"
+        f"python evaluation/plots/augmentation_showcase.py --source-dir {output_dir}"
     )
     return 0
 

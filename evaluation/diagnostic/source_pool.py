@@ -232,7 +232,7 @@ def entry_to_tensor(
 ) -> torch.Tensor:
     """Apply validation-style resize + center-crop to a pool entry.
 
-    Matches :func:`evaluation.figures.augmentation_showcase._resize_centercrop`
+    Matches :func:`evaluation.plots.augmentation_showcase._resize_centercrop`
     so the diagnostic pipeline preprocesses identically to the rest of the
     repo's clean / validation path (no training-time augmentations).
     """

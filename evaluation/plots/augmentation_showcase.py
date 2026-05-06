@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the augmentation-showcase *images* for the LabelMix paper.
+"""Render the augmentation-showcase *images* for the TreemapMix paper.
 
 This script emits raw per-image PNGs only — the final figures (captions,
 column labels, etc.) are composed in LaTeX later.  Four image sets are
@@ -8,18 +8,18 @@ visual differences between augmentations are attributable to the
 augmentation itself, not to a different image crop:
 
     1. ``aug_comparison_clean/`` — one PNG per augmentation in
-       ``{none, mixup, cutmix, mosaic, labelmix}``, rendered in its basic
+       ``{none, mixup, cutmix, mosaic, treemapmix}``, rendered in its basic
        form after resize + center-crop only.
 
-    2. ``labelmix_randomness/`` — N PNGs of LabelMix with ``alpha=0.5``,
+    2. ``treemapmix_randomness/`` — N PNGs of TreemapMix with ``alpha=0.5``,
        ``k=5`` and ``sampling_max_aspect=20``, one per seed; no
        single-image augmentation (color jitter, RandAugment,
        random-erasing, shear, ...) is applied.
 
-    3. ``labelmix_k_sweep/`` — one PNG per ``k`` in ``[2, 10]``, all
+    3. ``treemapmix_k_sweep/`` — one PNG per ``k`` in ``[2, 10]``, all
        with ``alpha=5.0`` and ``sampling_max_aspect=15``.
 
-    4. ``labelmix_alpha_sweep/`` — one PNG per ``alpha`` in
+    4. ``treemapmix_alpha_sweep/`` — one PNG per ``alpha`` in
        ``[0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0]``, all with ``k=5`` and
        ``sampling_max_aspect=10``.
 
@@ -56,15 +56,15 @@ Output
     │   ├── none__panel1_256.png  / _1024.png
     │   ├── mixup__panel1_256.png / _1024.png
     │   ├── ...
-    ├── labelmix_randomness/
+    ├── treemapmix_randomness/
     │   ├── metadata.json
     │   ├── panel1_256.png / _1024.png
     │   └── ...
-    ├── labelmix_k_sweep/
+    ├── treemapmix_k_sweep/
         ├── metadata.json
         ├── k2_256.png / _1024.png
         └── ...
-    └── labelmix_alpha_sweep/
+    └── treemapmix_alpha_sweep/
         ├── metadata.json
         ├── alpha0_05_256.png / _1024.png
         └── ...
@@ -134,7 +134,7 @@ VIT_WEE_AUG = dict(
     std=IMAGENET_STD,
 )
 
-# LabelMix defaults used by the paper's main experiments.
+# TreemapMix defaults used by the paper's main experiments.
 LABELMIX_ALPHA: float = 0.5
 LABELMIX_K_SWEEP_ALPHA: float = 2.0
 LABELMIX_K: int = 5
@@ -160,7 +160,7 @@ COMPARISON_MOSAIC_FILL_VALUE: float = 0.5
 #   The comparison uses one basic example per augmentation.
 # 128 is plenty and cheap to load.
 NUM_SOURCE_IMAGES: int = 128
-DEFAULT_PREFERRED_SOURCE_IDS: Tuple[int, ...] = (14, 20, 22, 30, 35, 43, 58, 64, 67, 68)
+DEFAULT_PREFERRED_SOURCE_IDS: Tuple[int, ...] = (81, 18, 6, 78, 124, 118, 4, 13, 28)
 SOURCE_ORDER_CACHE_LIMIT: int = 16
 
 # Default on-disk HuggingFace ``datasets`` cache for ILSVRC ImageNet-1k.
@@ -464,7 +464,7 @@ def _apply_transform(
 
 
 # ---------------------------------------------------------------------------
-# LabelMix compose (distilled from ``BalancedBucketDataset._mix_group_labelmix``
+# TreemapMix compose (distilled from ``BalancedBucketDataset._mix_group_labelmix``
 # and ``_layout_is_valid``).  Reimplemented in-place so the figure generator
 # doesn't need to instantiate a full BalancedBucketDataset (which requires
 # an actual HF arrow dataset on disk).
@@ -534,13 +534,13 @@ def _sample_labelmix_layout(
         if boxes is not None:
             if cap != sampling_max_aspect:
                 _logger.info(
-                    "LabelMix rejection sampling relaxed aspect<=%.1f for k=%d alpha=%.2f.",
+                    "TreemapMix rejection sampling relaxed aspect<=%.1f for k=%d alpha=%.2f.",
                     cap if cap > 0 else float('inf'), k, alpha,
                 )
             return boxes
 
     _logger.warning(
-        "LabelMix rejection sampling exhausted even the relaxed budget for k=%d; "
+        "TreemapMix rejection sampling exhausted even the relaxed budget for k=%d; "
         "falling back to uniform layout.", k,
     )
     w_desc = torch.full((k,), 1.0 / k, dtype=torch.float32)
@@ -550,7 +550,7 @@ def _sample_labelmix_layout(
 
 
 def _ranked_labelmix_weights(k: int, alpha: float) -> torch.Tensor:
-    """Deterministic descending weights for ranked LabelMix sweep figures.
+    """Deterministic descending weights for ranked TreemapMix sweep figures.
 
     Source image 0 is largest, image 1 is second-largest, and so on.  Smaller
     alpha values make the ranking steeper; larger alpha values move toward
@@ -641,12 +641,12 @@ def _layout_from_ranked_weights(
         and _boxes_max_aspect(fallback) <= float(sampling_max_aspect)
     ):
         _logger.warning(
-            "Ranked LabelMix layout fell back to balanced grid for k=%d.", k,
+            "Ranked TreemapMix layout fell back to balanced grid for k=%d.", k,
         )
         return fallback
 
     raise RuntimeError(
-        "Could not construct a ranked LabelMix layout within "
+        "Could not construct a ranked TreemapMix layout within "
         f"sampling_max_aspect={sampling_max_aspect:g}."
     )
 
@@ -663,7 +663,7 @@ def _compose_labelmix(
     shift: int = 0,
     use_symmetries: bool = True,
 ) -> torch.Tensor:
-    """Produce a single LabelMix composite from ``k`` source images.
+    """Produce a single TreemapMix composite from ``k`` source images.
 
     Reimplements the core of
     ``BalancedBucketDataset._mix_group_labelmix`` for a single output
@@ -975,7 +975,8 @@ def _source_order_head(cfg: ShowcaseConfig, limit: int = SOURCE_ORDER_CACHE_LIMI
 
 
 # Canonical augmentation ordering used by the comparison figure.
-_AUG_ROW_ORDER = ("none", "mixup", "cutmix", "mosaic", "labelmix")
+_TREEMAPMIX_AUG = "treemapmix"
+_AUG_ROW_ORDER = ("none", "mixup", "cutmix", "mosaic", _TREEMAPMIX_AUG)
 # Fixed per-aug salt so seeds are reproducible across Python runs
 # (``hash(str)`` is randomized by PYTHONHASHSEED by default).
 _AUG_SEED_SALT = {
@@ -983,7 +984,7 @@ _AUG_SEED_SALT = {
     "mixup":    101,
     "cutmix":   202,
     "mosaic":   303,
-    "labelmix": 404,
+    _TREEMAPMIX_AUG: 404,
 }
 
 # Short per-aug notes used inside metadata.json; kept concise so a
@@ -993,8 +994,8 @@ _AUG_NOTES = {
     "mixup":    f"Classic Mixup: out = lam*a + (1-lam)*b with alpha={COMPARISON_MIXUP_ALPHA}.",
     "cutmix":   f"Classic CutMix: paste a random bbox of b into a with alpha={COMPARISON_CUTMIX_ALPHA}.",
     "mosaic":   "4-tile Mosaic augmentation with stronger zoom-out and grey filler.",
-    "labelmix": (
-        f"LabelMix with alpha={COMPARISON_LABELMIX_ALPHA}, k={COMPARISON_LABELMIX_K}, "
+    _TREEMAPMIX_AUG: (
+        f"TreemapMix with alpha={COMPARISON_LABELMIX_ALPHA}, k={COMPARISON_LABELMIX_K}, "
         f"sampling_max_aspect={LABELMIX_MAX_ASPECT}."
     ),
 }
@@ -1018,13 +1019,13 @@ def _panel_for_aug(
     """
     out: List[torch.Tensor] = []
     # Budget per panel, per aug:
-    #   none     = 1, mixup = 2, cutmix = 2, mosaic = 4, labelmix = K
+    #   none = 1, mixup = 2, cutmix = 2, mosaic = 4, treemapmix = K
     per_panel = {
         "none": 1,
         "mixup": 2,
         "cutmix": 2,
         "mosaic": 4,
-        "labelmix": COMPARISON_LABELMIX_K,
+        _TREEMAPMIX_AUG: COMPARISON_LABELMIX_K,
     }[aug]
     salt = _AUG_SEED_SALT[aug]
     for p in range(num_panels):
@@ -1054,7 +1055,7 @@ def _panel_for_aug(
                 fill_value=COMPARISON_MOSAIC_FILL_VALUE,
                 seed=panel_seed + p,
             ))
-        elif aug == "labelmix":
+        elif aug == _TREEMAPMIX_AUG:
             out.append(_compose_labelmix(
                 chunk,
                 alpha=COMPARISON_LABELMIX_ALPHA,
@@ -1104,9 +1105,9 @@ def render_aug_comparison(
         "mosaic_center_ratio": list(COMPARISON_MOSAIC_CENTER_RATIO),
         "mosaic_post_scale": list(COMPARISON_MOSAIC_POST_SCALE),
         "mosaic_fill_value": COMPARISON_MOSAIC_FILL_VALUE,
-        "labelmix_alpha": COMPARISON_LABELMIX_ALPHA,
-        "labelmix_k": COMPARISON_LABELMIX_K,
-        "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
+        "treemapmix_alpha": COMPARISON_LABELMIX_ALPHA,
+        "treemapmix_k": COMPARISON_LABELMIX_K,
+        "treemapmix_max_aspect": LABELMIX_MAX_ASPECT,
         "source_order_head": _source_order_head(cfg),
     }
     overwrite_stale_comparison = not os.path.exists(metadata_path)
@@ -1199,17 +1200,17 @@ def render_aug_comparison(
     })
 
 
-def render_labelmix_randomness(
+def render_treemapmix_randomness(
     cfg: ShowcaseConfig,
     *,
     num_panels: int = 8,
 ) -> None:
-    """Set 2: independent LabelMix draws to illustrate layout randomness.
+    """Set 2: independent TreemapMix draws to illustrate layout randomness.
 
-    Output directory: ``<out>/labelmix_randomness/``, one PNG per panel
+    Output directory: ``<out>/treemapmix_randomness/``, one PNG per panel
     per resolution.  Single-image augmentations are *not* applied.
     """
-    group = "labelmix_randomness"
+    group = "treemapmix_randomness"
     dir_path = cfg.dir_for(group)
     os.makedirs(dir_path, exist_ok=True)
 
@@ -1230,7 +1231,7 @@ def render_labelmix_randomness(
                 old_meta = json.load(f)
             old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
             overwrite_stale_cache = (
-                old_params.get("labelmix_k") != LABELMIX_K
+                old_params.get("treemapmix_k") != LABELMIX_K
                 or old_params.get("source_order_head") != expected_source_order
                 or not bool(old_params.get("shared_source_images_across_panels"))
             )
@@ -1262,10 +1263,10 @@ def render_labelmix_randomness(
             )
         files_meta.append({
             "stem": stem,
-            "aug": "labelmix",
+            "aug": _TREEMAPMIX_AUG,
             "panel": p + 1,
             "notes": (
-                "Independent LabelMix draw using the same source images as "
+                "Independent TreemapMix draw using the same source images as "
                 "every other panel; differs only in seed/layout."
             ),
         })
@@ -1273,7 +1274,7 @@ def render_labelmix_randomness(
     _write_metadata(dir_path, {
         "group": group,
         "purpose": (
-            "Illustrates the randomness of LabelMix layouts: every PNG uses "
+            "Illustrates the randomness of TreemapMix layouts: every PNG uses "
             "the same source images and the same (alpha, k, aspect-cap) "
             "hyperparameters; only the random seed changes."
         ),
@@ -1282,9 +1283,9 @@ def render_labelmix_randomness(
         "tile_sizes": list(cfg.tile_sizes),
         "num_panels": num_panels,
         "params": {
-            "labelmix_alpha": LABELMIX_ALPHA,
-            "labelmix_k": LABELMIX_K,
-            "labelmix_max_aspect": LABELMIX_MAX_ASPECT,
+            "treemapmix_alpha": LABELMIX_ALPHA,
+            "treemapmix_k": LABELMIX_K,
+            "treemapmix_max_aspect": LABELMIX_MAX_ASPECT,
             "single_image_aug": False,
             "shared_source_images_across_panels": True,
             "source_order_head": expected_source_order,
@@ -1293,16 +1294,16 @@ def render_labelmix_randomness(
     })
 
 
-def render_labelmix_k_sweep(
+def render_treemapmix_k_sweep(
     cfg: ShowcaseConfig,
     *,
     k_values: Sequence[int] = tuple(range(2, 10)),
 ) -> None:
-    """Set 3: one LabelMix PNG per ``k`` value, same alpha/aspect cap.
+    """Set 3: one TreemapMix PNG per ``k`` value, same alpha/aspect cap.
 
-    Output directory: ``<out>/labelmix_k_sweep/``.
+    Output directory: ``<out>/treemapmix_k_sweep/``.
     """
-    group = "labelmix_k_sweep"
+    group = "treemapmix_k_sweep"
     dir_path = cfg.dir_for(group)
     os.makedirs(dir_path, exist_ok=True)
 
@@ -1322,8 +1323,8 @@ def render_labelmix_k_sweep(
             old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
             overwrite_stale_cache = (
                 old_params.get("source_order_head") != expected_source_order
-                or old_params.get("labelmix_alpha") != LABELMIX_K_SWEEP_ALPHA
-                or old_params.get("labelmix_max_aspect") != LABELMIX_SWEEP_MAX_ASPECT
+                or old_params.get("treemapmix_alpha") != LABELMIX_K_SWEEP_ALPHA
+                or old_params.get("treemapmix_max_aspect") != LABELMIX_SWEEP_MAX_ASPECT
                 or old_params.get("ranked_weight_policy") != ranked_weight_policy
                 or old_params.get("ranked_weight_floor") != LABELMIX_RANKED_WEIGHT_FLOOR
                 or old_params.get("ranked_layout_pixel_eps") != LABELMIX_RANKED_LAYOUT_EPS
@@ -1369,14 +1370,14 @@ def render_labelmix_k_sweep(
         )
         files_meta.append({
             "stem": stem,
-            "aug": "labelmix",
+            "aug": _TREEMAPMIX_AUG,
             "k": int(k),
             "layout_weights_desc": [
                 float(w) for w in ranked_weights_for_meta.tolist()
             ],
             "layout_max_aspect": _boxes_max_aspect(boxes_for_meta),
             "notes": (
-                f"LabelMix composite with k={k} source images; earlier "
+                f"TreemapMix composite with k={k} source images; earlier "
                 "source images are assigned larger regions than later ones."
             ),
         })
@@ -1384,7 +1385,7 @@ def render_labelmix_k_sweep(
     _write_metadata(dir_path, {
         "group": group,
         "purpose": (
-            "Shows how LabelMix layouts scale with the number of mixed "
+            "Shows how TreemapMix layouts scale with the number of mixed "
             "images k; all other hyperparameters are held fixed."
         ),
         "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
@@ -1392,8 +1393,8 @@ def render_labelmix_k_sweep(
         "tile_sizes": list(cfg.tile_sizes),
         "k_values": list(int(k) for k in k_values),
         "params": {
-            "labelmix_alpha": LABELMIX_K_SWEEP_ALPHA,
-            "labelmix_max_aspect": LABELMIX_SWEEP_MAX_ASPECT,
+            "treemapmix_alpha": LABELMIX_K_SWEEP_ALPHA,
+            "treemapmix_max_aspect": LABELMIX_SWEEP_MAX_ASPECT,
             "single_image_aug": False,
             "source_order_head": expected_source_order,
             "ranked_weight_policy": ranked_weight_policy,
@@ -1409,18 +1410,18 @@ def _alpha_stem(alpha: float) -> str:
     return f"alpha{alpha:g}".replace(".", "_").replace("-", "m")
 
 
-def render_labelmix_alpha_sweep(
+def render_treemapmix_alpha_sweep(
     cfg: ShowcaseConfig,
     *,
     alpha_values: Sequence[float] = LABELMIX_ALPHA_SWEEP,
 ) -> None:
-    """Set 4: one LabelMix PNG per ``alpha`` value, same k/aspect cap.
+    """Set 4: one TreemapMix PNG per ``alpha`` value, same k/aspect cap.
 
-    Output directory: ``<out>/labelmix_alpha_sweep/``.  Every panel uses
+    Output directory: ``<out>/treemapmix_alpha_sweep/``.  Every panel uses
     the same source images and same RNG seed base so visible differences
     are attributable to the alpha-controlled ranked region weights.
     """
-    group = "labelmix_alpha_sweep"
+    group = "treemapmix_alpha_sweep"
     dir_path = cfg.dir_for(group)
     os.makedirs(dir_path, exist_ok=True)
 
@@ -1442,9 +1443,9 @@ def render_labelmix_alpha_sweep(
                 old_meta = json.load(f)
             old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
             overwrite_stale_cache = (
-                old_params.get("labelmix_k") != LABELMIX_K
+                old_params.get("treemapmix_k") != LABELMIX_K
                 or old_params.get("source_order_head") != expected_source_order
-                or old_params.get("labelmix_max_aspect") != LABELMIX_ALPHA_SWEEP_MAX_ASPECT
+                or old_params.get("treemapmix_max_aspect") != LABELMIX_ALPHA_SWEEP_MAX_ASPECT
                 or old_params.get("ranked_weight_policy") != ranked_weight_policy
                 or old_params.get("ranked_weight_floor") != LABELMIX_RANKED_WEIGHT_FLOOR
                 or old_params.get("ranked_layout_pixel_eps") != LABELMIX_RANKED_LAYOUT_EPS
@@ -1490,14 +1491,14 @@ def render_labelmix_alpha_sweep(
         )
         files_meta.append({
             "stem": stem,
-            "aug": "labelmix",
+            "aug": _TREEMAPMIX_AUG,
             "alpha": alpha,
             "layout_weights_desc": [
                 float(w) for w in ranked_weights_for_meta.tolist()
             ],
             "layout_max_aspect": _boxes_max_aspect(boxes_for_meta),
             "notes": (
-                f"LabelMix composite with alpha={alpha:g}; source images, "
+                f"TreemapMix composite with alpha={alpha:g}; source images, "
                 f"k={LABELMIX_K}, aspect cap, seed base, and source-size "
                 "ranking are fixed."
             ),
@@ -1506,7 +1507,7 @@ def render_labelmix_alpha_sweep(
     _write_metadata(dir_path, {
         "group": group,
         "purpose": (
-            "Shows how LabelMix layouts change as alpha changes the ranked "
+            "Shows how TreemapMix layouts change as alpha changes the ranked "
             "region weights; all panels use the same source images and fixed k."
         ),
         "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
@@ -1514,8 +1515,8 @@ def render_labelmix_alpha_sweep(
         "tile_sizes": list(cfg.tile_sizes),
         "alpha_values": [float(a) for a in alpha_values],
         "params": {
-            "labelmix_k": LABELMIX_K,
-            "labelmix_max_aspect": LABELMIX_ALPHA_SWEEP_MAX_ASPECT,
+            "treemapmix_k": LABELMIX_K,
+            "treemapmix_max_aspect": LABELMIX_ALPHA_SWEEP_MAX_ASPECT,
             "single_image_aug": False,
             "shared_source_images_across_panels": True,
             "fixed_seed_base_across_alpha": True,
@@ -1611,15 +1612,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--num-randomness-panels", type=int, default=8,
-        help="Panels in labelmix_randomness (figure 2).",
+        help="Panels in treemapmix_randomness (figure 2).",
     )
     parser.add_argument(
         "--k-sweep", type=int, nargs="+", default=list(range(2, 11)),
-        help="k values to render in labelmix_k_sweep (figure 3).",
+        help="k values to render in treemapmix_k_sweep (figure 3).",
     )
     parser.add_argument(
         "--alpha-sweep", type=float, nargs="+", default=list(LABELMIX_ALPHA_SWEEP),
-        help="alpha values to render in labelmix_alpha_sweep (figure 4). "
+        help="alpha values to render in treemapmix_alpha_sweep (figure 4). "
              "Rendered by default.",
     )
     parser.add_argument(
@@ -1710,11 +1711,11 @@ def main() -> None:
     # Figure 1: basic-form augmentations only.
     render_aug_comparison(cfg, flavor="clean", num_panels=args.num_comparison_panels)
     # Figure 2.
-    render_labelmix_randomness(cfg, num_panels=args.num_randomness_panels)
+    render_treemapmix_randomness(cfg, num_panels=args.num_randomness_panels)
     # Figure 3.
-    render_labelmix_k_sweep(cfg, k_values=tuple(args.k_sweep))
+    render_treemapmix_k_sweep(cfg, k_values=tuple(args.k_sweep))
     # Figure 4.
-    render_labelmix_alpha_sweep(cfg, alpha_values=tuple(args.alpha_sweep))
+    render_treemapmix_alpha_sweep(cfg, alpha_values=tuple(args.alpha_sweep))
 
 
 if __name__ == "__main__":

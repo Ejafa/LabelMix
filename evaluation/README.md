@@ -79,7 +79,7 @@ evaluation/
 
    ```bash
    python evaluation/scripts/download_picsum_images.py
-   python evaluation/figures/augmentation_showcase.py \
+   python evaluation/plots/augmentation_showcase.py \
        --source-dir evaluation/data/raw/picsum_augmentation_showcase_diverse
    ```
 
@@ -93,18 +93,18 @@ evaluation/
 
    ```bash
    python evaluation/scripts/download_hf_imagenet_samples.py
-   python evaluation/figures/augmentation_showcase.py \
+   python evaluation/plots/augmentation_showcase.py \
        --source-dir evaluation/data/raw/hf_imagenet1k_animal_samples \
        --out-dir evaluation/data/processed/figures/augmentation_showcase_hf_imagenet1k_animals
    ```
 
    A normal ``augmentation_showcase.py`` run renders all showcase image groups,
    including one basic ``aug_comparison_clean/`` example per augmentation and
-   ``labelmix_alpha_sweep/`` with the default alpha values
+   ``treemapmix_alpha_sweep/`` with the default alpha values
    ``0.05 0.1 0.3 0.5 1.0 1.5 3.0 5.0``.
    When the source directory contains ``imagenet1k_####.jpg`` files, the
    showcase places the preferred animal sample ids
-   ``14 20 22 30 35 43 58 64 67 68`` first in the shared source-image pool.
+   ``81 18 6 124 2 122 119 118 4`` first in the shared source-image pool.
    Override with ``--preferred-source-ids`` or pass that flag with no ids to
    keep pure filename ordering.
 
