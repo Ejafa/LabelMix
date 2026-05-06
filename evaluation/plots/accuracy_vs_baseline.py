@@ -21,7 +21,13 @@ import pandas as pd
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
 from ..processing.aggregate import confidence_interval_95
-from ._style import DOUBLE_COL_WIDTH, apply_paper_style, savefig
+from ._style import (
+    DOUBLE_COL_WIDTH,
+    apply_paper_style,
+    bar_color,
+    method_display,
+    savefig,
+)
 
 
 _logger = logging.getLogger(__name__)
@@ -52,7 +58,10 @@ def plot(df: pd.DataFrame) -> plt.Figure:
             width=width,
             yerr=ci.values,
             capsize=2,
-            label=method,
+            color=bar_color(method),
+            edgecolor="black",
+            linewidth=0.5,
+            label=method_display(method),
         )
 
     ax.set_xticks(x)

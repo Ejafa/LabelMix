@@ -109,12 +109,12 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
             sub[_NLL_MEAN_COL].values,
             width=width,
             yerr=nll_ci.values,
-            capsize=1.2,
+            capsize=3.0,
             color=color,
-            edgecolor="white",
-            linewidth=0.4,
+            edgecolor="black",
+            linewidth=0.5,
             hatch=hatch,
-            error_kw={"elinewidth": 0.7, "ecolor": "black"},
+            error_kw={"elinewidth": 0.4, "capthick": 0.4, "ecolor": "black"},
             zorder=2,
         )
 
@@ -125,12 +125,12 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
             sub[_BRIER_MEAN_COL].values,
             width=width,
             yerr=brier_ci.values,
-            capsize=1.2,
+            capsize=3.0,
             color=color,
-            edgecolor="white",
-            linewidth=0.4,
+            edgecolor="black",
+            linewidth=0.5,
             hatch=hatch,
-            error_kw={"elinewidth": 0.7, "ecolor": "black"},
+            error_kw={"elinewidth": 0.4, "capthick": 0.4, "ecolor": "black"},
             zorder=2,
         )
 

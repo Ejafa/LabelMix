@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 
 from ..common import FIGURES_DIR, RAW_LOGITS_DIR, setup_logging
-from ._style import SINGLE_COL_WIDTH, apply_paper_style, savefig
+from ._style import PALETTE, SINGLE_COL_WIDTH, apply_paper_style, savefig
 
 
 _logger = logging.getLogger(__name__)
@@ -59,8 +59,8 @@ def plot(logits: torch.Tensor, targets: torch.Tensor, n_bins: int = 15) -> plt.F
     fig, ax = plt.subplots(figsize=(SINGLE_COL_WIDTH, SINGLE_COL_WIDTH))
     ax.plot([0, 1], [0, 1], linestyle="--", linewidth=0.8, color="gray", label="Perfect")
     width = 1.0 / n_bins
-    ax.bar(centers, acc, width=width * 0.95, edgecolor="black", linewidth=0.5, label="Accuracy")
-    ax.bar(centers, frac, width=width * 0.95, alpha=0.25, color="tab:orange", label="Fraction of samples")
+    ax.bar(centers, acc, width=width * 0.95, color=PALETTE[0], edgecolor="black", linewidth=0.5, label="Accuracy")
+    ax.bar(centers, frac, width=width * 0.95, alpha=0.25, color=PALETTE[1], label="Fraction of samples")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_xlabel("Confidence")

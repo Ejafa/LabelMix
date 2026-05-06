@@ -19,7 +19,13 @@ import pandas as pd
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
 from ..processing.aggregate import confidence_interval_95
-from ._style import SINGLE_COL_WIDTH, apply_paper_style, savefig
+from ._style import (
+    SINGLE_COL_WIDTH,
+    apply_paper_style,
+    line_color,
+    method_display,
+    savefig,
+)
 
 
 _logger = logging.getLogger(__name__)
@@ -44,7 +50,8 @@ def plot(df: pd.DataFrame) -> plt.Figure:
             yerr=ci.values,
             marker="o",
             capsize=2,
-            label=model,
+            color=line_color(model),
+            label=method_display(model),
         )
 
     ax.set_xlabel(r"Mixed-alpha coefficient $\alpha_{\mathrm{mix}}$")

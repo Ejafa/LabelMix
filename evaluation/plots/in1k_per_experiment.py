@@ -48,7 +48,16 @@ from matplotlib.patches import Patch
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
 from ..processing.aggregate import confidence_interval_95
-from ._style import DOUBLE_COL_WIDTH, apply_paper_style, savefig
+from ._style import (
+    DOUBLE_COL_WIDTH,
+    METHOD_COLORS,
+    METHOD_DISPLAY,
+    REF_MID_GREY,
+    apply_paper_style,
+    bar_color,
+    method_display,
+    savefig,
+)
 
 
 _logger = logging.getLogger(__name__)
@@ -79,22 +88,14 @@ _TYPE_ORDER: Sequence[str] = (
     "labelmix-sce",
 )
 
-# Per-type styling: friendly label and fill colour. All colours are taken
-# from the standard matplotlib ``tab10`` / ``tab20`` palettes so the figure
-# matches the default look of the rest of the paper and prints cleanly in
-# greyscale. No hatches -- colour alone disambiguates the bars.
+# Per-type styling: friendly label and fill colour.  Labels come from
+# :data:`evaluation.plots._style.METHOD_DISPLAY` and colours from
+# :func:`evaluation.plots._style.bar_color` (the pastel palette), so
+# every paper figure uses the same canonical method → (label, colour)
+# mapping.  No hatches — colour alone disambiguates the bars.
 _TYPE_STYLE: dict[str, dict[str, str | None]] = {
-    # Non-LabelMix methods: muted / neutral hues.
-    "bare":           {"label": "Single-Aug Only", "color": "#7f7f7f", "hatch": None},  # tab:gray
-    "noaug":          {"label": "No Augmentation", "color": "#bcbd22", "hatch": None},  # tab:olive
-    "baseline":       {"label": "Baseline",        "color": "#1f77b4", "hatch": None},  # tab:blue
-    "mixup":          {"label": "Mixup",           "color": "#17becf", "hatch": None},  # tab:cyan
-    "cutmix":         {"label": "CutMix",          "color": "#8c564b", "hatch": None},  # tab:brown
-    "mosaic":         {"label": "Mosaic",          "color": "#9467bd", "hatch": None},  # tab:purple
-    # LabelMix family: three standard, clearly distinct tab10 colours.
-    "labelmix-mixed": {"label": "LabelMix (mixed)", "color": "#ff7f0e", "hatch": None},  # tab:orange
-    "labelmix-pl":    {"label": "LabelMix (PL)",    "color": "#2ca02c", "hatch": None},  # tab:green
-    "labelmix-sce":   {"label": "LabelMix (SCE)",   "color": "#d62728", "hatch": None},  # tab:red
+    key: {"label": method_display(key), "color": bar_color(key), "hatch": None}
+    for key in METHOD_DISPLAY
 }
 
 # Friendly model labels (strip the patch/reg noise from the checkpoint name).
@@ -198,12 +199,12 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
             sub["top1_acc_mean"].values,
             width=width,
             yerr=top1_ci.values,
-            capsize=1.2,
+            capsize=3.0,
             color=color,
-            edgecolor="white",
-            linewidth=0.4,
+            edgecolor="black",
+            linewidth=0.5,
             hatch=hatch,
-            error_kw={"elinewidth": 0.7, "ecolor": "black"},
+            error_kw={"elinewidth": 0.4, "capthick": 0.4, "ecolor": "black"},
             zorder=2,
         )
 
@@ -215,12 +216,12 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
             ece_mean_pp.values,
             width=width,
             yerr=ece_ci_pp.values,
-            capsize=1.2,
+            capsize=3.0,
             color=color,
-            edgecolor="white",
-            linewidth=0.4,
+            edgecolor="black",
+            linewidth=0.5,
             hatch=hatch,
-            error_kw={"elinewidth": 0.7, "ecolor": "black"},
+            error_kw={"elinewidth": 0.4, "capthick": 0.4, "ecolor": "black"},
             zorder=2,
         )
 
@@ -268,8 +269,8 @@ def plot_legend(types: Sequence[str]) -> plt.Figure:
         Patch(
             facecolor=_style_for(t)["color"],
             hatch=_style_for(t)["hatch"] or "",
-            edgecolor="white",
-            linewidth=0.4,
+            edgecolor="black",
+            linewidth=0.5,
             label=_style_for(t)["label"],
         )
         for t in types
