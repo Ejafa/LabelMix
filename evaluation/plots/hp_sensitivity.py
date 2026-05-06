@@ -48,8 +48,15 @@ import pandas as pd
 from matplotlib.colors import Normalize
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
-from ._style import DOUBLE_COL_WIDTH, apply_paper_style, savefig
-
+from ._style import (
+    DOUBLE_COL_WIDTH,
+    METHOD_COLORS_DARK,
+    REF_DARK_GREY,
+    REF_MID_GREY,
+    apply_paper_style,
+    method_display,
+    savefig,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -61,30 +68,34 @@ OUTPUT_SENSITIVITY_K = HP_FIGURES_DIR / "hp_sensitivity_k_vit_wee.pdf"
 OUTPUT_HEATMAPS_TOP1 = HP_FIGURES_DIR / "hp_sensitivity_heatmaps_top1_vit_wee.pdf"
 OUTPUT_HEATMAPS_ECE = HP_FIGURES_DIR / "hp_sensitivity_heatmaps_ece_vit_wee.pdf"
 
-# Human-readable loss names. Internal CSV keys ('pl_loss', 'soft_ce') are
+# Human-readable loss names.  Internal CSV keys ('pl_loss', 'soft_ce') are
 # left untouched for backward compatibility with the extraction script.
+# Display strings are sourced from :data:`evaluation.plots._style.METHOD_DISPLAY`
+# so every paper plot uses the same canonical TreemapMix labels.
 LOSS_LABELS: dict[str, str] = {
-    "pl_loss": "TreemapMix (PL)",
-    "soft_ce": "TreemapMix (SCE)",
+    "pl_loss": method_display("labelmix-pl"),
+    "soft_ce": method_display("labelmix-sce"),
 }
-# Fixed draw order -> stable colours.
+# Fixed draw order -> stable colours, pulled from the shared paper-wide
+# seaborn-deep palette so TreemapMix (PL) / (SCE) lines are legible while
+# matching (same hue, darker value) the LabelMix (PL) / (SCE) bars in
+# every other figure.
 LOSS_ORDER: list[str] = ["pl_loss", "soft_ce"]
 LOSS_COLOURS: dict[str, str] = {
-    "pl_loss": "#1f77b4",   # blue
-    "soft_ce": "#d62728",   # red
+    "pl_loss": METHOD_COLORS_DARK["labelmix-pl"],   # green (deep)
+    "soft_ce": METHOD_COLORS_DARK["labelmix-sce"],  # red  (deep)
 }
 
 # Display names for the two reference rows in the combined CSV.
-# The internal label 'bare' is renamed on the fly to 'single-aug' — this
-# reflects what the configuration actually is (RandAug + ColorJitter, no
-# mixup and no cutmix) and avoids the ambiguous "bare".
+# The internal label 'bare' is renamed on the fly to 'Single-Image Aug' —
+# this reflects what the configuration actually is (RandAug + ColorJitter,
+# no mixup and no cutmix) and avoids the ambiguous "bare".
 BASELINE_KEY = "baseline"     # mixup + cutmix         — our zero
 SINGLE_AUG_KEY = "bare"       # single-image aug only  — secondary reference
-BASELINE_DISPLAY = "CutMix + Mixup"
-SINGLE_AUG_DISPLAY = "Single-Image Aug"
-
-BASELINE_COLOUR = "#404040"   # dark grey
-SINGLE_AUG_COLOUR = "#8c8c8c" # mid grey
+BASELINE_DISPLAY = method_display("baseline")
+SINGLE_AUG_DISPLAY = method_display("bare")
+BASELINE_COLOUR = REF_DARK_GREY    # dark grey
+SINGLE_AUG_COLOUR = REF_MID_GREY   # mid grey
 
 
 # --------------------------------------------------------------------------
@@ -196,10 +207,8 @@ def _plot_metric(
 
     if yscale == "log":
         ax.set_yscale("log")
-        # Tidy ticks and minor grid for the log panel.
-        ax.grid(axis="y", which="both", ls=":", lw=0.5, alpha=0.6)
-    else:
-        ax.grid(axis="y", ls=":", lw=0.5, alpha=0.6)
+    # Grid intentionally disabled for the hp-sensitivity line panels.
+    ax.grid(False)
     ax.set_axisbelow(True)
 
     # Record which variable we aggregated away so callers (metadata) can

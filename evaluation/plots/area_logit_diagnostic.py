@@ -60,8 +60,12 @@ import numpy as np
 import pandas as pd
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
-from ._style import apply_paper_style, savefig
-
+from ._style import (
+    apply_paper_style,
+    line_color,
+    method_display,
+    savefig,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -99,14 +103,14 @@ class ModelStyle:
 
 
 MODEL_ORDER: Sequence[ModelStyle] = (
-    ModelStyle("noaug",        "No augmentation",           "#404040", "--", "s"),
-    ModelStyle("bare",         "Single image aug",          "#8c8c8c", "-",  "s"),
-    ModelStyle("baseline",     "Baseline (Mixup+CutMix)",   "#000000", "-",  "o"),
-    ModelStyle("cutmix",       "CutMix only",               "#ff7f0e", "-",  "^"),
-    ModelStyle("mixup",        "MixUp only",                "#9467bd", "-",  "v"),
-    ModelStyle("mosaic",       "RICAP",                    "#2ca02c", "-",  "D"),
-    ModelStyle("labelmix-sce", "TreemapMix (SCE)",          "#d62728", "-",  "o"),
-    ModelStyle("labelmix-pl",  "TreemapMix (PL)",           "#1f77b4", "-",  "o"),
+    ModelStyle("noaug",        method_display("noaug"),        line_color("noaug"),        "-", "s"),
+    ModelStyle("bare",         method_display("bare"),         line_color("bare"),         "-", "P"),
+    ModelStyle("baseline",     method_display("baseline"),     line_color("baseline"),     "-", "o"),
+    ModelStyle("cutmix",       method_display("cutmix"),       line_color("cutmix"),       "-", "^"),
+    ModelStyle("mixup",        method_display("mixup"),        line_color("mixup"),        "-", "v"),
+    ModelStyle("mosaic",       method_display("mosaic"),       line_color("mosaic"),       "-", "D"),
+    ModelStyle("labelmix-sce", method_display("labelmix-sce"), line_color("labelmix-sce"), "-", "X"),
+    ModelStyle("labelmix-pl",  method_display("labelmix-pl"),  line_color("labelmix-pl"),  "-", "*"),
 )
 
 K_VALUES: Sequence[int] = (3, 4, 5, 6)
@@ -278,7 +282,8 @@ def _plot_metric(
     ax.set_xlim(x.min() - K_EDGE_PAD, x.max() + K_EDGE_PAD)
     ax.set_xlabel(r"Number of patches $k$ per image")
     ax.set_ylabel(ylabel)
-    ax.grid(axis="y", ls=":", lw=0.5, alpha=0.6)
+    # Grid intentionally disabled for the area-vs-logit diagnostic panels.
+    ax.grid(False)
     ax.set_axisbelow(True)
 
 
