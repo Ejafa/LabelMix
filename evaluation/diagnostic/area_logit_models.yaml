@@ -24,3 +24,4 @@ bare: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix
 cutmix: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/betwixt-jobs/vit-betwixt__in1k__img256__cutmix_mixup_switch_prob=1.0__seed=42
 mixup: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/betwixt-jobs/vit-betwixt__in1k__img256__mixup_mixup_switch_prob=0.0__seed=42
 mosaic: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/mosaic_jobs/vit-betwixt__in1k__img256__mosaic__mosaic__seed=42
+labelmix-mixed: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/output_runs/mixed-loss/vit-betwixt__in1k__img256__k4-4_a0.1-0.5_mixed_ma0.5_as-cosine_scheduling__seed=42
