@@ -1,7 +1,7 @@
 """OpenMixup-style data augmentations (self-contained port).
 
 This module bundles the mixup-style augmentations described in
-``data_augs.xml`` (taken from `OpenMixup
+``augs.xml`` (taken from `OpenMixup
 <https://github.com/Westlake-AI/openmixup>`_) into a single, dependency-light
 file that can be imported from both the training script
 (:mod:`train.py`) and the figure-rendering script
@@ -21,8 +21,12 @@ The methods can be split into two groups:
   synthetic stand-in features:
 
       ``alignmix``, ``attentivemix``, ``snapmix``, ``transmix``,
-      ``mixpro``, ``smmix``, ``tla``, ``tokenmix``, ``guidedmix``,
-      ``puzzlemix``.
+      ``mixpro``, ``smmix``, ``tla``, ``tokenmix``, ``guidedmix``.
+
+.. note::
+   ``puzzlemix`` is intentionally disabled in the active OpenMixup registry
+   because the local implementation is only a simplified approximation of the
+   full graph-cut/transport method.
 
 .. note::
    The OpenMixup repository also defines ``mixup``, ``cutmix`` and
@@ -38,7 +42,8 @@ required it. A small helper :func:`mix_to_soft_target` converts the various
 forms back to a single soft-label tensor of shape ``(N, num_classes)``.
 
 The implementations follow the OpenMixup originals as faithfully as
-possible, but with two simplifications:
+practical for this dependency-light training/showcase port, with a few
+explicit constraints:
 
 * Distributed shuffling (``dist_mode=True``) is intentionally **not**
   supported – we always use within-rank batch permutations. This matches
@@ -84,7 +89,7 @@ __all__ = [
     "tla",
     "tokenmix",
     "guidedmix",
-    "puzzlemix",
+    # "puzzlemix",  # Disabled: simplified approximation is not a supported OpenMixup port.
 ]
 
 
@@ -355,7 +360,18 @@ def resizemix(img, gt_label, scope=(0.1, 0.8), alpha=1.0, lam=None,
             tao = float(np.random.uniform(scope[0], scope[1]))
     else:
         tao = float(min(max(lam, scope[0]), scope[1]))
-    bbx1, bby1, bbx2, bby2 = _rand_bbox(img.size(), tao)
+    # Bugfix: ResizeMix's bbox uses ``tao`` *directly* as the side ratio (not
+    # the CutMix-style ``sqrt(1 - tao)``); the previous call to ``_rand_bbox``
+    # silently shrank the pasted patch to ``sqrt(1 - tao)`` of the image.
+    W, H = img.size(2), img.size(3)
+    cut_w = int(W * tao)
+    cut_h = int(H * tao)
+    cx = np.random.randint(W) if W > 0 else 0
+    cy = np.random.randint(H) if H > 0 else 0
+    bbx1 = int(np.clip(cx - cut_w // 2, 0, W))
+    bby1 = int(np.clip(cy - cut_h // 2, 0, H))
+    bbx2 = int(np.clip(cx + cut_w // 2, 0, W))
+    bby2 = int(np.clip(cy + cut_h // 2, 0, H))
     img_resize = F.interpolate(
         img_resize, (bby2 - bby1, bbx2 - bbx1), mode=interpolate_mode,
     )
@@ -391,6 +407,12 @@ def _gaussian_kernel(kernel_size, rand_w, rand_h, sigma, device):
 @torch.no_grad()
 def smoothmix(img, gt_label, alpha=1.0, lam=None, return_mask=False, **kwargs):
     """SmoothMix (Lee et al., 2020)."""
+    if lam is None:
+        lam = float(np.random.beta(alpha, alpha))
+    else:
+        lam = float(lam)
+    lam = float(np.clip(lam, 0.0, 1.0))
+
     rand_idx = _no_repeat_shuffle_idx(img.size(0), ignore_failure=True, device=img.device)
     img_ = img[rand_idx]
     y_a = gt_label
@@ -400,8 +422,26 @@ def smoothmix(img, gt_label, alpha=1.0, lam=None, return_mask=False, **kwargs):
     rand_h = int(torch.randint(0, h, (1,)).item() - h / 2)
     sigma = float(((torch.rand(1).item() / 4) + 0.25) * h)
     kernel = _gaussian_kernel(h, rand_h, rand_w, sigma, device=img.device)
+
+    target_b_frac = 1.0 - lam
+    if target_b_frac <= 0.0:
+        kernel = torch.zeros_like(kernel)
+    elif target_b_frac >= 1.0:
+        kernel = torch.ones_like(kernel)
+    else:
+        centered = kernel - kernel.mean()
+        max_pos = float(torch.clamp(centered.max(), min=0.0).item())
+        max_neg = float(torch.clamp(-centered.min(), min=0.0).item())
+        contrast_limits = []
+        if max_pos > 0.0:
+            contrast_limits.append((1.0 - target_b_frac) / max_pos)
+        if max_neg > 0.0:
+            contrast_limits.append(target_b_frac / max_neg)
+        contrast = min(contrast_limits) if contrast_limits else 0.0
+        kernel = (target_b_frac + contrast * centered).clamp(0.0, 1.0)
+
     out = img * (1 - kernel) + img_ * kernel
-    lam_eff = float(torch.sum(kernel).item() / (h * w))
+    lam_eff = 1.0 - float(kernel.mean().item())
     if return_mask:
         out = (out, kernel.expand(b, 1, h, w))
     return out, (y_a, y_b, lam_eff)
@@ -602,6 +642,12 @@ def snapmix(img, gt_label, alpha=1.0, lam=None, features=None, **kwargs):
     feats_ = feats[rand_idx]
     y_a = gt_label
     y_b = gt_label[rand_idx]
+    # Bugfix: per the SnapMix paper, when y_a == y_b for an item we collapse
+    # the (lam_a, lam_b) pair so neither label is double-counted.
+    if y_a.ndim == 2 and y_b.ndim == 2:
+        same_label = (y_a.argmax(dim=1) == y_b.argmax(dim=1))
+    else:
+        same_label = (y_a == y_b)
 
     def _bbox(size, lam_v):
         W, H = size[2], size[3]
@@ -626,8 +672,17 @@ def snapmix(img, gt_label, alpha=1.0, lam=None, features=None, **kwargs):
         img[:, :, bbx1:bbx2, bby1:bby2] = ncont
         lam_a = 1.0 - feats[:, bbx1:bbx2, bby1:bby2].sum(2).sum(1) / (feats.sum(2).sum(1) + 1e-8)
         lam_b = feats_[:, bbx1_:bbx2_, bby1_:bby2_].sum(2).sum(1) / (feats_.sum(2).sum(1) + 1e-8)
-        lam_a[torch.isnan(lam_a)] = 1.0 - ((bbx2 - bbx1) * (bby2 - bby1) / float(h * w))
-        lam_b[torch.isnan(lam_b)] = (bbx2 - bbx1) * (bby2 - bby1) / float(h * w)
+        # Bugfix: faithfully port the same-label swap from the OpenMixup
+        # reference implementation – without it, cases where the source and
+        # target patches both belong to the same class get a degenerate
+        # (lam_a, lam_b) pair that does not sum to 1.
+        tmp = lam_a.clone()
+        if bool(same_label.any()):
+            lam_a[same_label] = lam_a[same_label] + lam_b[same_label]
+            lam_b[same_label] = tmp[same_label] + lam_b[same_label]
+        lam_fallback = 1.0 - ((bbx2 - bbx1) * (bby2 - bby1) / float(h * w))
+        lam_a[torch.isnan(lam_a)] = lam_fallback
+        lam_b[torch.isnan(lam_b)] = 1.0 - lam_fallback
     else:
         lam_a = torch.ones(b, device=img.device)
         lam_b = torch.zeros(b, device=img.device)
@@ -643,8 +698,10 @@ def transmix(img, gt_label, alpha=1.0, lam=None, attn=None, mask=None,
     """TransMix (Chen et al., 2022)."""
     if lam is None and mask is None:
         lam0 = float(np.random.beta(alpha, alpha))
+    elif lam is not None:
+        lam0 = float(lam)
     else:
-        lam0 = float(lam) if lam is not None else 0.5
+        lam0 = None
     rand_idx = _no_repeat_shuffle_idx(img.size(0), ignore_failure=True, device=img.device)
     img_ = img[rand_idx]
     b, _, h, w = img.size()
@@ -656,16 +713,35 @@ def transmix(img, gt_label, alpha=1.0, lam=None, attn=None, mask=None,
         img[:, :, bbx1:bbx2, bby1:bby2] = img_[:, :, bbx1:bbx2, bby1:bby2]
         lam0 = 1.0 - ((bbx2 - bbx1) * (bby2 - bby1) / float(h * w))
     else:
+        mask = mask.to(device=img.device, dtype=img.dtype)
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(1)
+        if mask.shape[0] == 1 and b > 1:
+            mask = mask.expand(b, -1, -1, -1)
+        if mask.shape[-2:] != (h, w):
+            mask = F.interpolate(mask, size=(h, w), mode="nearest")
         img = (1 - mask) * img + mask * img_
+        if lam0 is None:
+            lam0 = 1.0 - mask[:, 0].reshape(b, -1).mean(dim=1)
 
-    lam1 = lam0
+    # Bugfix: keep TransMix's per-image lambda vector instead of collapsing it
+    # to a scalar via ``.mean().item()``; the original method derives a *per
+    # sample* attention-corrected mixing ratio.
+    lam1 = None
     if attn is not None and patch_shape is not None:
         mask_ = nn.Upsample(size=patch_shape)(mask).view(b, -1).int()
         attn_ = torch.mean(attn[:, :, 0, 1:], dim=1)
         w1 = torch.sum(mask_ * attn_, dim=1)
         w2 = torch.sum((1 - mask_) * attn_, dim=1)
-        lam1 = (w2 / (w1 + w2)).mean().item()
-    lam_eff = float(lam0) * ratio + float(lam1) * (1 - ratio)
+        lam1 = w2 / (w1 + w2 + 1e-8)
+    if torch.is_tensor(lam0):
+        lam0_eff: Any = lam0.to(device=img.device, dtype=torch.float32)
+    else:
+        lam0_eff = float(lam0)
+    if lam1 is None:
+        lam_eff: Any = lam0_eff
+    else:
+        lam_eff = lam0_eff * ratio + lam1 * (1 - ratio)
     if return_mask:
         img = (img, mask)
     return img, (y_a, y_b, lam_eff)
@@ -677,35 +753,77 @@ def transmix(img, gt_label, alpha=1.0, lam=None, attn=None, mask=None,
 @torch.no_grad()
 def mixpro(img, gt_label, attn=None, alpha=1.0, lam=None, mask_patch_size=64,
            model_patch_size=16, return_mask=False, **kwargs):
-    """MixPro (Zhao et al., 2023) – MaskMix variant for ViTs."""
+    """MixPro (Zhao et al., 2023) – MaskMix variant for ViTs.
+
+    Bugfix: the previous port dropped the attention-weighted progressive
+    label entirely. We now follow the OpenMixup reference: when ``attn`` is
+    provided we compute the per-image attention-corrected lambda ``lam_``
+    and surface it as the third entry of ``target_info`` so the soft label
+    becomes ``lam_ * y_a + (1 - lam_) * y_b``. When ``attn`` is None we fall
+    back to the area-based scalar lambda (this matches the rendering use
+    case in the showcase script).
+    """
     if lam is None:
         lam = float(np.random.beta(alpha, alpha))
     b, _, h, w = img.size()
     mask_num = math.ceil(h / mask_patch_size)
     scale_ = mask_patch_size // model_patch_size
     scale = mask_patch_size
+    patch_num = h // model_patch_size
 
     rand_idx = _no_repeat_shuffle_idx(img.size(0), ignore_failure=True, device=img.device)
     y_a = gt_label
     y_b = gt_label[rand_idx]
 
     token_count = mask_num ** 2
-    mask_count = int(np.ceil(token_count * lam))
-    masks = []
+    mask_count_per_img = []
+    masks_low = []
     for _ in range(b):
+        mask_count = int(np.ceil(token_count * lam))
         m = np.zeros((token_count,), dtype=np.int32)
         idx = np.random.permutation(token_count)[:mask_count]
         m[idx] = 1
-        masks.append(m.reshape((mask_num, mask_num)))
-    masks_full = np.array([m.repeat(scale, axis=0).repeat(scale, axis=1) for m in masks])
+        masks_low.append(m.reshape((mask_num, mask_num)))
+        mask_count_per_img.append(mask_count)
+    masks_full = np.array(
+        [m.repeat(scale, axis=0).repeat(scale, axis=1) for m in masks_low]
+    )
+    masks_patch = np.array(
+        [m.repeat(scale_, axis=0).repeat(scale_, axis=1) for m in masks_low]
+    )
     mask = torch.from_numpy(masks_full).to(device=img.device, dtype=img.dtype)
     mask = mask.unsqueeze(1).repeat(1, img.shape[1], 1, 1)
     mask = mask[:, :, :h, :w]
     out = img * mask + img[rand_idx] * (1 - mask)
-    lam_eff = float(mask_count / max(1, token_count))
+
+    # Per-image area-based lambda (sums of token mask counts).
+    lam_area = torch.tensor(
+        [c / max(1, token_count) for c in mask_count_per_img],
+        device=img.device, dtype=torch.float32,
+    )
+    if attn is not None:
+        attn_mask = torch.from_numpy(masks_patch).to(device=img.device, dtype=torch.float32)
+        attn_mask = attn_mask[:, :patch_num, :patch_num].reshape(b, -1)
+        a_mean = torch.mean(attn[:, :, 0, 1:], dim=1).detach()
+        expected_tokens = patch_num * patch_num
+        if a_mean.shape[1] != expected_tokens:
+            raise ValueError(
+                "mixpro attention token count does not match image/model patch geometry: "
+                f"got {a_mean.shape[1]} tokens, expected {expected_tokens} "
+                f"for image size {(h, w)} and model_patch_size={model_patch_size}."
+            )
+        w1 = torch.sum(attn_mask * a_mean, dim=1)
+        w2 = torch.sum((1 - attn_mask) * a_mean, dim=1)
+        lam_attn = w1 / (w1 + w2 + 1e-8)
+        # Surface the per-image attention-corrected lambda; the soft-label
+        # helper recognises a per-image lambda tensor as the third entry.
+        lam_out: Any = lam_attn
+    else:
+        # No attention available – return a scalar area-based lambda.
+        lam_out = float(lam_area.mean().item())
     if return_mask:
         out = (out, mask[:, :1])
-    return out, (y_a, y_b, lam_eff)
+    return out, (y_a, y_b, lam_out)
 
 
 # ---- SMMix (token-level swap based on attention) ------------------------
@@ -817,6 +935,9 @@ def tokenmix(img, gt_label, attn=None, alpha=1.0, lam=None, mask_type="block",
     b, _, h, w = img.size()
     y_a = gt_label
     y_b = gt_label[rand_idx]
+    # NB: we generate a single token mask shared across the batch (mirrors
+    # ``generate_mask`` in the OpenMixup reference, which produces a single
+    # ``(1, 1, 14, 14)`` mask and broadcasts it).
 
     width, height = 14, 14
     mask_ratio = 1.0 - lam
@@ -857,47 +978,127 @@ def tokenmix(img, gt_label, attn=None, alpha=1.0, lam=None, mask_type="block",
     mask = torch.from_numpy(mask_arr).float().unsqueeze(0).unsqueeze(0).to(img.device)
     mask_full = F.interpolate(mask, size=(h, w), mode="nearest")
     out = (1 - mask_full) * img + mask_full * img_
+    # Bugfix: TokenMix uses the *attention-weighted* score sums as the
+    # per-image (lam_a, lam_b) pair; only fall back to area-based lambda
+    # when no attention is provided (e.g. when called from the showcase).
+    if attn is not None:
+        a_mean = torch.mean(attn[:, :, 0, 1:], dim=1).reshape(b, 1, width, height)
+        score_a = (mask * a_mean).reshape(b, -1).sum(dim=1)
+        score_b = ((1 - mask) * a_mean[rand_idx]).reshape(b, -1).sum(dim=1)
+        if return_mask:
+            out = (out, mask_full.expand(b, 1, h, w))
+        return out, (y_a, y_b, score_a, score_b)
+    lam_eff = 1.0 - float(mask_full.mean().item())
     if return_mask:
         out = (out, mask_full.expand(b, 1, h, w))
-    return out, (y_a, y_b, float(lam))
+    return out, (y_a, y_b, lam_eff)
 
 
 # ---- GuidedMix ----------------------------------------------------------
 
 
+def _guidedmix_onecycle_cover(distance_matrix: np.ndarray) -> np.ndarray:
+    """Port of GuidedMix's greedy one-cycle pairing helper."""
+    dist = np.array(distance_matrix, copy=True)
+    if dist.ndim != 2 or dist.shape[0] != dist.shape[1]:
+        raise ValueError("GuidedMix distance matrix must be square")
+    n = dist.shape[0]
+    if n <= 1:
+        return np.arange(n, dtype=np.int64)
+    np.fill_diagonal(dist, -np.inf)
+    max_idx = int(np.argmax(dist))
+    row = max_idx // n
+    col = max_idx % n
+    first_row = row
+    sorted_indices = np.zeros(n, dtype=np.int64)
+    sorted_indices[row] = col
+    dist[:, row] = -np.inf
+    idx = 0
+    while idx < n - 2:
+        idx += 1
+        row = col
+        col = int(np.argmax(dist[row]))
+        sorted_indices[row] = col
+        dist[:, row] = -np.inf
+    sorted_indices[col] = first_row
+    return sorted_indices
+
+
+def _guidedmix_distance(a: torch.Tensor, b: Optional[torch.Tensor] = None,
+                        distance_metric: str = "l2") -> torch.Tensor:
+    """Distance function used by the GuidedMix reference implementation."""
+    if b is None:
+        b = a
+    a_flat = a.reshape(a.shape[0], -1)
+    b_flat = b.reshape(b.shape[0], -1)
+    if distance_metric == "cosine":
+        sim = F.cosine_similarity(a_flat[:, None, :], b_flat[None, :, :], dim=-1)
+        return 1.0 - sim
+    if distance_metric == "cosine_abs":
+        sim = F.cosine_similarity(a_flat[:, None, :], b_flat[None, :, :], dim=-1)
+        return 1.0 - sim.abs()
+    if distance_metric == "l1":
+        return (a_flat[:, None, :] - b_flat[None, :, :]).abs().sum(dim=-1)
+    if distance_metric == "l2":
+        return torch.linalg.vector_norm(a_flat[:, None, :] - b_flat[None, :, :], dim=-1)
+    raise NotImplementedError(f"Unsupported GuidedMix distance_metric={distance_metric!r}")
+
+
 @torch.no_grad()
 def guidedmix(img, gt_label, alpha=1.0, lam=None, features=None,
+              guided_type="ap", condition="greedy", distance_metric="l2",
               size=(7, 7), sigma=(3.0, 3.0), return_mask=False, **kwargs):
     """GuidedMix (Kang et al., 2023). ``features`` is per-image saliency."""
+    del guided_type  # kept for API compatibility with the OpenMixup reference
     if features is None:
         raise ValueError("guidedmix requires saliency `features=(N,1,H,W)`")
     if lam is None:
         lam = float(np.random.beta(alpha, alpha))
-    rand_idx = _no_repeat_shuffle_idx(img.size(0), ignore_failure=True, device=img.device)
-    img_ = img[rand_idx]
-    y_a = gt_label
-    y_b = gt_label[rand_idx]
+    del lam  # the reference samples it but derives final weights from saliency
 
+    if features.ndim == 3:
+        features = features.unsqueeze(1)
+    if features.ndim != 4:
+        raise ValueError("guidedmix requires features shaped `(N,H,W)` or `(N,1,H,W)`")
+    if features.shape[-2:] != img.shape[-2:]:
+        features = F.interpolate(features, size=img.shape[-2:], mode="bilinear", align_corners=False)
+    features = features.to(device=img.device, dtype=img.dtype)
+
+    rand_idx = _no_repeat_shuffle_idx(img.size(0), ignore_failure=True, device=img.device)
     import torchvision.transforms.functional as TF
     feats = TF.gaussian_blur(features, list(size), list(sigma))
     feats = feats / (feats.sum(dim=[-1, -2], keepdim=True) + 1e-8)
     feats_ = feats[rand_idx]
+
+    if condition == "greedy":
+        dist = _guidedmix_distance(feats.detach(), feats_.detach(), distance_metric)
+        pair_np = _guidedmix_onecycle_cover(dist.cpu().numpy())
+        pair_cols = torch.as_tensor(pair_np, device=img.device, dtype=torch.long)
+        rand_idx = rand_idx[pair_cols]
+        feats_ = feats[rand_idx]
+    else:
+        raise ValueError("GuidedMix only supports condition='greedy' in this port")
+
+    img_ = img[rand_idx]
+    y_a = gt_label
+    y_b = gt_label[rand_idx]
     norm_feats = feats / (feats + feats_ + 1e-8)
-    lam_v = norm_feats.mean(dim=[-1, -2]).squeeze(-1)
-    mask = torch.cat([norm_feats] * img.shape[1], dim=1)
+    lam_a = norm_feats.mean(dim=[-1, -2]).reshape(-1)
+    lam_b = 1.0 - lam_a
+    mask = norm_feats.expand(-1, img.shape[1], -1, -1) if norm_feats.shape[1] == 1 else norm_feats
     out = mask * img + (1 - mask) * img_
     if return_mask:
         out = (out, mask[:, :1])
-    return out, (y_a, y_b, float(lam_v.mean().item()))
+    return out, (y_a, y_b, lam_a, lam_b)
 
 
-# ---- PuzzleMix (simplified, gradient-free fallback) ---------------------
+# ---- PuzzleMix (disabled; simplified fallback kept for reference) ---------
 
 
 @torch.no_grad()
-def puzzlemix(img, gt_label, alpha=0.5, lam=None, features=None, block_num=4,
-              **kwargs):
-    """PuzzleMix (Kim et al., 2020) – simplified, model-aware version.
+def _disabled_puzzlemix(img, gt_label, alpha=0.5, lam=None, features=None, block_num=4,
+                        **kwargs):
+    """Disabled PuzzleMix approximation kept only for reference.
 
     The full PuzzleMix needs ``pyGCO`` (graphcut) and pixel-level loss
     gradients which we do not have at the showcase site. This stand-in
@@ -972,8 +1173,7 @@ OPENMIXUP_AUG_INFO: Dict[str, Dict[str, Any]] = {
                     "desc": "Block / random token-level mix for ViTs."},
     "guidedmix":   {"image_only": False, "needs_features": True,  "needs_attn": False,
                     "desc": "Saliency-guided soft mask mix."},
-    "puzzlemix":   {"image_only": False, "needs_features": True,  "needs_attn": False,
-                    "desc": "Saliency-aware block puzzle (simplified)."},
+    # "puzzlemix": Disabled because the local implementation is only a simplified approximation.
 }
 
 OPENMIXUP_AUG_NAMES: Tuple[str, ...] = tuple(OPENMIXUP_AUG_INFO.keys())
@@ -1005,7 +1205,7 @@ _AUG_FUNCS = {
     "tla": tla,
     "tokenmix": tokenmix,
     "guidedmix": guidedmix,
-    "puzzlemix": puzzlemix,
+    # "puzzlemix": Disabled because the local implementation is only a simplified approximation.
 }
 
 
@@ -1024,14 +1224,26 @@ def apply_openmixup_aug(name: str, img: torch.Tensor, target: torch.Tensor,
 
 def openmixup_to_soft_target(target_info: Tuple, num_classes: int,
                              smoothing: float = 0.0) -> torch.Tensor:
-    """Convert a per-aug ``target_info`` tuple into a soft-label tensor."""
+    """Convert a per-aug ``target_info`` tuple into a soft-label tensor.
+
+    Supports three shapes returned by the augmentation functions:
+
+    * ``(y_a, y_b, lam)`` with scalar or per-image ``lam`` (TransMix /
+      MixPro can return a 1-D tensor here).
+    * ``(y_a, y_b, lam_a, lam_b)`` with scalar or per-image ``lam_a`` /
+      ``lam_b`` (SnapMix, GuidedMix, TokenMix-with-attention).
+    """
     if isinstance(target_info, tuple) and len(target_info) >= 3:
         y_a = target_info[0]
         y_b = target_info[1]
         y_a = _one_hot(y_a, num_classes, smoothing)
         y_b = _one_hot(y_b, num_classes, smoothing)
         if len(target_info) == 3:
-            lam = float(target_info[2])
+            lam = target_info[2]
+            if torch.is_tensor(lam) and lam.ndim >= 1:
+                lam = lam.float().view(-1, 1)
+                return lam * y_a + (1.0 - lam) * y_b
+            lam = float(lam)
             return lam * y_a + (1.0 - lam) * y_b
         if len(target_info) == 4:
             # SnapMix-style: per-image lam_a and lam_b (or lam, lam_).

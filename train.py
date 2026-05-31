@@ -48,6 +48,17 @@ from timm.data import (
     OPENMIXUP_AUG_INFO,
     OpenMixupAug,
 )
+
+OPENMIXUP_DEFAULT_ALPHA = {
+    'resizemix': 0.1,
+    'tokenmix': 0.4,
+    'fmix': 0.4,
+    'tla': 0.2,
+    'saliencymix': 0.25,
+    'gridmix': 0.1,
+    'smoothmix': 0.6,
+}
+
 from timm.data.loader import PrefetchLoader, _worker_init, fast_collate
 from timm.layers import convert_splitbn_model, convert_sync_batchnorm, set_fast_norm
 from timm.loss import (
@@ -483,8 +494,11 @@ for _om_name in OPENMIXUP_CLI_AUG_NAMES:
         help=f"Enable OpenMixup '{_om_name}': {_info['desc']}{_suffix}",
     )
 del _om_name, _info, _suffix
-group.add_argument('--openmixup-alpha', type=float, default=1.0,
-                   help='Alpha (Beta/Dirichlet) parameter for the active OpenMixup aug.')
+group.add_argument('--puzzlemix', action='store_true', default=False,
+                   help='Disabled: the local PuzzleMix port is only a simplified approximation, '
+                        'not the full graph-cut/transport implementation.')
+group.add_argument('--openmixup-alpha', type=float, default=None,
+                   help='Alpha (Beta/Dirichlet) parameter for the active OpenMixup aug; defaults are method-specific.')
 group.add_argument('--openmixup-prob', type=float, default=1.0,
                    help='Per-batch probability of applying the active OpenMixup aug.')
 group.add_argument('--openmixup-extra-kwargs', nargs='*', default={}, action=utils.ParseKwargs,
@@ -707,6 +721,7 @@ def _multi_image_aug_table() -> Tuple[Tuple[str, str, str], ...]:
         ("mixup",     "--mixup / --cutmix / --cutmix-minmax", "_mixup_or_cutmix"),
         ("mosaic",    "--mosaic",                              "mosaic"),
         ("labelmix",  "--labelmix",                            "labelmix"),
+        ("puzzlemix", "--puzzlemix",                           "puzzlemix"),
     ]
     for name in OPENMIXUP_CLI_AUG_NAMES:
         base.append((name, f"--{name}", name))
@@ -789,6 +804,13 @@ def validate_args(args) -> None:
             raise ValueError('--balanced-mode must be "min", "max", or a positive int')
         if isinstance(mode, int) and mode < 1:
             raise ValueError('--balanced-mode int value must be >= 1')
+
+    if getattr(args, 'puzzlemix', False):
+        raise ValueError(
+            '--puzzlemix is disabled. The local PuzzleMix port is only a '
+            'simplified approximation, not the full graph-cut/transport '
+            'implementation from OpenMixup.'
+        )
 
     # Single multi-image-augmentation rule: --mixup/--cutmix, --mosaic,
     # --labelmix and the per-method OpenMixup flags (--fmix, --gridmix,
@@ -1809,6 +1831,12 @@ def run_training(args=None, args_text=None):
     # detection (mixup vs cutmix vs ... vs fmix vs ...) is centralized in
     # ``_resolve_multi_image_aug``; we use ``parser.error`` so the user
     # gets the standard CLI error format.
+    if getattr(args, 'puzzlemix', False):
+        parser.error(
+            '--puzzlemix is disabled. The local PuzzleMix port is only a '
+            'simplified approximation, not the full graph-cut/transport '
+            'implementation from OpenMixup.'
+        )
     try:
         _resolved_aug = _resolve_multi_image_aug(args)
     except ValueError as exc:
@@ -1855,6 +1883,14 @@ def run_training(args=None, args_text=None):
         # OpenMixup expects a soft-label tensor downstream; reuse the
         # SoftTargetCrossEntropy path used for mixup-style training.
         mixup_active = True  # downstream switches to SoftTargetCrossEntropy
+
+    openmixup_alpha = None
+    if openmixup_active:
+        openmixup_alpha = (
+            args.openmixup_alpha
+            if args.openmixup_alpha is not None
+            else OPENMIXUP_DEFAULT_ALPHA.get(openmixup_aug_name, 1.0)
+        )
 
     naflex_mode = False
     if args.naflex_loader:
@@ -1911,7 +1947,7 @@ def run_training(args=None, args_text=None):
             mixup_fn = OpenMixupAug(
                 openmixup_aug_name,
                 num_classes=args.num_classes,
-                alpha=args.openmixup_alpha,
+                alpha=openmixup_alpha,
                 prob=args.openmixup_prob,
                 label_smoothing=args.smoothing,
                 mean=data_config['mean'],
@@ -1921,7 +1957,7 @@ def run_training(args=None, args_text=None):
             if utils.is_primary(args):
                 _logger.info(
                     'OpenMixup augmentation enabled: name=%s alpha=%g prob=%g extras=%s',
-                    openmixup_aug_name, args.openmixup_alpha, args.openmixup_prob,
+                    openmixup_aug_name, openmixup_alpha, args.openmixup_prob,
                     dict(getattr(args, 'openmixup_extra_kwargs', {}) or {}),
                 )
         elif mixup_active:
