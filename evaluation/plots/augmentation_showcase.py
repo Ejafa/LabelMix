@@ -12,15 +12,15 @@ augmentation itself, not to a different image crop:
        form after resize + center-crop only.
 
     2. ``treemapmix_randomness/`` — N PNGs of TreemapMix with ``alpha=0.5``,
-       ``k=5`` and ``sampling_max_aspect=20``, one per seed; no
+       ``K=5`` and ``sampling_max_aspect=20``, one per seed; no
        single-image augmentation (color jitter, RandAugment,
        random-erasing, shear, ...) is applied.
 
-    3. ``treemapmix_k_sweep/`` — one PNG per ``k`` in ``[2, 10]``, all
+    3. ``treemapmix_k_sweep/`` — one PNG per ``K`` in ``[2, 10]``, all
        with ``alpha=5.0`` and ``sampling_max_aspect=15``.
 
     4. ``treemapmix_alpha_sweep/`` — one PNG per ``alpha`` in
-       ``[0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0]``, all with ``k=5`` and
+       ``[0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0]``, all with ``K=5`` and
        ``sampling_max_aspect=10``.
 
 Every PNG is written at two resolutions (256x256 and 1024x1024) and a
@@ -155,8 +155,8 @@ COMPARISON_MOSAIC_POST_SCALE: Tuple[float, float] = (0.6, 0.9)
 COMPARISON_MOSAIC_FILL_VALUE: float = 0.5
 
 # How many source images we need at the most to render every figure.
-# - k-sweep needs up to k=10
-# - randomness uses 8 panels * K=5, and k-sweep can use up to 10 images.
+# - K-sweep needs up to K=10
+# - randomness uses 8 panels * K=5, and K-sweep can use up to 10 images.
 #   The comparison uses one basic example per augmentation.
 # 128 is plenty and cheap to load.
 NUM_SOURCE_IMAGES: int = 128
@@ -995,7 +995,7 @@ _AUG_NOTES = {
     "cutmix":   f"Classic CutMix: paste a random bbox of b into a with alpha={COMPARISON_CUTMIX_ALPHA}.",
     "mosaic":   "4-tile Mosaic augmentation with stronger zoom-out and grey filler.",
     _TREEMAPMIX_AUG: (
-        f"TreemapMix with alpha={COMPARISON_LABELMIX_ALPHA}, k={COMPARISON_LABELMIX_K}, "
+        f"TreemapMix with alpha={COMPARISON_LABELMIX_ALPHA}, K={COMPARISON_LABELMIX_K}, "
         f"sampling_max_aspect={LABELMIX_MAX_ASPECT}."
     ),
 }
@@ -1275,7 +1275,7 @@ def render_treemapmix_randomness(
         "group": group,
         "purpose": (
             "Illustrates the randomness of TreemapMix layouts: every PNG uses "
-            "the same source images and the same (alpha, k, aspect-cap) "
+            "the same source images and the same (alpha, K, aspect-cap) "
             "hyperparameters; only the random seed changes."
         ),
         "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
@@ -1299,7 +1299,7 @@ def render_treemapmix_k_sweep(
     *,
     k_values: Sequence[int] = tuple(range(2, 10)),
 ) -> None:
-    """Set 3: one TreemapMix PNG per ``k`` value, same alpha/aspect cap.
+    """Set 3: one TreemapMix PNG per ``K`` value, same alpha/aspect cap.
 
     Output directory: ``<out>/treemapmix_k_sweep/``.
     """
@@ -1377,7 +1377,7 @@ def render_treemapmix_k_sweep(
             ],
             "layout_max_aspect": _boxes_max_aspect(boxes_for_meta),
             "notes": (
-                f"TreemapMix composite with k={k} source images; earlier "
+                f"TreemapMix composite with K={k} source images; earlier "
                 "source images are assigned larger regions than later ones."
             ),
         })
@@ -1386,7 +1386,7 @@ def render_treemapmix_k_sweep(
         "group": group,
         "purpose": (
             "Shows how TreemapMix layouts scale with the number of mixed "
-            "images k; all other hyperparameters are held fixed."
+            "images K; all other hyperparameters are held fixed."
         ),
         "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
         "img_size": cfg.img_size,
@@ -1415,7 +1415,7 @@ def render_treemapmix_alpha_sweep(
     *,
     alpha_values: Sequence[float] = LABELMIX_ALPHA_SWEEP,
 ) -> None:
-    """Set 4: one TreemapMix PNG per ``alpha`` value, same k/aspect cap.
+    """Set 4: one TreemapMix PNG per ``alpha`` value, same K/aspect cap.
 
     Output directory: ``<out>/treemapmix_alpha_sweep/``.  Every panel uses
     the same source images and same RNG seed base so visible differences
@@ -1499,7 +1499,7 @@ def render_treemapmix_alpha_sweep(
             "layout_max_aspect": _boxes_max_aspect(boxes_for_meta),
             "notes": (
                 f"TreemapMix composite with alpha={alpha:g}; source images, "
-                f"k={LABELMIX_K}, aspect cap, seed base, and source-size "
+                f"K={LABELMIX_K}, aspect cap, seed base, and source-size "
                 "ranking are fixed."
             ),
         })
@@ -1508,7 +1508,7 @@ def render_treemapmix_alpha_sweep(
         "group": group,
         "purpose": (
             "Shows how TreemapMix layouts change as alpha changes the ranked "
-            "region weights; all panels use the same source images and fixed k."
+            "region weights; all panels use the same source images and fixed K."
         ),
         "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
         "img_size": cfg.img_size,
@@ -1616,7 +1616,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--k-sweep", type=int, nargs="+", default=list(range(2, 11)),
-        help="k values to render in treemapmix_k_sweep (figure 3).",
+        help="K values to render in treemapmix_k_sweep (figure 3).",
     )
     parser.add_argument(
         "--alpha-sweep", type=float, nargs="+", default=list(LABELMIX_ALPHA_SWEEP),

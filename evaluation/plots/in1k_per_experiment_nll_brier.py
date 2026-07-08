@@ -44,6 +44,8 @@ from .in1k_per_experiment import (
 
 _logger = logging.getLogger(__name__)
 
+_PANEL_WIDTH = DOUBLE_COL_WIDTH * 1.15
+
 _NLL_MEAN_COL = "nll_mean"
 _NLL_STD_COL = "nll_std"
 _BRIER_MEAN_COL = "brier_mean"
@@ -86,9 +88,9 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
 
     fig, (ax_nll, ax_brier) = plt.subplots(
         2, 1,
-        figsize=(DOUBLE_COL_WIDTH, 4.6),
+        figsize=(_PANEL_WIDTH, 3.8),
         sharex=True,
-        gridspec_kw={"hspace": 0.34},
+        gridspec_kw={"hspace": 0.28},
     )
 
     for i, t in enumerate(types):

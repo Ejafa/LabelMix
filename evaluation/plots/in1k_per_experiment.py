@@ -64,6 +64,7 @@ _logger = logging.getLogger(__name__)
 
 # Subdirectory for these paper figures.
 _OUT_SUBDIR = "per_experiment"
+_PANEL_WIDTH = DOUBLE_COL_WIDTH * 1.15
 
 # Reference ECE bin count (Guo et al., 2017).
 _ECE_BINS = 15
@@ -83,9 +84,9 @@ _TYPE_ORDER: Sequence[str] = (
     "mixup",
     "cutmix",
     "mosaic",
+    "labelmix-sce",
     "labelmix-mixed",
     "labelmix-pl",
-    "labelmix-sce",
 )
 
 # Per-type styling: friendly label and fill colour.  Labels come from
@@ -137,7 +138,7 @@ def _filter_types(df: pd.DataFrame) -> pd.DataFrame:
 # Main panel plot
 # ---------------------------------------------------------------------------
 
-def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
+def plot(df: pd.DataFrame, title: str | None = "ImageNet-1K") -> plt.Figure:
     """Render the 2-row (Top-1, ECE) grouped bar chart."""
     apply_paper_style()
 
@@ -176,9 +177,9 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
 
     fig, (ax_top, ax_ece) = plt.subplots(
         2, 1,
-        figsize=(DOUBLE_COL_WIDTH, 4.6),
+        figsize=(_PANEL_WIDTH, 4),
         sharex=True,
-        gridspec_kw={"hspace": 0.34},
+        gridspec_kw={"hspace": 0.28},
     )
 
     for i, t in enumerate(types):
@@ -308,13 +309,13 @@ def plot_legend(types: Sequence[str]) -> plt.Figure:
 
 _DEFAULT_INPUTS: tuple[tuple[str, Path, Path, bool], ...] = (
     (
-        "ImageNet-1k",
+        "ImageNet-1K",
         PROCESSED_DIR / "in1k_per_experiment_short.csv",
         FIGURES_DIR / _OUT_SUBDIR / "in1k_per_experiment_short.pdf",
         True,  # also render NLL/Brier companion figure for the short CSV
     ),
     (
-        "ImageNet-1k",
+        "ImageNet-1K",
         PROCESSED_DIR / "in1k_per_experiment_long.csv",
         FIGURES_DIR / _OUT_SUBDIR / "in1k_per_experiment_long.pdf",
         False,  # long horizon is delivered as a standalone PDF instead
@@ -394,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
              "Only honoured when --input is given. "
              "The legend is written to <stem>_legend.pdf next to it.",
     )
-    p.add_argument("--title", type=str, default="ImageNet-1k",
+    p.add_argument("--title", type=str, default="ImageNet-1K",
                    help="Figure title for the top panel.")
     p.add_argument(
         "--with-nll-brier", action="store_true",

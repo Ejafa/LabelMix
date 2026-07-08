@@ -13,12 +13,12 @@ Renders three paper-style figures from
    Metric 3: largest-area top-logit accuracy.
 
 Every figure is a single panel:
- * x-axis = composed-sample class count ``k`` (categorical-uniform
+ * x-axis = composed-sample class count ``K`` (categorical-uniform
    spacing, values ``3, 4, 5, 6``),
  * y-axis = metric value,
  * one line-with-markers per training config.
 
-The ``k == "all"`` aggregate row is not drawn on the canvas (it would
+The ``K == "all"`` aggregate row is not drawn on the canvas (it would
 clutter an already eight-line plot) but is captured in the ``.meta.json``
 sidecar so downstream tooling can quote headline numbers without
 re-reading the CSV.
@@ -109,8 +109,9 @@ MODEL_ORDER: Sequence[ModelStyle] = (
     ModelStyle("cutmix",       method_display("cutmix"),       line_color("cutmix"),       "-", "^"),
     ModelStyle("mixup",        method_display("mixup"),        line_color("mixup"),        "-", "v"),
     ModelStyle("mosaic",       method_display("mosaic"),       line_color("mosaic"),       "-", "D"),
-    ModelStyle("labelmix-sce", method_display("labelmix-sce"), line_color("labelmix-sce"), "-", "X"),
-    ModelStyle("labelmix-pl",  method_display("labelmix-pl"),  line_color("labelmix-pl"),  "-", "*"),
+    ModelStyle("labelmix-sce",   method_display("labelmix-sce"),   line_color("labelmix-sce"),   "-", "X"),
+    ModelStyle("labelmix-mixed", method_display("labelmix-mixed"), line_color("labelmix-mixed"), "-", "h"),
+    ModelStyle("labelmix-pl",    method_display("labelmix-pl"),    line_color("labelmix-pl"),    "-", "*"),
 )
 
 K_VALUES: Sequence[int] = (3, 4, 5, 6)
@@ -210,7 +211,7 @@ def _load(input_path: Path) -> pd.DataFrame:
 
 
 def _per_k(df: pd.DataFrame, column: str) -> pd.DataFrame:
-    """Return a (model, k) wide matrix restricted to k in ``K_VALUES``."""
+    """Return a (model, K) wide matrix restricted to K in ``K_VALUES``."""
     sub = df[df["k"].isin([str(k) for k in K_VALUES])].copy()
     sub["k_int"] = sub["k"].astype(int)
     wide = sub.pivot_table(index="model", columns="k_int", values=column, aggfunc="mean")
@@ -219,7 +220,7 @@ def _per_k(df: pd.DataFrame, column: str) -> pd.DataFrame:
 
 
 def _all_row(df: pd.DataFrame, column: str) -> dict[str, float]:
-    """Return {model: value} for the ``k == "all"`` aggregate row."""
+    """Return {model: value} for the ``K == "all"`` aggregate row."""
     sub = df[df["k"] == "all"]
     return {str(r["model"]): float(r[column]) for _, r in sub.iterrows()}
 
@@ -236,7 +237,7 @@ def _plot_metric(
     ylabel: str,
     wide_std: pd.DataFrame | None = None,
 ) -> None:
-    """Draw one metric panel (x = k, one line per model).
+    """Draw one metric panel (x = K, one line per model).
 
     When ``wide_std`` is provided, also draws a shaded mean +/- std band
     behind each line in the same colour at ``STD_BAND_ALPHA`` alpha.
@@ -280,7 +281,7 @@ def _plot_metric(
     ax.set_xticks(list(pos.values()))
     ax.set_xticklabels([str(k) for k in K_VALUES])
     ax.set_xlim(x.min() - K_EDGE_PAD, x.max() + K_EDGE_PAD)
-    ax.set_xlabel(r"Number of patches $k$ per image")
+    ax.set_xlabel(r"Number of patches $K$ per image")
     ax.set_ylabel(ylabel)
     # Grid intentionally disabled for the area-vs-logit diagnostic panels.
     ax.grid(False)
@@ -415,13 +416,14 @@ def build_metric_metadata(
             "yscale": "linear",
         }],
         "x": {
-            "name": "k",
+            "name": "K",
             "scale": "categorical_uniform",
             "values": list(K_VALUES),
         },
         "renaming": {
-            "labelmix-pl": "TreemapMix (PL)",
-            "labelmix-sce": "TreemapMix (SCE)",
+            "labelmix-mixed": method_display("labelmix-mixed"),
+            "labelmix-pl": method_display("labelmix-pl"),
+            "labelmix-sce": method_display("labelmix-sce"),
         },
         "source_csv": str(INPUT_FILE),
         "per_model_stats": per_model,
@@ -439,7 +441,7 @@ def build_metric_metadata(
             f"{cfg['title']} on the composed ImageNet diagnostic dataset "
             "(ViT-Betwixt). Each line traces one training configuration "
             "across the composed-sample class count "
-            f"k \u2208 {list(K_VALUES)}; the ``k=all'' aggregate is "
+            f"K \u2208 {list(K_VALUES)}; the ``K=all'' aggregate is "
             "reported in the metadata sidecar, not plotted. ``TreemapMix'' "
             "replaces the internal name ``LabelMix''."
             + caption_std

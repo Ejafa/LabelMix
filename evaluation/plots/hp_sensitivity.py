@@ -1,4 +1,4 @@
-"""Plot: TreemapMix hyperparameter sensitivity (α, k) for ViT-Wee on ImageNet-1k.
+"""Plot: TreemapMix hyperparameter sensitivity (α, K) for ViT-Wee on ImageNet-1k.
 
 Produces three figures from
 ``data/processed/hyperparameter_sensitivity_vit_wee_with_baselines.csv``:
@@ -6,7 +6,7 @@ Produces three figures from
 1. ``hp_sensitivity_vit_wee.pdf`` (main text, two panels):
    x = α on a uniform (categorical) axis, y = Top-1 (left panel, linear)
    and ECE (p.p.) (right panel, log).  For each TreemapMix loss we plot the
-   median-over-k as a solid line and the min-to-max-over-k range as a shaded
+   median-over-K as a solid line and the min-to-max-over-K range as a shaded
    band.  Two horizontal references show the Cutmix + Mixup
    and ``single-aug`` (single image aug only) seeds, each with a thin ±std
    band.  The ECE panel uses a log y-axis so the near-baseline region does
@@ -15,13 +15,13 @@ Produces three figures from
    ``hp_sensitivity_vit_wee_legend.pdf``.
 
 2. ``hp_sensitivity_k_vit_wee.pdf`` (main text companion, two panels):
-   identical layout to (1) but sweeping x = k (with bands showing the
+   identical layout to (1) but sweeping x = K (with bands showing the
    min–max over α).  Provides the complementary view of the same grid.
    The legend is rendered separately as
    ``hp_sensitivity_k_vit_wee_legend.pdf``.
 
 3. ``hp_sensitivity_heatmaps_vit_wee.pdf`` (appendix, 2x2 grid):
-   rows = metric, cols = loss.  Each cell is an 8x8 α × k heatmap of the
+   rows = metric, cols = loss.  Each cell is an 8x8 α × K heatmap of the
    *absolute* metric value.  Colour uses a symmetric linear scale centred
    on the Cutmix + Mixup mean and the dark global TreemapMix method colours
    (blue = better than Cutmix + Mixup, red = worse).
@@ -181,7 +181,7 @@ def _plot_metric(
     ----------
     sweep:
         Which hyperparameter to put on the x-axis, either ``"alpha"`` (band
-        is min–max over k) or ``"k"`` (band is min–max over α).
+        is min–max over K) or ``"k"`` (band is min–max over α).
     yscale:
         ``"linear"`` or ``"log"``.  The ECE panel benefits from ``"log"``
         because values span roughly 1.5 → 35 and the low-α region collapses
@@ -221,7 +221,7 @@ def _plot_metric(
     ax.set_xticklabels([f"{v:g}" if sweep == "alpha" else str(int(v))
                         for v in xs_sorted])
     ax.set_xlim(-0.3, len(xs_sorted) - 0.7)
-    ax.set_xlabel(r"$\alpha$" if sweep == "alpha" else r"$k$")
+    ax.set_xlabel(r"$\alpha$" if sweep == "alpha" else r"$K$")
 
     if yscale == "log":
         ax.set_yscale("log")
@@ -323,6 +323,8 @@ def build_sensitivity_metadata(
     ks = sorted(int(k) for k in lm["k"].dropna().unique())
     other = "k" if sweep == "alpha" else "alpha"
     other_values = ks if sweep == "alpha" else alphas
+    sweep_label = "K" if sweep == "k" else sweep
+    other_label = "K" if other == "k" else other
 
     # Per-loss headline stats (min / median / max across the full grid).
     per_loss: dict[str, dict] = {}
@@ -350,9 +352,9 @@ def build_sensitivity_metadata(
             else "hp_sensitivity_k_vit_wee"
         ),
         "title": (
-            "TreemapMix hyperparameter sensitivity (α, k) \u2014 ViT-Wee / ImageNet-1k"
+            "TreemapMix hyperparameter sensitivity (α, K) \u2014 ViT-Wee / ImageNet-1k"
             if sweep == "alpha"
-            else "TreemapMix hyperparameter sensitivity over k \u2014 ViT-Wee / ImageNet-1k"
+            else "TreemapMix hyperparameter sensitivity over K \u2014 ViT-Wee / ImageNet-1k"
         ),
         "kind": "line_with_band",
         "legend": (
@@ -370,12 +372,12 @@ def build_sensitivity_metadata(
             {"axis": "right", "metric": "ECE (p.p.)",
              "direction": "lower is better", "yscale": "log"},
         ],
-        "x": {"name": sweep, "scale": "categorical_uniform",
+        "x": {"name": "K" if sweep == "k" else sweep, "scale": "categorical_uniform",
               "values": alphas if sweep == "alpha" else ks},
         "aggregation_over_other": {
-            "variable": other,
+            "variable": "K" if other == "k" else other,
             "line": "median",
-            "band": f"min\u2013max over {other}",
+            "band": f"min\u2013max over {'K' if other == 'k' else other}",
             "values": other_values,
         },
         "losses": [LOSS_LABELS[l] for l in LOSS_ORDER if l in lm["loss"].unique()],
@@ -400,10 +402,10 @@ def build_sensitivity_metadata(
         "per_loss_stats": per_loss,
         "caption_hint": (
             "Hyperparameter sensitivity of TreemapMix on ViT-Wee / ImageNet-1k. "
-            f"The x-axis sweeps {sweep}; each solid line is the median Top-1 "
-            f"(left, linear) / ECE (p.p.) (right, log) over {other} \u2208 "
+            f"The x-axis sweeps {sweep_label}; each solid line is the median Top-1 "
+            f"(left, linear) / ECE (p.p.) (right, log) over {other_label} \u2208 "
             f"{other_values}; the shaded band shows the min\u2013max envelope "
-            f"over {other}. The dark grey line is Cutmix + Mixup; "
+            f"over {other_label}. The dark grey line is Cutmix + Mixup; "
             "the dashed grey line is Single-Image Aug. "
             "TreemapMix matches or beats Cutmix + Mixup in Top-1 across the full "
             "sweep and reduces ECE by a large margin."
@@ -427,7 +429,7 @@ def build_sensitivity_legend_metadata(out_path: Path, *, sweep: str) -> dict:
         "title": (
             "TreemapMix hyperparameter sensitivity legend"
             if sweep == "alpha"
-            else "TreemapMix hyperparameter k-sweep sensitivity legend"
+            else "TreemapMix hyperparameter K-sweep sensitivity legend"
         ),
         "kind": "standalone_legend",
         "applies_to": (
@@ -451,7 +453,7 @@ def build_sensitivity_legend_metadata(out_path: Path, *, sweep: str) -> dict:
 
 
 def _pivot(lm: pd.DataFrame, loss: str, metric: str) -> pd.DataFrame:
-    """Return a (k × α) matrix of metric values for a given loss."""
+    """Return a (K × α) matrix of metric values for a given loss."""
     sub = lm[lm["loss"] == loss]
     piv = sub.pivot_table(index="k", columns="alpha", values=metric, aggfunc="mean")
     piv = piv.sort_index(axis=0).sort_index(axis=1)
@@ -578,7 +580,7 @@ def _draw_heatmap(
                     fontsize=6.8, color=txt_colour)
 
     ax.set_xlabel(r"$\alpha$")
-    ax.set_ylabel(r"$k$")
+    ax.set_ylabel(r"$K$")
     # Keep the reference values in their own smaller subtitle so the main
     # panel label remains easy to scan.
     baseline_label = BASELINE_DISPLAY.replace(" + ", "+")
@@ -751,7 +753,7 @@ def build_heatmap_metadata(
     meta = {
         "plot_id": f"hp_sensitivity_heatmaps_{metric}_vit_wee",
         "title": (
-            f"TreemapMix α × k heatmap — {metric_label} — "
+            f"TreemapMix α × K heatmap — {metric_label} — "
             "ViT-Wee / ImageNet-1k"
         ),
         "kind": "heatmap_grid_1x2",
@@ -802,7 +804,7 @@ def build_heatmap_metadata(
         },
         "panels": per_panel,
         "caption_hint": (
-            f"α × k sensitivity of TreemapMix ({metric_label}) on ViT-Wee / "
+            f"α × K sensitivity of TreemapMix ({metric_label}) on ViT-Wee / "
             "ImageNet-1k. Cells show the absolute metric value; the two "
             "panels contrast the PL and SCE variants. Colour uses a "
             "diverging scale centred on the Cutmix + Mixup mean: blue cells "
@@ -910,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
     _logger.info("Wrote %s", meta1_legend_path)
     plt.close(fig1_legend)
 
-    # Figure 2: k sweep (companion to the α figure).
+    # Figure 2: K sweep (companion to the α figure).
     fig_k = plot_sensitivity(df, sweep="k")
     savefig(fig_k, str(args.out_sensitivity_k))
     meta_k = build_sensitivity_metadata(
