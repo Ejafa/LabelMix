@@ -538,9 +538,13 @@ LABELMIX_LOSS_SPECS: Dict[str, Dict[str, Any]] = {
 # requested without --labelmix-k-values / --labelmix-alpha-*-values.
 LABELMIX_DATASET_DEFAULTS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "cifar100": {
-        "mixed": {"mix_k": 6, "alpha_start": 0.1, "alpha_end": 0.1},
-        "sce":   {"mix_k": 6, "alpha_start": 0.1, "alpha_end": 0.1},
-        "pl":    {"mix_k": 8, "alpha_start": 0.1, "alpha_end": 0.1},
+#         "mixed": {"mix_k": 6, "alpha_start": 0.1, "alpha_end": 0.1},
+#         "sce":   {"mix_k": 6, "alpha_start": 0.1, "alpha_end": 0.1},
+#         "pl":    {"mix_k": 8, "alpha_start": 0.1, "alpha_end": 0.1},
+            "mixed": {"mix_k": 4, "alpha_start": 0.1, "alpha_end": 0.5},
+            "sce":   {"mix_k": 4, "alpha_start": 0.1, "alpha_end": 0.5},
+            "pl":    {"mix_k": 6, "alpha_start": 0.1, "alpha_end": 0.5},
+
     },
 }
 

@@ -7,9 +7,7 @@ Typical invocations::
         --entity my-team --project labelmix --tags in1k
 
     # Only finished runs from a specific W&B run group:
-    python -m evaluation.scripts.sync_wandb \\
-        --entity my-team --project labelmix \\
-        --group model_ablation --state finished
+    python -m evaluation.scripts.sync_wandb --entity labelmix_gpu_cluster --project labelmix --group openmixup-in1k --state finished
 
     # Also pull every file (checkpoints / logs / args.yaml), force-refresh:
     python -m evaluation.scripts.sync_wandb --entity my-team --project labelmix \\
