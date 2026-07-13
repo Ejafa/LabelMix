@@ -146,11 +146,6 @@ in1k-main
 mixed_loss
 
 detectron2_vitdet/datasets
-<<<<<<< HEAD
-=======
-evaluation/data/processed
 detectron2_vitdet/converted/_conversion_manifest.csv
-.gitignore
 experiments/test_jobs.yaml
->>>>>>> 9572bd74d87b5651d1001ec8c4d0454d0b0e3e81
 evaluation/data

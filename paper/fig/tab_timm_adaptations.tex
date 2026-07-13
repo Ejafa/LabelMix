@@ -1,0 +1,45 @@
+\begin{table}[t]
+  \centering
+  \setlength{\tabcolsep}{5pt}
+  \caption{Adaptations to the reference \texttt{timm} ImageNet-1K recipes used
+for the main 110-epoch comparison. We shorten the original long schedules,
+disable augmentation repeats, switch to \texttt{bfloat16}, and retune the
+learning rate; all other recipe settings are kept unchanged unless listed.}
+  \label{tab:timm-adaptations}
+  \begin{tabular}{llll}
+    \toprule
+    Model & Setting & Original & New \\
+    \midrule
+    \multicolumn{4}{l}{\textbf{ViT-Betwixt}} \\
+    & \texttt{dtype} & \texttt{float16} & \texttt{bfloat16} \\
+    & \texttt{aug\_repeats} & 3.0 & 0.0 \\
+    & \texttt{warmup\_epochs} & 20 & 10 \\
+    & \texttt{epochs} & 600 & 110 \\
+    & \texttt{lr} & 1.2e-3 & 1.5e-3 \\
+    \midrule
+    \multicolumn{4}{l}{\textbf{ViT-Medium}} \\
+    & \texttt{dtype} & \texttt{float16} & \texttt{bfloat16} \\
+    & \texttt{aug\_repeats} & 3.0 & 0.0 \\
+    & \texttt{clip\_grad} & 5.0 & \texttt{null} \\
+    & \texttt{warmup\_epochs} & 20 & 10 \\
+    & \texttt{epochs} & 600 & 110 \\
+    & \texttt{lr} & 1.2e-3 & 1.5e-3 \\
+    \midrule
+    \multicolumn{4}{l}{\textbf{ViT-Little}} \\
+    & \texttt{dtype} & \texttt{float16} & \texttt{bfloat16} \\
+    & \texttt{aug\_repeats} & 3.0 & 0.0 \\
+    & \texttt{clip\_grad} & 5.0 & \texttt{null} \\
+    & \texttt{warmup\_epochs} & 20 & 10 \\
+    & \texttt{epochs} & 600 & 110 \\
+    & \texttt{lr} & 1.2e-3 & 1.5e-3 \\
+    \midrule
+    \multicolumn{4}{l}{\textbf{ViT-Wee}} \\
+    & \texttt{dtype} & \texttt{float16} & \texttt{bfloat16} \\
+    & \texttt{aug\_repeats} & 3.0 & 0.0 \\
+    & \texttt{clip\_grad} & 5.0 & \texttt{null} \\
+    & \texttt{warmup\_epochs} & 20 & 10 \\
+    & \texttt{epochs} & 450 & 110 \\
+    & \texttt{lr} & 1.2e-3 & 1.5e-3 \\
+    \bottomrule
+  \end{tabular}
+\end{table}

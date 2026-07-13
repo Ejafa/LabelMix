@@ -1,0 +1,23 @@
+\begin{figure}[t]
+\centering
+\footnotesize
+\begin{verbatim}
+import torch.nn.functional as F
+
+
+def treemapmix_sce_loss(logits, labels, weights):
+    """
+    logits: model logits, shape (B, C)
+    labels: target class indices, shape (B, K)
+    weights: target area weights, shape (B, K)
+    Each pair (labels[b, i], weights[b, i]) represents one
+    TreemapMix region for sample b.
+    """
+    log_probs = F.log_softmax(logits, dim=1)
+    target_log_probs = log_probs.gather(dim=1, index=labels)
+    losses = -(weights * target_log_probs).sum(dim=1)
+    return losses.mean()
+\end{verbatim}
+\caption{TreemapMix-SCE. The loss matches the area-weighted soft target induced by the TreemapMix regions.}
+\label{fig:treemapmix-sce-code}
+\end{figure}

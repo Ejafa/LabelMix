@@ -1,0 +1,98 @@
+\section{Diagnostic and Transfer Analysis}
+We next examine how TreemapMix behaves beyond aggregate classification
+accuracy. The analyses in this section support two main observations. First,
+the PL objective improves alignment between model logits and the area-induced
+ordering of the composed regions. Second, COCO transfer experiments indicate
+that the learned representations remain useful for downstream instance
+segmentation, although TreemapMix is not designed as a detection-specific
+augmentation. We analyze these effects through compositional logit alignment
+and COCO transfer, while deferring the hyperparameter sweep to
+Appendix~\ref{app:in1k-hparam-sensitivity} and the qualitative attribution
+analysis to Appendix~\ref{app:qualitative-visualizations}.
+
+\paragraph{Compositional Logit Alignment:}\label{sec:logit-alignment}
+Because TreemapMix composes each training sample from multiple source images, a
+natural question is whether the resulting models learn logits that reflect the
+relative contribution of each constituent region. We test this by measuring
+whether class logits align with the known area ordering in composed images.
+
+We evaluate the ViT-Betwixt checkpoints from the main ImageNet-1K
+experiments reported in Figure~\ref{fig:in1k-main-results-top1} across three
+seeds on a held-out composed diagnostic set. The set contains 500 TreemapMix
+samples for each
+$K \in \{3,4,5,6\}$. Figure~\ref{fig:area-logit-diagnostic} reports three
+diagnostics as separate panels: present-class pairwise rank accuracy over
+pairs satisfying $|\Delta\,\mathrm{area}| \ge 0.05$ in
+Figure~\ref{fig:area-logit-diagnostic-pair-acc}, area-logit Spearman
+correlation in Figure~\ref{fig:area-logit-diagnostic-spearman}, and
+largest-area top-class accuracy in
+Figure~\ref{fig:area-logit-diagnostic-top-acc}.
+
+\input{fig/fig_area_logit_diagnostic}
+
+As expected for a ranking-based objective, TreemapMix-PL yields the strongest
+present-class rank accuracy in Figure~\ref{fig:area-logit-diagnostic-pair-acc}
+and the strongest area-logit Spearman correlation in
+Figure~\ref{fig:area-logit-diagnostic-spearman}. TreemapMix-SCE does not match
+TreemapMix-PL on these diagnostics and, in some cases, trails RICAP. This
+suggests that compositional augmentation alone is not sufficient to induce the
+same ranking behavior; the PL objective is important for aligning logits with
+the area-induced ordering.
+
+A similar pattern appears for largest-area top-class accuracy in
+Figure~\ref{fig:area-logit-diagnostic-top-acc}. TreemapMix-PL achieves the
+highest largest-area top-class accuracy, indicating that it aligns logits most
+closely with relative patch area. In contrast, TreemapMix-SCE is less
+consistent and often remains closer to the baselines. As in the previous experiments, TreemapMix-mixed typically falls between TreemapMix-PL and TreemapMix-SCE on both ECE and Top-1 accuracy. RICAP is nevertheless a
+competitive baseline across all three metrics and outperforms TreemapMix-SCE on
+largest-area top-class accuracy and area-logit Spearman correlation, despite
+also using area-weighted soft targets. This further suggests that the
+strongest gains in these diagnostics are driven by the ranking objective rather
+than by compositional augmentation alone.
+
+\paragraph{Feature Transfer to Instance Segmentation:}
+
+We next test whether TreemapMix-pretrained checkpoints remain useful beyond
+ImageNet-1K classification. The logit-alignment diagnostics in
+Section~\ref{sec:logit-alignment} show that TreemapMix-PL more strongly aligns
+present-class logits with the area-induced ordering of the composed regions.
+This diagnostic does not establish that TreemapMix learns better dense spatial
+features. We therefore treat object detection and instance segmentation as
+downstream transfer tests rather than as causal evidence for the mechanism
+behind the logit-alignment results.
+
+Our goal is not to propose a new object detector or a detection-specific
+augmentation. Instead, we use COCO transfer to compare the representations
+learned by different ImageNet-1K pretraining augmentations under a fixed
+fine-tuning setup. We evaluate ViT-Wee and ViT-Betwixt to cover smaller and
+larger backbones. Following the ViTDet setup
+\citep{liExploringPlainVision2022}, we use a ViTDet-style adapter and train a
+Mask R-CNN detector \citep{liExploringPlainVision2022,heMaskRCNN2018}. We
+fine-tune on COCO for 30 epochs, initializing from the checkpoints produced in
+the main classification experiments. COCO images are resized to
+256$\times$256 pixels to match the input resolution used during ImageNet-1K
+pretraining.
+
+We evaluate TreemapMix-SCE and TreemapMix-PL and compare them with
+Mixup+CutMix-pretrained and RICAP-pretrained baselines
+\citep{takahashiDataAugmentationUsing2020}. We include RICAP because it is the
+closest multi-image composition baseline in our study and is related to
+Mosaic-style object-detection augmentations used in YOLOv4 and YOLOv5
+\citep{bochkovskiyYOLOv4OptimalSpeed2020,jocherYOLOv5Ultralytics2020}. The
+corresponding fine-tuning hyperparameters are reported in
+Appendix~\ref{app:det-hparams}. Table~\ref{tab:coco-transfer-results} reports
+COCO box AP and mask AP, averaged over three transferred checkpoints whose
+ImageNet-1K pretraining used different random seeds. Appendix
+Table~\ref{tab:coco-transfer-ap50} reports the corresponding box AP50 and mask
+AP50 metrics.
+
+\input{fig/tab_coco_transfer_results}
+
+Both TreemapMix variants improve over Mixup+CutMix and RICAP on box AP and
+mask AP for both backbones, with TreemapMix-PL achieving the highest scores.
+These results show that TreemapMix-pretrained checkpoints transfer favorably to
+COCO detection and instance segmentation under this fine-tuning protocol.
+However, they should not be interpreted as proving that the area-logit
+alignment mechanism causes the downstream gains, since the transfer experiment
+compares pretrained checkpoints rather than isolating individual representation
+properties.

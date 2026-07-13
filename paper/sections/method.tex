@@ -1,0 +1,98 @@
+% \section{Method}
+
+
+% \subsection{Qualitative Augmentation Comparison}
+% Figure~\ref{fig:aug-showcase-clean} visualizes a qualitative augmentation
+% comparison on matched source images. This diagram isolates the compositional
+% effect of each method under resize-and-center-crop preprocessing only,
+% without additional single-image training augmentations, and makes the spatial
+% structure of Mixup~\citep{mixup},
+% CutMix~\citep{cutmix},
+% RICAP~\citep{takahashiDataAugmentationUsing2020}, and TreemapMix concrete
+% before we turn to the quantitative results.
+
+% \input{fig/fig_aug_comparison_clean}
+
+% Additional qualitative TreemapMix visualizations are deferred to the
+% appendix. Appendix Figure~\ref{fig:treemapmix-randomness} holds the source
+% images and hyperparameters fixed while varying only the random draw. Appendix
+% Figures~\ref{fig:treemapmix-k-sweep} and \ref{fig:treemapmix-alpha-sweep}
+% sweep the number of regions and the Dirichlet concentration, respectively, to
+% show how these controls change the granularity and balance of the mixed image.
+
+
+
+\section{Method}\label{sec:method}
+
+TreemapMix is a $K$-way image-mixing augmentation that replaces each group of $K$ source images with $K$ cyclic mixed samples. Each mixed sample is supervised either by a soft probability-matching objective or by a ranking-based Plackett--Luce objective. We use $K$ for the group size, $C$ for the number of classes, and \(\mathcal{G}=\{(x_k,y_k)\}_{k=1}^{K}\), where \(y_k\in\{1,\dots,C\}\), for a source group.
+
+% A qualitative augmentation comparison on matched source images illustrates the behavior of the different mixing schemes under a shared resize-and-center-crop pipeline. This diagram isolates the compositional effect of each method under resize-and-center-crop preprocessing only, without additional single-image training augmentations, and makes the spatial structure of Mixup~\citep{mixup}, CutMix~\citep{cutmix}, RICAP~\citep{takahashiDataAugmentationUsing2020}, and TreemapMix concrete before we turn to the quantitative results. Additional qualitative TreemapMix visualizations are deferred to the appendix. Appendix Figure~\ref{fig:treemapmix-randomness} holds the source images and hyperparameters fixed while varying only the random draw. Appendix Figures~\ref{fig:treemapmix-k-sweep} and \ref{fig:treemapmix-alpha-sweep} sweep the number of regions and the Dirichlet concentration, respectively, to show how these controls change the granularity and balance of the mixed image.
+
+\subsection{TreemapMix Augmentation}\label{sec:labelmix}
+
+TreemapMix combines $K$ source images into a single canvas while preserving an explicit association between each spatial region, its area weight, and the source image assigned to that region. For each group, TreemapMix samples \(w=(w_1,\dots,w_K)\sim\operatorname{Dirichlet}(\alpha,\dots,\alpha)\), where \(w_k\ge 0\) and \(\sum_{k=1}^{K}w_k=1\). The components of $w$ are used as slot weights rather than as fixed source-image weights. The concentration parameter $\alpha$ controls the mixing strength: smaller $\alpha$ produces sparse, dominant-region mixtures, whereas larger $\alpha$ produces more balanced $K$-way mixtures.
+
+TreemapMix first forms class-balanced rows from the training set and then splits each row into groups of size $K$. This encourages diverse multi-class mixtures and reduces the tendency of frequent classes to dominate mixed samples. When $K\le C$, complete groups formed from a class-balanced row contain distinct labels by construction. Incomplete groups and other edge cases are handled as described in Appendix~\ref{app:labelmix-details}.
+
+For stable layout construction and for ranking-based supervision, TreemapMix sorts the sampled weights in ascending order: \refstepcounter{equation}\label{eq:ascending-weights}\(\lambda_1\le\lambda_2\le\cdots\le\lambda_K,\{\lambda_1,\dots,\lambda_K\}=\{w_1,\dots,w_K\}\)\textup{ (\theequation)}.
+The sorted weights define $K$ layout slots. Slot $i$ has area weight $\lambda_i$, with slot $1$ the smallest-area slot and slot $K$ the largest-area slot.
+Given the sorted weights, TreemapMix partitions the image canvas $\Omega=[0,W]\times[0,H]$ into non-overlapping rectangular boxes \(\mathcal{B}=\{B_1,\dots,B_K\}\) with \(|B_i|/(HW)\approx \lambda_i\), such that \(B_i\cap B_j=\emptyset\) for \(i\neq j\) and \(\bigcup_{i=1}^{K}B_i=\Omega\).
+We use a squarified treemap layout~\cite{squarifiedtreemap} to obtain area-proportional regions while avoiding extremely thin rectangles. This helps preserve useful semantic content inside each patch. The normalized treemap boxes are converted to integer pixel coordinates. If integer conversion yields zero-area boxes, TreemapMix falls back to a stripe layout that preserves the sampled weights. Additional implementation details are given in Appendix~\ref{app:labelmix-details}.
+
+To increase spatial diversity without changing the target weights, TreemapMix applies a random area-preserving symmetry transformation to the boxes. For square images, we sample from the dihedral group $D_4$. For non-square images, we use the shape-preserving subset consisting of the identity, a $180^\circ$ rotation, a horizontal flip, and a vertical flip.
+
+TreemapMix then generates $K$ cyclic views from each group. Let slot $i$ have weight $\lambda_i$, box $B_i$, and binary mask $M_i$. For cyclic view $s\in\{0,\dots,K-1\}$, define \refstepcounter{equation}\label{eq:cyclic-map}\(\pi_s(i)=1+\bigl((i+s-1)\bmod K\bigr)\)\textup{ (\theequation)}. The $s$-th mixed image is \(\tilde{x}^{(s)}=\sum_{i=1}^{K} M_i\odot \operatorname{Resize}(x_{\pi_s(i)},B_i)\), with sparse label-weight target \refstepcounter{equation}\label{eq:cyclic-target}\(\mathcal{T}^{(s)}=\{(y_{\pi_s(i)},\lambda_i)\}_{i=1}^{K}\)\textup{ (\theequation)}.
+Thus, in each cyclic view, the source image assigned to slot $i$ receives the slot weight $\lambda_i$ as its target weight.
+
+TreemapMix uses the $K$ cyclic views rather than all $K!$ image-to-slot assignments; Appendix~\ref{app:cyclic-views} gives additional intuition for this tractable design choice and for how cyclic permutation decouples source labels from fixed spatial slots.
+For complete groups, all $K$ cyclic views are retained. Appendix Lemma~\ref{lem:cyclic-balancing} formalizes the resulting slot-exposure balance and shows that, over the full cyclic orbit, the average TreemapMix-SCE target mass remains balanced over the participating labels. For TreemapMix-SCE, this prevents persistent label-weight bias. For TreemapMix-PL, when source labels are distinct, it likewise prevents persistent label-rank bias. The Plackett--Luce denominator terms remain prediction-dependent, so cyclic permutation does not remove ordinal competition; it only prevents a fixed source label from being permanently tied to a fixed slot. Pseudocode for the augmentation pipeline is given in Appendix~\ref{app:labelmix-details}.
+
+Handling of incomplete groups, integer-box conversion, layout fallback, and valid symmetry sets are described in Appendix~\ref{app:labelmix-details}. TreemapMix therefore produces $K$-way mixed images while preserving the number of training samples after class-balanced row construction. The output is a mixed image together with a sparse label-weight target. This target can be used directly as a soft distribution for cross-entropy, or aggregated over unique classes and interpreted as a ranked label list for Plackett--Luce training.
+
+\subsection{Soft TreemapMix Cross-Entropy}\label{sec:soft-ce}
+
+A TreemapMix image contains visual evidence from multiple source images, so we supervise it with a sparse soft target rather than a single hard label. For a TreemapMix sample $\tilde{x}$ with sparse target \(\mathcal{T}=\{(c_i,\eta_i)\}_{i=1}^{K}\), where \(\eta_i\ge 0\) and \(\sum_{i=1}^{K}\eta_i=1\), and where $c_i$ is the class assigned to slot $i$ and $\eta_i$ is its area weight, TreemapMix defines \refstepcounter{equation}\label{eq:soft-target}\(q_c=\sum_{i=1}^{K}\eta_i\mathbf{1}[c_i=c], p_c=p_\theta(c\mid\tilde{x})\)\textup{ (\theequation)}.
+For cyclic view $s$, we have $c_i=y_{\pi_s(i)}$ and $\eta_i=\lambda_i$. If all source labels are distinct, then $q_{c_i}=\eta_i$. If a class appears multiple times in the group, its weights are accumulated. Since the weights sum to one, $q\in\Delta^{C-1}$.
+We obtain the TreemapMix soft cross-entropy objective by minimizing the KL divergence~\cite{kullback1951} between $q$ and $p_\theta$. Since the entropy of $q$ is independent of the model parameters, this is equivalent to minimizing \refstepcounter{equation}\label{eq:lm-ce}\(\mathcal{L}_{\mathrm{TM\text{-}CE}}=-\sum_{c=1}^{C}q_c\log p_\theta(c\mid\tilde{x})=-\sum_{i=1}^{K}\eta_i\log p_\theta(c_i\mid\tilde{x})\)\textup{ (\theequation)}. For a mini-batch of size $B$, the average loss is \refstepcounter{equation}\label{eq:lm-ce-batch}\(\mathcal{L}_{\mathrm{TM\text{-}CE}}=-\frac{1}{B}\sum_{b=1}^{B}\sum_{i=1}^{K}\eta_{b,i}\log p_\theta(c_{b,i}\mid\tilde{x}_b)\)\textup{ (\theequation)}.
+Thus, TreemapMix-SCE treats the TreemapMix weights as calibrated class-probability targets and encourages predicted probability mass to match the mixed-image area weights.
+
+The logit gradient has the standard prediction-minus-target form: \refstepcounter{equation}\label{eq:lm-ce-grad}\(\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}CE}}}{\partial z_c}=p_c-q_c\)\textup{ (\theequation)}.
+Therefore, TreemapMix-SCE uses the full quantitative information in the TreemapMix target.
+For complete groups, the cyclic construction has two complementary effects on TreemapMix-SCE supervision. A randomly selected cyclic view retains the target variability induced by the Dirichlet sample, while the average over the full cyclic orbit is exactly balanced. Appendix Lemma~\ref{lem:ce-cyclic-variance} in Appendix~\ref{app:soft-ce} makes this distinction precise for distinct-label groups and shows how $\alpha$ controls the variance of a randomly sampled cyclic view. For a fixed rank position, the target variance is instead governed by the corresponding Dirichlet order statistic; the lemma concerns the marginal exposure obtained by sampling uniformly over cyclic views. Since the logit gradient is \(p_c-q_c\), the same target-side variance applies to the CE gradient when logits are fixed.
+
+\subsection{TreemapMix Plackett--Luce Loss}\label{sec:pl}
+
+Soft TreemapMix cross-entropy treats mixture weights as calibrated class probabilities. However, patch area may be an imperfect proxy for semantic evidence: a large region may contain mostly background, while a smaller region may contain a discriminative object part. We therefore also consider a ranking-based objective that uses TreemapMix weights as a weak ordinal signal. Instead of requiring the model to match the weights exactly, the Plackett--Luce objective encourages labels with larger target weights to rank above labels with smaller target weights.
+
+The PL objective is defined over unique target classes, which makes the loss well-defined even when a class appears more than once in a TreemapMix group. Given the sparse target $\mathcal{T}=\{(c_i,\eta_i)\}_{i=1}^{K}$, define the aggregated target mass \refstepcounter{equation}\label{eq:pl-aggregated-target}\(\rho_c=\sum_{i=1}^{K}\eta_i\mathbf{1}[c_i=c]\)\textup{ (\theequation)}.
+This aggregation is also used in implementation, so the PL objective is always defined over unique target classes rather than source-image instances.
+Let \(\mathcal{R}=\{c:\rho_c>0\}\) and \(L=|\mathcal{R}|\), and sort the unique target classes in descending order of aggregated weight: \refstepcounter{equation}\label{eq:descending-ranking}\(\rho_{r_1}\ge \rho_{r_2}\ge \cdots \ge \rho_{r_L}, r_1\succ r_2\succ\cdots\succ r_L\)\textup{ (\theequation)}. Ties are broken uniformly at random. Let $\mathcal{U}=\{1,\dots,C\}\setminus\mathcal{R}$ be the set of classes absent from the TreemapMix target. The unranked probability mass is \refstepcounter{equation}\label{eq:pu}\(p_{\mathcal U}=1-\sum_{j=1}^{L}p_{r_j}\)\textup{ (\theequation)}.
+Following the Plackett--Luce model~\cite{luce1959,plackett1975} and ListMLE-style objectives~\cite{listmle}, the descending TreemapMix-PL loss is \refstepcounter{equation}\label{eq:lm-pl-desc}\(\mathcal{L}_{\mathrm{TM\text{-}PL}}=-\sum_{\ell=1}^{L}\rho_{r_\ell}\log \frac{p_\theta(r_\ell\mid\tilde{x})}{p_{\mathcal U}+\sum_{j=\ell}^{L}p_\theta(r_j\mid\tilde{x})}\)\textup{ (\theequation)}.
+Similar to position-aware listwise objectives such as Position-Aware ListMLE~\cite{plistmle} and PLD~\cite{pld}, TreemapMix-PL weights each ranking term by its target importance. TreemapMix-SCE and TreemapMix-PL therefore use the same TreemapMix target in complementary ways: TreemapMix-SCE seeks \(p_\theta(c\mid\tilde{x})\approx q_c\), whereas TreemapMix-PL seeks \(r_1\succ r_2\succ\cdots\succ r_L\).
+
+For implementation, we use the ascending order. Let \(a_i=r_{L+1-i}\), \(\gamma_i=\rho_{a_i}\), and \(\gamma_1\le\gamma_2\le\cdots\le\gamma_L\). Thus, $a_1$ is the weakest ranked target class and $a_L$ is the strongest. Define \refstepcounter{equation}\label{eq:Di}\(D_i=p_{\mathcal U}+\sum_{j=1}^{i}p_{a_j}=1-\sum_{j=i+1}^{L}p_{a_j}\)\textup{ (\theequation)}. Then the loss becomes \refstepcounter{equation}\label{eq:lm-pl-asc}\(\mathcal{L}_{\mathrm{TM\text{-}PL}}=\sum_{i=1}^{L}\gamma_i\left[\log D_i-\log p_{a_i}\right]\)\textup{ (\theequation)}. If \refstepcounter{equation}\label{eq:Ti}\(T_i=\{a_{i+1},\dots,a_L\}\)\textup{ (\theequation)} denotes the set of classes stronger than $a_i$, then the logit gradient is \refstepcounter{equation}\label{eq:lm-pl-grad}\(\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_c}=\sum_{i=1}^{L}\gamma_i\left[\frac{p_c\bigl(1-\mathbf{1}[c\in T_i]\bigr)}{D_i}-\mathbf{1}[c=a_i]\right]\)\textup{ (\theequation)}.
+This gradient suppresses unranked classes, promotes the strongest ranked class, and regulates intermediate ranked classes through competition with stronger classes. The full likelihood derivation, ascending reindexing, and gradient proof are given in Appendix~\ref{app:pl}.
+
+When the target labels are distinct, \(L=K\) and the ascending PL weights satisfy \(\gamma_i=\lambda_i\). In this case, the sorted Dirichlet weights no longer act as calibrated probability targets; instead, they determine how much importance is assigned to each rank position. Appendix Lemma~\ref{lem:pl-order} in Appendix~\ref{app:pl} characterizes how \(\alpha\) controls this ranking emphasis through the order statistics of the sampled Dirichlet weights. Smaller $\alpha$ increases the gap between high- and low-rank weights, placing more emphasis on dominant labels. As $\alpha$ increases, the sorted weights concentrate near $1/K$, so in the distinct-label case the loss approaches a constant rescaling of an unweighted ListMLE-style objective.
+
+% \paragraph{Mixed objective:}
+For completeness, we also evaluate a convex combination of TreemapMix-CE and
+TreemapMix-PL. Let $\beta\in[0,1]$ denote the interpolation coefficient, where
+$\beta=1$ recovers TreemapMix-CE and $\beta=0$ recovers TreemapMix-PL. We
+define \refstepcounter{equation}\label{eq:lm-mix}\(\mathcal{L}_{\mathrm{TM\text{-}Mix}}=\beta\mathcal{L}_{\mathrm{TM\text{-}CE}}+(1-\beta)\mathcal{L}_{\mathrm{TM\text{-}PL}}\)\textup{ (\theequation)}.
+Using the ascending PL notation from Section~\ref{sec:pl}, this can be
+written as \refstepcounter{equation}\label{eq:lm-mix-asc}\(\mathcal{L}_{\mathrm{TM\text{-}Mix}}=\sum_{i=1}^{L}\gamma_i\left[(1-\beta)\log D_i-\log p_{a_i}\right]\)\textup{ (\theequation)}.
+where $a_i$ is the $i$-th ranked target class, $\gamma_i$ is its aggregated
+area-derived weight, and $D_i$ is the corresponding Plackett--Luce
+denominator. This objective is not intended as a separate contribution; we
+include it to test whether combining probability matching and rank matching
+improves the accuracy--calibration trade-off.
+
+\subsection{Dirichlet-Controlled Supervision}
+\label{sec:gradient-supervision}
+
+The same TreemapMix target induces two complementary supervision signals. TreemapMix-SCE uses the target quantitatively, matching predicted probability mass to area weights. TreemapMix-PL uses the target ordinally, converting area weights into a rank order over unique target classes.
+
+The Dirichlet concentration parameter $\alpha$ controls both the visual composition and the induced supervision. For TreemapMix-SCE, Appendix Lemma~\ref{lem:ce-cyclic-variance} shows that $\alpha$ controls random-view target variability in distinct-label groups, while cyclic permutation exactly balances the average target mass over the full cyclic orbit. For TreemapMix-PL, Appendix Lemma~\ref{lem:pl-order} shows that $\alpha$ controls the expected ranking emphasis through the sorted Dirichlet weights. Smaller $\alpha$ produces sharper dominant-label supervision, while larger $\alpha$ produces smoother CE targets and more uniform PL rank weights.
+
+This allows TreemapMix to use either a fixed Dirichlet concentration or an epoch-dependent schedule. Let \(t\in\{0,\dots,T-1\}\) denote the training epoch, and let \(\alpha(t)\) be the concentration parameter used to sample TreemapMix weights at epoch \(t\). We schedule \(\alpha(t)\) between two endpoints \(\alpha_{\min}\) and \(\alpha_{\max}\) using either a linear or cosine schedule. A forward schedule increases \(\alpha(t)\) from \(\alpha_{\min}\) to \(\alpha_{\max}\), giving a curriculum from sharp, dominant-region mixtures to smoother multi-label mixtures. A backward schedule decreases \(\alpha(t)\) from \(\alpha_{\max}\) to \(\alpha_{\min}\), starting with balanced mixtures and gradually emphasizing dominant regions. In both cases, cyclic permutation ensures that changing \(\alpha(t)\) changes the strength of each view's target or ranking signal without introducing persistent source-label-to-slot bias.

@@ -1,0 +1,7 @@
+\section{Limitations}
+The main limitation is that the baselines are not individually optimized for their best possible ImageNet-1K performance under each training horizon. The matched-budget protocol reduces confounding from recipe-specific tuning, but it also means the results should be interpreted as controlled comparisons rather than claims of globally optimal baseline performance. This limitation also applies to TreemapMix: we did not tune a standalone TreemapMix-specific training recipe, but instead used TreemapMix as an add-on to existing configurations. The comparison is therefore conservative with respect to TreemapMix-specific tuning, since better results may be possible with a dedicated recipe search. The long-horizon study is also limited to two backbones and reuses TreemapMix hyperparameters selected for the shorter schedule.
+TreemapMix uses class-balanced grouping to encourage distinct source labels in
+each mixed sample. We do not isolate the effect of this grouping strategy from
+the TreemapMix layout and supervision objectives. A stricter comparison would
+apply the same grouped sampling strategy to compatible baselines or ablate
+TreemapMix with and without class-balanced grouping.

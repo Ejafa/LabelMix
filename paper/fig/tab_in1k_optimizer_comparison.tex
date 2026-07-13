@@ -1,0 +1,41 @@
+\begin{table*}[t]
+  \centering
+\caption{ImageNet-1K optimizer comparison under matched settings. Across AdamW,
+Muon, and NAdamW, the same pattern largely holds: TreemapMix-PL tends to give
+the highest accuracy, while TreemapMix-SCE gives the lowest ECE for every
+model--optimizer pair. Accuracy is reported in percent and ECE in percentage
+points; bold marks the best mean within each row.}
+  \label{tab:in1k-optimizer-results}
+  \begin{tabular}{llcccccc}
+    \toprule
+    & & \multicolumn{2}{c}{Mixup+CutMix}
+      & \multicolumn{2}{c}{TreemapMix-SCE}
+      & \multicolumn{2}{c}{TreemapMix-PL} \\
+    \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
+    Model & Optimizer
+      & Acc. $\uparrow$ & ECE $\downarrow$
+      & Acc. $\uparrow$ & ECE $\downarrow$
+      & Acc. $\uparrow$ & ECE $\downarrow$ \\
+    \midrule
+    ViT-Wee
+      & AdamW  & 75.76 & 8.99 & 77.18 & \textbf{0.43} & \textbf{77.75} & 5.41 \\
+      & Muon   & 77.92 & 9.88 & 78.80 & \textbf{2.04} & \textbf{79.05} & 5.93 \\
+      & NAdamW & 76.30 & 9.29 & 77.48 & \textbf{0.94} & \textbf{78.16} & 5.44 \\
+    \midrule
+    ViT-Little
+      & AdamW  & 78.77 & 8.11 & 79.50 & \textbf{1.36} & \textbf{79.93} & 5.96 \\
+      & Muon   & 80.27 & 8.61 & 80.72 & \textbf{3.05} & \textbf{80.87} & 6.57 \\
+      & NAdamW & 78.80 & 7.65 & 79.72 & \textbf{1.90} & \textbf{80.09} & 6.23 \\
+    \midrule
+    ViT-Medium
+      & AdamW  & 79.89 & 8.25 & 80.33 & \textbf{0.87} & \textbf{80.71} & 5.93 \\
+      & Muon   & 80.98 & 7.86 & 81.42 & \textbf{2.77} & \textbf{81.43} & 6.49 \\
+      & NAdamW & 80.04 & 7.69 & 80.73 & \textbf{2.09} & \textbf{81.01} & 6.39 \\
+    \midrule
+    ViT-Betwixt
+      & AdamW  & 81.19 & 8.11 & 81.00 & \textbf{2.02} & \textbf{81.51} & 7.05 \\
+      & Muon   & 81.71 & 7.32 & \textbf{81.85} & \textbf{3.32} & 81.79 & 7.15 \\
+      & NAdamW & 81.13 & 7.50 & 81.26 & \textbf{2.75} & \textbf{81.80} & 7.18 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}

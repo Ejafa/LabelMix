@@ -1,0 +1,31 @@
+\begin{table*}[t]
+  \centering
+  \scriptsize
+  \setlength{\tabcolsep}{4.5pt}
+  \caption{Full ImageNet-1K Brier score results under the matched 110-epoch
+  protocol. Values are mean $\pm$ one sample standard deviation over three
+  seeds. Bold marks the best mean within each model column.}
+  \label{tab:in1k-full-results-brier}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Method & ViT-Wee $\downarrow$ & ViT-Little $\downarrow$ & ViT-Medium $\downarrow$ & ViT-Betwixt $\downarrow$ \\
+    \midrule
+    Mixup+CutMix & $0.342 \pm 0.002$ & $0.305 \pm 0.001$ & $0.292 \pm 0.003$ & $0.277 \pm 0.002$ \\
+    Mixup & $0.340 \pm 0.002$ & $0.308 \pm 0.001$ & $0.294 \pm 0.001$ & $0.280 \pm 0.001$ \\
+    CutMix & $0.326 \pm 0.013$ & $0.296 \pm 0.003$ & $0.289 \pm 0.003$ & $0.278 \pm 0.008$ \\
+    RICAP & $0.319 \pm 0.002$ & $0.303 \pm 0.002$ & $0.304 \pm 0.002$ & $0.299 \pm 0.001$ \\
+    FMix & $0.330 \pm 0.002$ & $0.293 \pm 0.000$ & $0.283 \pm 0.001$ & $0.273 \pm 0.001$ \\
+    GridMix & $0.335 \pm 0.002$ & $0.303 \pm 0.001$ & $0.294 \pm 0.002$ & $0.284 \pm 0.001$ \\
+    ResizeMix & $0.328 \pm 0.001$ & $0.293 \pm 0.002$ & $0.281 \pm 0.002$ & $0.269 \pm 0.001$ \\
+    SaliencyMix & $0.327 \pm 0.001$ & $0.293 \pm 0.001$ & $0.283 \pm 0.002$ & $0.272 \pm 0.000$ \\
+    SmoothMix & $0.340 \pm 0.003$ & $0.299 \pm 0.001$ & $0.288 \pm 0.001$ & $0.275 \pm 0.001$ \\
+    TokenMix & $0.336 \pm 0.003$ & $0.297 \pm 0.000$ & $0.285 \pm 0.001$ & $0.272 \pm 0.001$ \\
+    TLA & $0.327 \pm 0.003$ & $0.292 \pm 0.002$ & $0.280 \pm 0.001$ & $0.269 \pm 0.000$ \\
+    TreemapMix-SCE & $0.314 \pm 0.000$ & $0.289 \pm 0.001$ & $0.276 \pm 0.001$ & $\mathbf{0.268 \pm 0.002}$ \\
+    TreemapMix-mixed & $0.313 \pm 0.002$ & $\mathbf{0.288 \pm 0.003}$ & $\mathbf{0.275 \pm 0.001}$ & $0.269 \pm 0.000$ \\
+    TreemapMix-PL & $\mathbf{0.313 \pm 0.003}$ & $0.288 \pm 0.001$ & $0.277 \pm 0.001$ & $0.271 \pm 0.002$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}

@@ -1,0 +1,96 @@
+\begin{table*}[t]
+  \centering
+  \caption{ViT data-augmentation hyperparameters for the ImageNet-1K main
+  comparison recipes. A checkmark in the Single-Image Aug. column indicates
+  that the recipe includes standard image-only transforms such as cropping,
+  flipping, scaling, color perturbations, AutoAugment-style transformations
+  \citep{cubukRandAugmentPracticalAutomated2019}, and random erasing. The
+  fixed auxiliary RICAP and TreemapMix settings are described in
+  the appendix text.}
+  \label{tab:baseline-hparams-aug}
+
+  \begin{tabular}{lccccccc}
+    \toprule
+    Config
+      & \makecell{Single-Image\\Aug}
+      & Mixup
+      & CutMix
+      & \makecell{Mixup\\Prob}
+      & \makecell{CutMix\\Prob}
+      & \makecell{RICAP\\Prob} \\
+    \midrule
+    No Aug
+      & $\times$
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0 \\
+
+    \makecell[l]{Single-Image Aug}
+      & $\checkmark$
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0 \\
+
+    Mixup
+      & $\checkmark$
+      & 0.8
+      & 0.0
+      & 1.0
+      & 0.0
+      & 0.0 \\
+
+    CutMix
+      & $\checkmark$
+      & 0.0
+      & 1.0
+      & 0.0
+      & 1.0
+      & 0.0 \\
+
+    \makecell[l]{Mixup+CutMix}
+      & $\checkmark$
+      & 0.8
+      & 1.0
+      & 0.5
+      & 0.5
+      & 0.0 \\
+
+    RICAP
+      & $\checkmark$
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.5 \\
+
+    \midrule
+    \makecell[l]{TreemapMix-SCE}
+      & $\checkmark$
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0 \\
+
+    \makecell[l]{TreemapMix-PL}
+      & $\checkmark$
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0 \\
+
+    \makecell[l]{TreemapMix-mixed}
+      & $\checkmark$
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0
+      & 0.0 \\
+    \bottomrule
+  \end{tabular}%
+\end{table*}

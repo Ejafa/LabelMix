@@ -1,0 +1,32 @@
+\begin{table*}[t]
+  \centering
+  \scriptsize
+  \setlength{\tabcolsep}{4.5pt}
+  \caption{Full ImageNet-1K expected calibration error results under the
+  matched 110-epoch protocol. ECE is reported in percentage points using
+  15 bins. Values are mean $\pm$ one sample standard deviation over three
+  seeds. Bold marks the best mean within each model column.}
+  \label{tab:in1k-full-results-ece}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Method & ViT-Wee $\downarrow$ & ViT-Little $\downarrow$ & ViT-Medium $\downarrow$ & ViT-Betwixt $\downarrow$ \\
+    \midrule
+    Mixup+CutMix & $9.05 \pm 0.47$ & $7.53 \pm 0.10$ & $8.28 \pm 0.51$ & $7.91 \pm 0.35$ \\
+    Mixup & $8.69 \pm 0.20$ & $7.54 \pm 0.15$ & $7.92 \pm 0.20$ & $7.70 \pm 0.11$ \\
+    CutMix & $6.81 \pm 0.78$ & $5.37 \pm 0.40$ & $6.39 \pm 0.96$ & $5.40 \pm 0.38$ \\
+    RICAP & $3.11 \pm 0.02$ & $4.43 \pm 0.11$ & $5.96 \pm 0.43$ & $6.44 \pm 0.11$ \\
+    FMix & $6.40 \pm 0.19$ & $5.01 \pm 0.10$ & $5.44 \pm 0.26$ & $5.12 \pm 0.26$ \\
+    GridMix & $7.04 \pm 0.15$ & $5.72 \pm 0.17$ & $5.66 \pm 0.54$ & $5.48 \pm 0.32$ \\
+    ResizeMix & $7.18 \pm 0.28$ & $5.40 \pm 0.74$ & $6.06 \pm 0.17$ & $5.68 \pm 0.55$ \\
+    SaliencyMix & $6.41 \pm 0.43$ & $5.09 \pm 0.09$ & $5.39 \pm 0.16$ & $4.57 \pm 0.29$ \\
+    SmoothMix & $8.52 \pm 0.06$ & $6.93 \pm 0.18$ & $7.54 \pm 0.06$ & $6.88 \pm 0.21$ \\
+    TokenMix & $7.60 \pm 0.65$ & $5.86 \pm 0.65$ & $5.89 \pm 0.75$ & $5.53 \pm 0.59$ \\
+    TLA & $5.74 \pm 0.36$ & $4.68 \pm 0.03$ & $4.85 \pm 0.17$ & $4.53 \pm 0.36$ \\
+    TreemapMix-SCE & $\mathbf{1.04 \pm 0.35}$ & $\mathbf{1.89 \pm 0.23}$ & $\mathbf{1.95 \pm 0.25}$ & $\mathbf{2.31 \pm 0.41}$ \\
+    TreemapMix-mixed & $2.63 \pm 0.30$ & $3.54 \pm 0.05$ & $3.78 \pm 0.26$ & $4.26 \pm 0.13$ \\
+    TreemapMix-PL & $5.63 \pm 0.18$ & $6.35 \pm 0.10$ & $6.45 \pm 0.05$ & $6.96 \pm 0.25$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}

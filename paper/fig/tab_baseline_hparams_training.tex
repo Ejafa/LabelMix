@@ -1,0 +1,17 @@
+\begin{table*}[t]
+  \centering
+  \caption{ViT baseline optimizer and training hyperparameters from the YAML
+  configs in \texttt{assets/configs}. Backend-specific runtime defaults inside
+  \texttt{timm} are not expanded here.}
+  \label{tab:baseline-hparams-train}
+  \begin{tabular}{lcccccc}
+    \toprule
+    Model & Opt. & Base LR & LR Decay & WD & DropPath & EMA \\
+    \midrule
+    ViT-Wee & NAdamW & 1.5e-3 & cosine & 0.06 & 0.2 & yes \\
+    ViT-Little & NAdamW & 1.5e-3 & cosine & 0.06 & 0.2 & no \\
+    ViT-Medium & NAdamW & 1.5e-3 & cosine & 0.06 & 0.2 & no \\
+    ViT-Betwixt & NAdamW & 1.5e-3 & cosine & 0.08 & 0.2 & no \\
+    \bottomrule
+  \end{tabular}%
+\end{table*}

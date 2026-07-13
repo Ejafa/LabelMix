@@ -1,0 +1,17 @@
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{../evaluation/data/processed/figures/diagnostic_attribution/class_286/figure.pdf}\\[3pt]
+  \includegraphics[width=\textwidth]{../evaluation/data/processed/figures/diagnostic_attribution/class_834/figure.pdf}\\[3pt]
+  \includegraphics[width=\textwidth]{../evaluation/data/processed/figures/diagnostic_attribution/class_449/figure.pdf}
+\caption{Diagnostic attribution visualizations for three ImageNet-1K target
+classes. Each row shows the boxed input followed by Gradient$\times$Input
+overlays for Mixup+CutMix, RICAP,
+TreemapMix-SCE, and TreemapMix-PL. Red boxes mark the target-class source patch;
+brighter regions indicate larger attribution magnitude for the corresponding
+target-class logit. Values below panels show predicted target-class
+probabilities, and row labels report target patch area. In these examples,
+TreemapMix variants more often concentrate attribution on the target patch;
+TreemapMix-PL produces sharper probabilities, whereas TreemapMix-SCE remains
+more moderate.}
+  \label{fig:feature-space-analysis}
+\end{figure*}

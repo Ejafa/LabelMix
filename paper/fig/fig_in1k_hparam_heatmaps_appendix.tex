@@ -1,0 +1,14 @@
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{../evaluation/data/processed/figures/hyperparameter/hp_sensitivity_heatmaps_top1_vit_wee.pdf}\\[8pt]
+  \includegraphics[width=\textwidth]{../evaluation/data/processed/figures/hyperparameter/hp_sensitivity_heatmaps_ece_vit_wee.pdf}
+  \caption{Appendix heatmaps for the ImageNet-1K TreemapMix hyperparameter
+  sweep on ViT-Wee. ECE is measured using 15 bins. The top row shows Top-1 over the full $(K,\alpha)$ grid,
+  and the bottom row shows ECE over the same grid. Both plots use the same
+  simplified sweep protocol as the main-text line plots: we do not apply
+  aspect filtering and we do not use $\alpha$ or $K$ scheduling, so these
+  absolute values are expected to be somewhat worse than the tuned main
+  results. The heatmaps show that for best results in terms of ECE and accuracy, small $K$ values together with moderately small $\alpha$ values should be used.
+  }
+  \label{fig:in1k-hparam-heatmaps-appendix}
+\end{figure*}

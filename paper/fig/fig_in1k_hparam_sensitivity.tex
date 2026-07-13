@@ -1,0 +1,16 @@
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{../evaluation/data/processed/figures/hyperparameter/hp_sensitivity_vit_wee_legend.pdf}\\[0pt]
+  \includegraphics[width=0.9\textwidth]{../evaluation/data/processed/figures/hyperparameter/hp_sensitivity_vit_wee.pdf}\\[8pt]
+  \includegraphics[width=0.9\textwidth]{../evaluation/data/processed/figures/hyperparameter/hp_sensitivity_k_vit_wee.pdf}
+\caption{ImageNet-1K hyperparameter sensitivity of TreemapMix on ViT-Wee.
+The top row sweeps $\alpha$ and marginalizes over $k$, while the bottom row
+sweeps $k$ and marginalizes over $\alpha$. Curves show the median across the
+marginalized hyperparameter, and shaded regions show the corresponding min--max
+range. The best accuracy--calibration trade-off occurs for small $k$ and
+moderately small $\alpha$. Full $(k,\alpha)$ heatmaps for Top-1 accuracy and
+ECE are shown in Appendix Figure~\ref{fig:in1k-hparam-heatmaps-appendix}. These
+experiments use the simplified sweep protocol without aspect-ratio filtering or
+$k$/$\alpha$ scheduling.}
+  \label{fig:in1k-hparam-sensitivity}
+\end{figure*}

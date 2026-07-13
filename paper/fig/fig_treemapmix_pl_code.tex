@@ -1,0 +1,30 @@
+\begin{figure}[t]
+\centering
+\footnotesize
+\begin{verbatim}
+import torch.nn.functional as F
+
+
+def treemapmix_pl_loss(logits, labels, weights, eps=1e-12):
+    """
+    logits: model logits, shape (B, C)
+    labels: ranked target class indices, shape (B, K)
+    weights: ranked target area weights, shape (B, K)
+    eps: small constant for numerical stability
+    labels and weights are ordered from weakest to strongest
+    target class.
+    """
+    log_probs = F.log_softmax(logits, dim=1)
+    ranked_log_probs = log_probs.gather(dim=1, index=labels)
+    ranked_probs = ranked_log_probs.exp()
+
+    unranked_mass = 1.0 - ranked_probs.sum(dim=1, keepdim=True)
+    denom_log = torch.log(unranked_mass + torch.cumsum(ranked_probs, dim=1) + eps)
+
+    per_rank_losses = denom_log - ranked_log_probs
+    losses = (weights * per_rank_losses).sum(dim=1)
+    return losses.mean()
+\end{verbatim}
+\caption{TreemapMix-PL. The loss matches the area-induced ranking of the TreemapMix target classes.}
+\label{fig:treemapmix-pl-code}
+\end{figure}

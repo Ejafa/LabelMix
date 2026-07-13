@@ -53,8 +53,8 @@ Output
 ``evaluation/data/processed/figures/augmentation_showcase/``
     ├── aug_comparison_clean/
     │   ├── metadata.json
-    │   ├── none__panel1_256.png  / _1024.png
-    │   ├── mixup__panel1_256.png / _1024.png
+    │   ├── none__panel1_256.{png,pdf}  / _1024.{png,pdf}
+    │   ├── mixup__panel1_256.{png,pdf} / _1024.{png,pdf}
     │   ├── ...
     ├── treemapmix_randomness/
     │   ├── metadata.json
@@ -892,6 +892,16 @@ def _save_png(arr_hwc_uint8: np.ndarray, path: str, *, overwrite: bool = False) 
     Image.fromarray(arr_hwc_uint8).save(path, format="PNG", optimize=False)
 
 
+def _save_pdf(arr_hwc_uint8: np.ndarray, path: str, *, overwrite: bool = False) -> None:
+    """Write a paper-ready PDF wrapper for an HWC uint8 image."""
+    if os.path.exists(path) and not overwrite:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    Image.fromarray(arr_hwc_uint8).convert("RGB").save(
+        path, format="PDF", resolution=300.0,
+    )
+
+
 def _save_tensor_at_sizes(
     t: torch.Tensor,
     dir_path: str,
@@ -900,19 +910,31 @@ def _save_tensor_at_sizes(
     *,
     overwrite: bool = False,
 ) -> List[str]:
-    """Save ``t`` (CHW float) as ``dir_path/<stem>_<size>.png`` for each size.
+    """Save ``t`` as matching PNG and PDF assets at every requested size.
 
     Returns the list of paths that were written or already existed.
     """
     base = _tensor_to_uint8_hwc(t)
     written: List[str] = []
     for tile_px in tile_sizes:
-        out_path = os.path.join(dir_path, f"{stem}_{tile_px}.png")
-        if overwrite or not os.path.exists(out_path):
-            _save_png(_resize_uint8(base, tile_px), out_path, overwrite=overwrite)
-            _logger.info("Wrote %s", out_path)
-        written.append(out_path)
+        resized = _resize_uint8(base, tile_px)
+        png_path = os.path.join(dir_path, f"{stem}_{tile_px}.png")
+        pdf_path = os.path.join(dir_path, f"{stem}_{tile_px}.pdf")
+        for out_path, save in ((png_path, _save_png), (pdf_path, _save_pdf)):
+            if overwrite or not os.path.exists(out_path):
+                save(resized, out_path, overwrite=overwrite)
+                _logger.info("Wrote %s", out_path)
+            written.append(out_path)
     return written
+
+
+def _assets_exist(dir_path: str, stem: str, tile_sizes: Sequence[int]) -> bool:
+    """Return whether every PNG/PDF sibling exists for ``stem``."""
+    return all(
+        os.path.exists(os.path.join(dir_path, f"{stem}_{size}.{suffix}"))
+        for size in tile_sizes
+        for suffix in ("png", "pdf")
+    )
 
 
 def _write_metadata(dir_path: str, meta: Dict) -> None:
@@ -1123,15 +1145,13 @@ def render_aug_comparison(
         except (OSError, json.JSONDecodeError):
             overwrite_stale_comparison = True
 
-    # Skip compositing entirely if every PNG already exists.
+    # Skip compositing entirely if every PNG/PDF pair already exists.
     all_paths_exist = not overwrite_stale_comparison
     for aug in _AUG_ROW_ORDER:
         for p in range(num_panels):
             stem = f"{aug}__panel{p+1}"
-            for tp in cfg.tile_sizes:
-                if not os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png")):
-                    all_paths_exist = False
-                    break
+            if not _assets_exist(dir_path, stem, cfg.tile_sizes):
+                all_paths_exist = False
             if not all_paths_exist:
                 break
         if not all_paths_exist:
@@ -1169,7 +1189,7 @@ def render_aug_comparison(
                 })
     else:
         # We still want metadata.json refreshed even if PNGs were cached.
-        _logger.info("%s: all PNGs already present, refreshing metadata only.", group)
+        _logger.info("%s: all assets already present, refreshing metadata only.", group)
         for aug in _AUG_ROW_ORDER:
             for p in range(num_panels):
                 files_meta.append({
@@ -1241,11 +1261,7 @@ def render_treemapmix_randomness(
     files_meta: List[Dict] = []
     for p in range(num_panels):
         stem = f"panel{p+1:02d}"
-        existing = [
-            os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
-            for tp in cfg.tile_sizes
-        ]
-        if overwrite_stale_cache or not all(existing):
+        if overwrite_stale_cache or not _assets_exist(dir_path, stem, cfg.tile_sizes):
             # Deterministic, independent seed per panel.
             torch.manual_seed(cfg.seed + p * 7919)
             np.random.seed(cfg.seed + p * 7919)
@@ -1335,11 +1351,7 @@ def render_treemapmix_k_sweep(
     files_meta: List[Dict] = []
     for i, k in enumerate(k_values):
         stem = f"k{k:02d}"
-        existing = [
-            os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
-            for tp in cfg.tile_sizes
-        ]
-        if overwrite_stale_cache or not all(existing):
+        if overwrite_stale_cache or not _assets_exist(dir_path, stem, cfg.tile_sizes):
             # Re-seed per k so the layout isn't identical across panels.
             torch.manual_seed(cfg.seed + i * 13)
             np.random.seed(cfg.seed + i * 13)
@@ -1457,11 +1469,7 @@ def render_treemapmix_alpha_sweep(
     for alpha in alpha_values:
         alpha = float(alpha)
         stem = _alpha_stem(alpha)
-        existing = [
-            os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
-            for tp in cfg.tile_sizes
-        ]
-        if overwrite_stale_cache or not all(existing):
+        if overwrite_stale_cache or not _assets_exist(dir_path, stem, cfg.tile_sizes):
             # Same seed base for every alpha: alpha changes the ranked
             # region weights, not the chosen source images or high-level seed.
             torch.manual_seed(cfg.seed + 104729)

@@ -1,0 +1,825 @@
+%%%%%%%%%%%% method
+
+\section{TreemapMix Augmentation Details}\label{app:labelmix-details}
+
+This appendix provides implementation details omitted from the main Method section. We use the notation introduced in Section~\ref{sec:method}.
+
+\begin{algorithm}[t]
+\caption{TreemapMix augmentation}
+\label{alg:labelmix}
+\small
+\begin{algorithmic}[1]
+\Require dataset \(\mathcal{D}\), group size \(K\), concentration \(\alpha\), image size \(H\times W\)
+\State build class-balanced rows and split them into groups of size \(K\)
+\For{each group \(\mathcal{G}=\{(x_k,y_k)\}_{k=1}^{K}\)}
+    \State sample \(w\sim\operatorname{Dirichlet}(\alpha,\ldots,\alpha)\)
+    \State sort weights into \(\lambda_1\le\cdots\le\lambda_K\)
+    \State construct boxes \(B_1,\dots,B_K\) with \(|B_i|/(HW)\approx\lambda_i\)
+    \State apply a random valid symmetry transform to the boxes
+    \For{\(s=0,\ldots,K-1\)}
+        \State assign each source image \(x_{\pi_s(i)}\) to slot \(i\), for \(i=1,\dots,K\)
+        \State render \(\tilde{x}^{(s)}=\sum_i M_i\odot\operatorname{Resize}(x_{\pi_s(i)},B_i)\)
+        \State output \(\bigl(\tilde{x}^{(s)},\{(y_{\pi_s(i)},\lambda_i)\}_{i=1}^{K}\bigr)\)
+    \EndFor
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Class-balanced row construction}
+
+Let the training dataset be \(\mathcal{D}=\{(x_n,y_n)\}_{n=1}^{N_{\mathrm{data}}}\), where \(y_n\in\{1,\dots,C\}\), and let \(\mathcal{I}_c=\{n:y_n=c\}\) be the set of dataset indices belonging to class $c$. A class-balanced row is constructed by sampling one example from each class. For imbalanced datasets, minority classes may be sampled with replacement, while majority classes may be subsampled across rows, so that every class contributes equally to each row.
+
+Each row is shuffled and split into groups of size $K$. When $K\le C$, complete groups formed from a class-balanced row contain distinct labels by construction, because each class appears at most once in the row. This encourages diverse multi-class mixtures and avoids repeated target classes in most TreemapMix groups.
+
+\subsection{Incomplete groups and row-size preservation}
+
+Suppose a row contains $N_{\mathrm{row}}$ samples. Write \(N_{\mathrm{row}}=K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor+r\), where \(0\le r<K\). TreemapMix processes the first \(K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor\)
+samples as complete groups of size $K$. If $r>0$, the remaining $r$ samples are padded with $K-r$ additional samples from the same row to form a temporary group of size $K$. Whenever possible, padding samples are chosen so that their labels are distinct from the remaining $r$ labels. If this is not possible, repeated labels are allowed. Repeated labels are handled by target aggregation in TM-CE and TM-PL, as described in Sections~\ref{sec:soft-ce} and~\ref{sec:pl}.
+
+TreemapMix generates $K$ cyclic views from the temporary group but retains only the first $r$ outputs. Therefore, the total number of final TreemapMix samples contributed by the row is \(K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor+r=N_{\mathrm{row}}\).
+Thus, the number of TreemapMix outputs matches the number of samples in the constructed row stream, even when a row size is not divisible by $K$.
+
+\subsection{Integer box conversion and layout fallback}
+
+The squarified treemap is first computed in normalized coordinates. Let \(\bar{B}_i=(\bar{x}_i,\bar{y}_i,\bar{w}_i,\bar{h}_i)\) denote the normalized rectangle for slot $i$. We convert it to an integer pixel box \(B_i=(x_i^{(0)},y_i^{(0)},x_i^{(1)},y_i^{(1)})\). Because independent rounding can introduce gaps or overlaps, shared boundaries are snapped consistently. After conversion, the boxes satisfy \(B_i\cap B_j=\emptyset\) for \(i\neq j\) and \(\bigcup_{i=1}^{K}B_i=[0,W]\times[0,H]\).
+
+A converted layout is considered valid if every box has positive area. Equivalently, for integer boxes, every box must have width and height at least one pixel. If the treemap layout fails this validity check, TreemapMix falls back to a stripe layout. The stripe layout partitions the canvas along one axis according to the sorted weights $\lambda_1,\dots,\lambda_K$, then applies the same integer-boundary snapping procedure. This fallback preserves a valid full-canvas tiling and maintains the sampled area weights up to rounding error.
+
+\subsection{Symmetry transformations}
+
+For square images, TreemapMix samples from the dihedral group
+\[
+\begin{aligned}
+D_4=\{&
+\text{identity},\space
+90^\circ\text{ rotation},\space
+180^\circ\text{ rotation},\space
+270^\circ\text{ rotation},\\
+&
+\text{horizontal flip},\space
+\text{vertical flip},\space
+\text{transpose},\space
+\text{anti-transpose}
+\}.
+\end{aligned}
+\]
+For non-square images, TreemapMix uses the shape-preserving subset
+\[
+\{
+\text{identity},\space
+180^\circ\text{ rotation},\space
+\text{horizontal flip},\space
+\text{vertical flip}
+\}.
+\]
+These transformations preserve region areas, so they increase spatial diversity without changing the TreemapMix target.
+
+\subsection{Cyclic views and slot exposure}\label{app:cyclic-views}
+
+Cyclic views are a tractable alternative to enumerating all $K!$ image-to-slot assignments. If an epoch contains $G$ complete TreemapMix groups, full permutation enumeration would produce $K!G$ mixed images, increasing the sample count by \(\frac{K!G}{KG}=(K-1)!\). In contrast, cyclic TreemapMix produces exactly $K$ views per group, giving $KG$ mixed images and preserving the number of training samples after class-balanced row construction.
+
+Cyclic permutation is designed to decouple source labels from fixed spatial slots. Although any individual mixed view may assign a class to a small or large region, the full cyclic orbit exposes every source image to every slot exactly once. Therefore, when the source labels in a group are distinct, every participating class is paired once with every area weight and, for PL training, every rank position induced by the sorted slot weights. When labels repeat, the same statement holds at the source-image level, and class-level targets are obtained by accumulating repeated labels. Appendix Lemma~\ref{lem:cyclic-balancing} formalizes the resulting slot-exposure balance.
+
+\section{Soft TreemapMix Cross-Entropy Derivations}\label{app:soft-ce}
+
+We use the sparse target notation from Section~\ref{sec:soft-ce}. For one TreemapMix sample, let \(\mathcal{T}=\{(c_i,\eta_i)\}_{i=1}^{K}\), where \(\eta_i\ge 0\) and \(\sum_{i=1}^{K}\eta_i=1\),
+where $c_i$ is the class assigned to slot $i$ and $\eta_i$ is the corresponding slot weight. For cyclic view $s$, we have $c_i=y_{\pi_s(i)}$ and $\eta_i=\lambda_i$.
+
+\subsection{KL derivation}
+
+The sparse target distribution is \(q_c=\sum_{i=1}^{K}\eta_i\mathbf{1}[c_i=c]\).
+It is a valid probability distribution because
+\[
+\sum_{c=1}^{C}q_c
+=
+\sum_{c=1}^{C}
+\sum_{i=1}^{K}
+\eta_i\mathbf{1}[c_i=c]
+=
+\sum_{i=1}^{K}
+\eta_i
+\sum_{c=1}^{C}
+\mathbf{1}[c_i=c]
+=
+\sum_{i=1}^{K}\eta_i
+=
+1.
+\]
+Hence $q=(q_1,\dots,q_C)$ lies on the probability simplex.
+
+The KL divergence from $q$ to $p_\theta$ is
+\[
+D_{\mathrm{KL}}(q\|p_\theta)
+=
+\sum_{c=1}^{C}
+q_c\log\frac{q_c}{p_\theta(c\mid\tilde{x})}
+=
+\sum_{c=1}^{C}q_c\log q_c
+-
+\sum_{c=1}^{C}q_c\log p_\theta(c\mid\tilde{x}).
+\]
+The first term is independent of $\theta$, so minimizing the KL divergence is equivalent to minimizing the dense soft cross-entropy
+\[
+\mathcal{L}_{\mathrm{TM\text{-}CE}}
+=
+-\sum_{c=1}^{C}
+q_c\log p_\theta(c\mid\tilde{x}).
+\]
+Substituting the sparse target definition gives
+\[
+\begin{aligned}
+\mathcal{L}_{\mathrm{TM\text{-}CE}}
+&=
+-\sum_{c=1}^{C}
+\left(
+\sum_{i=1}^{K}
+\eta_i\mathbf{1}[c_i=c]
+\right)
+\log p_\theta(c\mid\tilde{x}) \\
+&=
+-\sum_{i=1}^{K}
+\eta_i\log p_\theta(c_i\mid\tilde{x}),
+\end{aligned}
+\]
+which is the sparse form in \eqref{eq:lm-ce}. For a mini-batch of size $B$,
+\[
+\mathcal{L}_{\mathrm{TM\text{-}CE}}
+=
+-\frac{1}{B}
+\sum_{b=1}^{B}
+\sum_{i=1}^{K}
+\eta_{b,i}\log p_\theta(c_{b,i}\mid\tilde{x}_b).
+\]
+
+\subsection{Gradient derivation}
+
+For one TreemapMix sample, write
+\[
+\mathcal{L}_{\mathrm{TM\text{-}CE}}
+=
+-\sum_{c=1}^{C}q_c\log p_c,
+\qquad
+p_c=
+\frac{\exp(z_c)}{\sum_{j=1}^{C}\exp(z_j)}.
+\]
+Using
+\[
+\log p_c
+=
+z_c-\log\sum_{j=1}^{C}\exp(z_j),
+\]
+we obtain
+\[
+\mathcal{L}_{\mathrm{TM\text{-}CE}}
+=
+-\sum_{c=1}^{C}q_c z_c
++
+\log\sum_{j=1}^{C}\exp(z_j),
+\]
+because $\sum_{c=1}^{C}q_c=1$. Differentiating with respect to $z_i$ gives
+\[
+\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}CE}}}{\partial z_i}
+=
+-q_i
++
+\frac{\exp(z_i)}{\sum_{j=1}^{C}\exp(z_j)}
+=
+p_i-q_i.
+\]
+Using the sparse target definition,
+\[
+\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}CE}}}{\partial z_i}
+=
+p_\theta(i\mid\tilde{x})
+-
+\sum_{j=1}^{K}
+\eta_j\mathbf{1}[c_j=i].
+\]
+For a mini-batch of size $B$,
+\[
+\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}CE}}}{\partial z_{b,c}}
+=
+\frac{1}{B}
+\left[
+p_\theta(c\mid\tilde{x}_b)
+-
+\sum_{i=1}^{K}
+\eta_{b,i}\mathbf{1}[c_{b,i}=c]
+\right].
+\]
+
+\subsection{Random cyclic-view target variance}
+
+\refstepcounter{lemma}\label{lem:ce-cyclic-variance}
+\paragraph{Lemma~\thelemma\ (Random cyclic-view and cyclic-average target variance).}
+Assume the $K$ source labels in a TreemapMix group are distinct, and let \(q_c^{(s)}=\sum_{i=1}^{K}\lambda_i\mathbf{1}[y_{\pi_s(i)}=c]\) be the TreemapMix-SCE target mass for class $c$ in cyclic view $s$. Conditioned on the source labels, if $c$ is a participating class and $s$ is sampled uniformly from $\{0,\dots,K-1\}$, then \(\mathbb{E}_{w,s}[q_c^{(s)}]=\frac{1}{K}\) and \(\operatorname{Var}_{w,s}(q_c^{(s)})=\frac{K-1}{K^2(K\alpha+1)}\). Moreover, averaging over the full cyclic orbit gives \(\frac{1}{K}\sum_{s=0}^{K-1}q_c^{(s)}=\frac{1}{K}\), so the cyclic-average target mass has zero variance conditioned on the source labels. For an absent class, \(q_c^{(s)}=0\) for all \(s\).
+
+\paragraph{Proof.}
+
+We prove Lemma~\ref{lem:ce-cyclic-variance}. Assume the $K$ source labels are distinct, and let $c=y_k$ be a participating class. For each cyclic view $s$, class $c$ appears in exactly one slot. Since the cyclic map visits every slot exactly once as $s$ ranges from $0$ to $K-1$, sampling $s$ uniformly makes the slot index containing class $c$ uniformly distributed over $\{1,\dots,K\}$. Therefore, \(q_c^{(s)}=\lambda_I\), where \(I\sim\operatorname{Uniform}\{1,\dots,K\}\).
+Because $(\lambda_1,\dots,\lambda_K)$ is a sorted permutation of $(w_1,\dots,w_K)$, a uniformly selected sorted component $\lambda_I$ has the same marginal distribution as a uniformly selected unsorted component $w_J$. By exchangeability of the symmetric Dirichlet distribution, this marginal distribution is the same as that of any component $w_j$. Hence
+\(\mathbb{E}_{w,s}[q_c^{(s)}]=\mathbb{E}[w_j]=\frac{1}{K}\).
+For a symmetric Dirichlet distribution with concentration parameter $\alpha$ in each coordinate,
+\(\operatorname{Var}(w_j)=\frac{K-1}{K^2(K\alpha+1)}\). Therefore, \(\operatorname{Var}_{w,s}(q_c^{(s)})=\operatorname{Var}(w_j)=\frac{K-1}{K^2(K\alpha+1)}\).
+
+The cyclic-average identity follows from Lemma~\ref{lem:cyclic-balancing}. When labels are distinct, \(m_c=1\) for every participating class, so \(\frac{1}{K}\sum_{s=0}^{K-1}q_c^{(s)}=\frac{1}{K}\).
+Since this equality holds for every Dirichlet sample, the conditional variance of the cyclic-average target mass is zero. If $c$ is absent from the group, then no slot carries class $c$, and \(q_c^{(s)}=0\) for all \(s\).
+
+Finally, if logits are fixed, then \(\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}CE}}}{\partial z_c}=p_c-q_c^{(s)}\)
+has the same variance as \(q_c^{(s)}\), since \(p_c\) is fixed under the conditioning. This proves that a randomly selected cyclic view preserves Dirichlet-controlled target variability, while the full cyclic orbit exactly balances average target mass.
+
+\section{TreemapMix Plackett--Luce Derivations}\label{app:pl}
+
+We use the notation introduced in Section~\ref{sec:pl}. Given a sparse TreemapMix target \(\mathcal{T}=\{(c_i,\eta_i)\}_{i=1}^{K}\), the aggregated class weight is \(\rho_c=\sum_{i=1}^{K}\eta_i\mathbf{1}[c_i=c]\). Let \(\mathcal{R}=\{c:\rho_c>0\}\) and \(L=|\mathcal{R}|\), and let \(\rho_{r_1}\ge\rho_{r_2}\ge\cdots\ge\rho_{r_L}\) with \(r_1\succ r_2\succ\cdots\succ r_L\) be the descending order over unique target classes. Ties are broken uniformly at random. Let \(\mathcal{U}=\{1,\dots,C\}\setminus\mathcal{R}\), with \(p_{\mathcal U}=1-\sum_{\ell=1}^{L}p_{r_\ell}\).
+
+\subsection{From the Plackett--Luce probability to TreemapMix-PL}
+
+Let the model output logits \(z=f_\theta(\tilde{x})\in\mathbb{R}^{C}\) and softmax probabilities \(p_c=p_\theta(c\mid\tilde{x})\).
+For the descending ranking $r_1\succ\cdots\succ r_L$, the top-$L$ Plackett--Luce probability with unranked residual mass is
+\[
+P_{\mathrm{PL}}(r_1\succ\cdots\succ r_L\mid\tilde{x})
+=
+\prod_{\ell=1}^{L}
+\frac{
+p_{r_\ell}
+}{
+p_{\mathcal U}
++
+\sum_{j=\ell}^{L}p_{r_j}
+}.
+\]
+The corresponding unweighted ListMLE-style negative log-likelihood is
+\[
+\mathcal{L}_{\mathrm{ListMLE}}
+=
+-\sum_{\ell=1}^{L}
+\log
+\frac{
+p_{r_\ell}
+}{
+p_{\mathcal U}
++
+\sum_{j=\ell}^{L}p_{r_j}
+}.
+\]
+TreemapMix-PL uses the same ranking but weights each term by the aggregated target mass $\rho_{r_\ell}$:
+\[
+\mathcal{L}_{\mathrm{TM\text{-}PL}}
+=
+-\sum_{\ell=1}^{L}
+\rho_{r_\ell}
+\log
+\frac{
+p_{r_\ell}
+}{
+p_{\mathcal U}
++
+\sum_{j=\ell}^{L}p_{r_j}
+}.
+\]
+This is the descending form in \eqref{eq:lm-pl-desc}. When all target weights are equal, this objective is a constant rescaling of the unweighted ListMLE loss.
+
+\subsection{Ascending implementation form}
+
+For implementation, we reverse the descending order. Define \(a_i=r_{L+1-i}\), \(\gamma_i=\rho_{a_i}\), and \(\gamma_1\le\gamma_2\le\cdots\le\gamma_L\).
+Thus, $a_1$ is the weakest ranked class and $a_L$ is the strongest. Reindexing the descending objective gives
+\[
+\mathcal{L}_{\mathrm{TM\text{-}PL}}
+=
+-\sum_{i=1}^{L}
+\gamma_i
+\log
+\frac{
+p_{a_i}
+}{
+p_{\mathcal U}
++
+\sum_{j=1}^{i}p_{a_j}
+}.
+\]
+Using
+\[
+D_i
+=
+p_{\mathcal U}
++
+\sum_{j=1}^{i}p_{a_j}
+=
+1-\sum_{j=i+1}^{L}p_{a_j},
+\]
+we obtain
+\[
+\mathcal{L}_{\mathrm{TM\text{-}PL}}
+=
+\sum_{i=1}^{L}
+\gamma_i
+\left[
+\log D_i-\log p_{a_i}
+\right],
+\]
+which is the ascending implementation form in \eqref{eq:lm-pl-asc}. For a mini-batch of size $B$, where sample $b$ may have $L_b$ unique target classes, the implementation uses
+\[
+\mathcal{L}_{\mathrm{TM\text{-}PL}}
+=
+\frac{1}{B}
+\sum_{b=1}^{B}
+\sum_{i=1}^{L_b}
+\gamma_{b,i}
+\left[
+\log D_{b,i}
+-
+\log p_\theta(a_{b,i}\mid \tilde{x}_b)
+\right].
+\]
+
+\subsection{Gradient derivation}
+
+For one sample,
+\[
+\mathcal{L}_{\mathrm{TM\text{-}PL}}
+=
+\sum_{i=1}^{L}
+\gamma_i
+\left[
+\log D_i-\log p_{a_i}
+\right].
+\]
+Define the stronger-class probability mass \(R_i=\sum_{j=i+1}^{L}p_{a_j}\) and \(D_i=1-R_i\), and the stronger-class set \(T_i=\{a_{i+1},\dots,a_L\}\). First, \(\frac{\partial \log p_{a_i}}{\partial z_c}=\mathbf{1}[c=a_i]-p_c\).
+Next,
+\[
+\begin{aligned}
+\frac{\partial R_i}{\partial z_c}
+&=
+\sum_{j=i+1}^{L}
+p_{a_j}
+\left(
+\mathbf{1}[c=a_j]-p_c
+\right) \\
+&=
+p_c\mathbf{1}[c\in T_i]-p_cR_i \\
+&=
+p_c\left(\mathbf{1}[c\in T_i]-R_i\right).
+\end{aligned}
+\]
+Therefore,
+\[
+\frac{\partial D_i}{\partial z_c}
+=
+-\frac{\partial R_i}{\partial z_c}
+=
+p_c\left(R_i-\mathbf{1}[c\in T_i]\right),
+\]
+and hence
+\[
+\frac{\partial \log D_i}{\partial z_c}
+=
+\frac{
+p_c\left(R_i-\mathbf{1}[c\in T_i]\right)
+}{
+D_i
+}.
+\]
+For the $i$-th loss term
+\[
+\ell_i
+=
+\gamma_i
+\left[
+\log D_i-\log p_{a_i}
+\right],
+\]
+we have
+\[
+\begin{aligned}
+\frac{\partial \ell_i}{\partial z_c}
+&=
+\gamma_i
+\left[
+\frac{
+p_c\left(R_i-\mathbf{1}[c\in T_i]\right)
+}{
+D_i
+}
+-
+\mathbf{1}[c=a_i]
++
+p_c
+\right] \\
+&=
+\gamma_i
+\left[
+\frac{
+p_c\left(R_i-\mathbf{1}[c\in T_i]+D_i\right)
+}{
+D_i
+}
+-
+\mathbf{1}[c=a_i]
+\right] \\
+&=
+\gamma_i
+\left[
+\frac{
+p_c\left(1-\mathbf{1}[c\in T_i]\right)
+}{
+D_i
+}
+-
+\mathbf{1}[c=a_i]
+\right],
+\end{aligned}
+\]
+because $R_i+D_i=1$. Summing over $i$ gives
+\[
+\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_c}
+=
+\sum_{i=1}^{L}
+\gamma_i
+\left[
+\frac{
+p_c\left(1-\mathbf{1}[c\in T_i]\right)
+}{
+D_i
+}
+-
+\mathbf{1}[c=a_i]
+\right],
+\]
+which is the gradient in \eqref{eq:lm-pl-grad}.
+
+\subsection{Ordinal gradient structure}
+
+The gradient above has a simple ordinal interpretation.
+
+\subsubsection*{Unranked class}
+
+Let $u\notin\{a_1,\dots,a_L\}$. Then \(\mathbf{1}[u\in T_i]=0\) and \(\mathbf{1}[u=a_i]=0\) for all $i$, so \(\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_u}=p_u\sum_{i=1}^{L}\frac{\gamma_i}{D_i}\ge 0\).
+Thus, gradient descent suppresses classes that do not appear in the TreemapMix target.
+
+\subsubsection*{Ranked class}
+
+Let $c=a_m$ for some $m\in\{1,\dots,L\}$. For $i<m$, class $a_m$ belongs to the stronger set $T_i$, so those terms vanish. For $i=m$, the contribution is \(\gamma_m\left(\frac{p_{a_m}}{D_m}-1\right)\). For $i>m$, class $a_m$ is not in $T_i$ and is not equal to $a_i$, so the remaining contribution is \(p_{a_m}\sum_{i=m+1}^{L}\frac{\gamma_i}{D_i}\).
+Therefore,
+\[
+\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_{a_m}}
+=
+\gamma_m
+\left(
+\frac{p_{a_m}}{D_m}-1
+\right)
++
+p_{a_m}
+\sum_{i=m+1}^{L}
+\frac{\gamma_i}{D_i}.
+\]
+For the strongest class $a_L$, the sum is empty and $D_L=1$, so \(\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_{a_L}}=\gamma_L(p_{a_L}-1)\le 0\).
+Thus, gradient descent promotes the strongest ranked class unless $p_{a_L}=1$, suppresses unranked classes, and regulates intermediate ranked classes through competition with stronger classes.
+
+\subsection{Proof of the Dirichlet order-statistics result}
+
+\refstepcounter{lemma}\label{lem:pl-order}
+\paragraph{Lemma~\thelemma\ (Dirichlet order statistics and ranking emphasis).}
+Assume the $K$ target labels are distinct, so that $L=K$ and $\gamma_i=\lambda_i$. Let \(\mu_i(\alpha)=\mathbb{E}[\lambda_i]\) denote the expected $i$-th sorted Dirichlet weight. Conditioned on fixed logits and fixed rank assignments, the expected TreemapMix-PL gradient for a ranked class $a_m$ satisfies \(\mathbb{E}_{w}\left[\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_{a_m}}\right]=\mu_m(\alpha)\left(\frac{p_{a_m}}{D_m}-1\right)+p_{a_m}\sum_{i=m+1}^{K}\frac{\mu_i(\alpha)}{D_i}\), and for an unranked class $u$, \(\mathbb{E}_{w}\left[\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_u}\right]=p_u\sum_{i=1}^{K}\frac{\mu_i(\alpha)}{D_i}\).
+
+\paragraph{Proof.}
+
+Assume the $K$ target labels are distinct, so that $L=K$ and the ascending PL weights satisfy \(\gamma_i=\lambda_i\). Let \(\mu_i(\alpha)=\mathbb{E}[\lambda_i]\)
+denote the expected $i$-th sorted Dirichlet weight. Conditioned on fixed logits and fixed rank assignments, $D_i$ and $p_c$ are fixed, and the ranked-class gradient is linear in $\lambda_i$. Therefore,
+\[
+\mathbb{E}_{w}
+\left[
+\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_{a_m}}
+\right]
+=
+\mu_m(\alpha)
+\left(
+\frac{p_{a_m}}{D_m}-1
+\right)
++
+p_{a_m}
+\sum_{i=m+1}^{K}
+\frac{\mu_i(\alpha)}{D_i}.
+\]
+Likewise, for an unranked class $u$,
+\[
+\mathbb{E}_{w}
+\left[
+\frac{\partial \mathcal{L}_{\mathrm{TM\text{-}PL}}}{\partial z_u}
+\right]
+=
+p_u
+\sum_{i=1}^{K}
+\frac{\mu_i(\alpha)}{D_i}.
+\]
+Thus, in the distinct-label case, $\alpha$ affects TreemapMix-PL through the order statistics of the sampled Dirichlet weights. Smaller $\alpha$ widens the expected gap between low- and high-rank weights, concentrating supervision on dominant labels. As $\alpha$ increases, the sorted weights concentrate near $1/K$, so the loss approaches a constant rescaling of an unweighted ListMLE-style objective. This proves that, in the distinct-label case, the expected TM-PL gradient depends on $\alpha$ through the sorted Dirichlet weights assigned to rank positions.
+
+\section{Proof of Cyclic Permutation Balancing}\label{app:cyclic-balancing}
+
+\refstepcounter{lemma}\label{lem:cyclic-balancing}
+\paragraph{Lemma~\thelemma\ (Cyclic permutation balances slot and target exposure)}
+
+Let \refstepcounter{equation}\label{eq:cyclic-soft-target}\(q_c^{(s)}=\sum_{i=1}^{K}\lambda_i \mathbf{1}[y_{\pi_s(i)}=c], m_c=\sum_{k=1}^{K}\mathbf{1}[y_k=c]\)\textup{ (\theequation)}. Then, for every class $c$ and slot $i$, \refstepcounter{equation}\label{eq:slot-balance}\(\frac{1}{K}\sum_{s=0}^{K-1}\mathbf{1}[y_{\pi_s(i)}=c]=\frac{m_c}{K}\)\textup{ (\theequation)}, and consequently \refstepcounter{equation}\label{eq:cyclic-balance-soft}\(\frac{1}{K}\sum_{s=0}^{K-1}q_c^{(s)}=\frac{m_c}{K}\)\textup{ (\theequation)}.
+
+\paragraph{Proof.}
+
+For cyclic view $s$, slot $i$ receives source image $x_{\pi_s(i)}$ and label $y_{\pi_s(i)}$, where \(\pi_s(i)=1+\bigl((i+s-1)\bmod K\bigr)\).
+For any fixed slot $i$, as $s$ ranges from $0$ to $K-1$, the index $\pi_s(i)$ visits every source position exactly once. Therefore, for any class $c$,
+\(\sum_{s=0}^{K-1}\mathbf{1}[y_{\pi_s(i)}=c]=\sum_{k=1}^{K}\mathbf{1}[y_k=c]=m_c\). Dividing by $K$ gives the slot-balancing identity \(\frac{1}{K}\sum_{s=0}^{K-1}\mathbf{1}[y_{\pi_s(i)}=c]=\frac{m_c}{K}\),
+which proves \eqref{eq:slot-balance}.
+
+Next, the soft target mass assigned to class $c$ in cyclic view $s$ is \(q_c^{(s)}=\sum_{i=1}^{K}\lambda_i\mathbf{1}[y_{\pi_s(i)}=c]\).
+Averaging over cyclic views gives
+\[
+\begin{aligned}
+\frac{1}{K}
+\sum_{s=0}^{K-1}
+q_c^{(s)}
+&=
+\frac{1}{K}
+\sum_{s=0}^{K-1}
+\sum_{i=1}^{K}
+\lambda_i\mathbf{1}[y_{\pi_s(i)}=c] \\
+&=
+\frac{1}{K}
+\sum_{i=1}^{K}
+\lambda_i
+\sum_{s=0}^{K-1}
+\mathbf{1}[y_{\pi_s(i)}=c] \\
+&=
+\frac{1}{K}
+\sum_{i=1}^{K}
+\lambda_i m_c \\
+&=
+\frac{m_c}{K},
+\end{aligned}
+\]
+because $\sum_{i=1}^{K}\lambda_i=1$. This proves \eqref{eq:cyclic-balance-soft}.
+
+When the $K$ source labels are distinct, $m_c=1$ for every participating class and $m_c=0$ for every absent class. Therefore, each participating class appears exactly once in every slot across the $K$ cyclic views. Since slots are associated with sorted weights and rank positions, cyclic permutation also prevents any participating class from being permanently tied to a fixed TreemapMix weight or rank. The PL denominator terms remain prediction-dependent, so this balancing does not remove ordinal competition; it only removes persistent source-label-to-slot bias. This proves that cyclic assignment removes persistent source-label-to-slot bias while leaving the prediction-dependent PL competition intact.
+
+
+%%%%%%%%%%%%
+
+
+\section{Experimental Protocol and Hyperparameters}
+\label{app:appendix-aug-configs}
+
+Tables~\ref{tab:timm-adaptations}, \ref{tab:baseline-hparams-aug}, and
+\ref{tab:baseline-hparams-train} summarize the ImageNet-1K experimental
+protocol and baseline hyperparameters. Table~\ref{tab:timm-adaptations}
+summarizes the schedule-level adaptations applied to the reference
+\texttt{timm} recipes for the main 110-epoch comparison.
+Tables~\ref{tab:baseline-hparams-aug} and
+\ref{tab:baseline-hparams-train} separate data-augmentation settings from
+optimizer and training settings for readability.
+
+The baseline recipes are adapted from established \texttt{timm} ImageNet-1K
+training configurations~\citep{rw2019timm,262588213843476SearchingBetterVit}.
+Because our main study uses a shorter 110-epoch budget than many reference
+recipes, we make only schedule-level adaptations: we disable
+\texttt{aug\_repeats}, adjust the learning rate, disable gradient clipping, and keep the remaining regularization settings fixed across methods.
+All methods therefore share the same architecture, data budget, optimizer schedule, and evaluation protocol. The comparison isolates augmentation and loss effects, but does not claim per-baseline optimality.
+
+All runs use a global batch size of 1024. We omit epochs and warmup epochs
+from Tables~\ref{tab:baseline-hparams-aug} and
+\ref{tab:baseline-hparams-train} because those values are held fixed across
+runs. The augmentation table lists the ImageNet-1K augmentation recipes used
+in the main comparisons.
+
+All RICAP runs use the same auxiliary settings, which we selected after local tests: the augmentation is
+applied with probability 0.5, disabled for the final 10 epochs, allowed to
+vary the crop center over a ratio range from 0.5 to 1.5, and allowed to vary
+the crop scale from 0.8 to 1.2. All TreemapMix-SCE and
+TreemapMix-Mixed runs use $K=4$ with a cosine $\alpha$ schedule from $0.1$
+to $0.5$, while all TreemapMix-PL runs use $K=6$ with the same cosine
+$\alpha$ schedule. We describe these fixed RICAP and TreemapMix values here
+rather than repeating them as separate columns in
+Table~\ref{tab:baseline-hparams-aug}.
+
+\input{fig/tab_timm_adaptations}
+
+\input{fig/tab_baseline_hparams_augmentation}
+
+\input{fig/tab_baseline_hparams_training}
+
+
+\section{ImageNet-1K Hyperparameter Sensitivity}
+\label{app:in1k-hparam-sensitivity}
+
+TreemapMix introduces two main hyperparameters: the Dirichlet concentration
+$\alpha$ and the number of mixed regions $K$. We study their effects with a
+single-seed hyperparameter sweep. The sweep identifies a stable operating
+regime for both TreemapMix losses: smaller $\alpha$ values and small-to-medium
+values of $K$ perform best, while more extreme compositions degrade both
+accuracy and calibration. Overall, TreemapMix is more sensitive to $\alpha$
+than to $K$.
+
+We sweep
+$\alpha \in \{0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0\}$ and
+$K \in \{2,\ldots,10\}$ using the same training hyperparameters as in the
+main run. This sweep uses a simplified fixed-hyperparameter recipe: it does
+not apply aspect-ratio filtering to TreemapMix regions and does not schedule
+either $\alpha$ or $K$. Therefore, these results should be interpreted as a
+robustness and sensitivity analysis rather than as a best-case configuration
+search. The absolute numbers are consequently lower than the tuned main
+results.
+
+Figure~\ref{fig:in1k-hparam-sensitivity} shows the resulting sensitivity plots
+and includes reference results for the main Mixup+CutMix and single-image-only
+baselines. We include the single-image-only baseline because it is the
+strongest non-TreemapMix setting in the main comparison for ViT-Wee.
+
+\input{fig/fig_in1k_hparam_sensitivity}
+
+Figure~\ref{fig:in1k-hparam-heatmaps-appendix} reports the full
+two-dimensional $(K,\alpha)$ heatmaps for the same sweep. These heatmaps show
+the interaction between the number of regions and the Dirichlet concentration,
+whereas Figure~\ref{fig:in1k-hparam-sensitivity} summarizes the marginal
+trends.
+
+\input{fig/fig_in1k_hparam_heatmaps_appendix}
+
+For Top-1 accuracy, both TreemapMix-SCE and TreemapMix-PL perform best at
+relatively small $\alpha$ values and around $k=4$. Increasing $\alpha$ up to
+approximately $1$ causes only modest degradation, while larger values lead to a
+clearer accuracy drop. This trend suggests that TreemapMix benefits from some
+imbalance among region areas rather than from nearly uniform region sizes.
+Larger $k$ values also tend to reduce Top-1 accuracy, but this effect is
+weaker and less uniform than the effect of $\alpha$. As $K$ increases,
+performance varies more strongly across $\alpha$ values, indicating that
+high-composition settings are more sensitive to the choice of mixing strength.
+
+Calibration, measured by ECE with 15 bins, follows a similar but sharper
+pattern. For both losses, ECE remains relatively stable up to a loss-dependent
+threshold and then increases substantially. For TreemapMix-SCE, this threshold
+occurs around $\alpha=1$; for TreemapMix-PL, it occurs around $\alpha=1.5$.
+Increasing $K$ also tends to worsen calibration, but the effect is weaker and
+less systematic than the effect of $\alpha$. Across the sweep, TreemapMix-PL
+is less sensitive to hyperparameter variation, while TreemapMix-SCE achieves
+the strongest calibration when $\alpha$ and $K$ are chosen carefully.
+
+These results indicate that choosing $\alpha$ is more important than choosing
+$k$ for reliable TreemapMix performance. For calibration-focused use, the
+sweep supports TreemapMix-SCE with $\alpha \le 1$ and $K \le 5$. For
+accuracy-focused use, the sweep supports TreemapMix-PL with $\alpha \le 0.4$
+and $K \le 6$. In our tuned main experiments, we further improve performance
+by filtering layouts with extreme patch aspect ratios and scheduling $\alpha$
+from $0.1$ to a final value between $0.5$ and $1.0$. We treat these additional
+choices as part of the tuned recipe rather than conclusions from the fixed
+sweep.
+
+\section{Qualitative Visualizations and Attribution Analysis}
+\label{app:qualitative-visualizations}
+
+Figures~\ref{fig:treemapmix-randomness}, \ref{fig:treemapmix-k-sweep}, and
+\ref{fig:treemapmix-alpha-sweep} visualize how TreemapMix changes with its
+random draw and main hyperparameters. Figure~\ref{fig:treemapmix-randomness}
+holds the source images and hyperparameters fixed while varying only the
+random draw. Figures~\ref{fig:treemapmix-k-sweep} and
+\ref{fig:treemapmix-alpha-sweep} sweep the number of regions and the
+Dirichlet concentration, respectively, showing how these controls change the
+granularity and balance of the mixed image.
+
+\input{fig/fig_treemapmix_randomness}
+
+\input{fig/fig_treemapmix_k_sweep}
+
+\input{fig/fig_treemapmix_alpha_sweep}
+
+We also complement the quantitative logit-alignment diagnostics with
+qualitative attribution maps in Figure~\ref{fig:feature-space-analysis}. The
+maps are computed on the same held-out diagnostic set using the ViT-Betwixt
+checkpoints. We use Gradient$\times$Input attribution
+\citep{shrikumarNotJustBlack2017a,simonyanDeepConvolutionalNetworks2014},
+which multiplies the input by the gradient of the target logit with respect to
+the input. This provides a qualitative view of which source regions contribute
+most strongly to a given class logit.
+
+Figure~\ref{fig:feature-space-analysis} highlights a qualitative difference
+between the two TreemapMix losses. TreemapMix-SCE is the only variant that
+assigns non-zero probabilities to several smaller target regions, which is
+consistent with its area-weighted soft-label objective. By contrast,
+TreemapMix-PL tends to assign substantially higher probability to the largest
+region. This is consistent with its ranking objective: once the relative logit
+ordering is satisfied, the loss does not strongly penalize concentration of
+probability mass on the dominant region.
+
+The attribution overlays are often more focused on the target regions for the
+TreemapMix-trained models, especially in Rows~3--5, where the target areas are
+relatively small. In contrast, the non-TreemapMix baselines often concentrate
+on more localized discriminative features. For example, in the Cougar row, the
+baseline attributions focus more strongly on the face. These qualitative
+results are not intended as standalone evidence, but they are consistent with
+the quantitative logit-alignment diagnostics: TreemapMix changes how the model
+distributes evidence across composed regions, and the PL objective makes this
+effect most explicit.
+
+\input{fig/fig_feature_space_analysis}
+
+\section{Optimizer Robustness}
+\label{app:optimizer-robustness}
+We next test whether the gains of TreemapMix persist across different
+optimizers on ImageNet-1K. We compare Muon
+\citep{jordan2024muon}, AdamW (Adam with decoupled weight decay)
+\citep{loshchilovDecoupledWeightDecay2019}, and NAdamW (Nesterov-accelerated
+Adam with decoupled weight decay)
+\citep{Dahl2023AlgoPerf,Kasimbeg2025AlgoPerfResults}. We keep the core
+TreemapMix hyperparameters fixed across optimizers. Because the main
+experiments use NAdamW with a learning rate of $1.5\times10^{-3}$, we retain
+this value for NAdamW and also use it for AdamW to keep the Adam-style
+optimizer comparison matched. For Muon, we use a separately tuned learning
+rate of $5\times10^{-3}$.
+
+Table~\ref{tab:in1k-optimizer-results} compares Mixup+Cutmix,
+TreemapMix-SCE, and TreemapMix-PL under AdamW, Muon, and NAdamW for
+single-seed runs using seed 42. These results should be interpreted as an
+optimizer-sensitivity check rather than a definitive optimizer ranking. Across
+the tested optimizers, the main qualitative pattern from the primary
+ImageNet-1K comparison is preserved: TreemapMix-PL generally gives the highest
+Top-1 accuracy, whereas TreemapMix-SCE gives the lowest ECE in most settings.
+Muon gives the strongest Top-1 accuracy in several configurations, but this
+gain is often accompanied by higher ECE. AdamW and NAdamW are more competitive
+on calibration, although neither dominates across both metrics. Overall, these
+single-seed results suggest that TreemapMix's accuracy and calibration trends
+are not specific to one optimizer, while the absolute accuracy-calibration
+trade-off still depends on the optimizer.
+
+\input{fig/tab_in1k_optimizer_comparison}
+
+\section{Full ImageNet-1K Results}
+\label{app:in1k-confidence-results}
+
+Tables~\ref{tab:in1k-full-results-acc},
+\ref{tab:in1k-full-results-ece},
+\ref{tab:in1k-full-results-nll}, and
+\ref{tab:in1k-full-results-brier} report the full ImageNet-1K
+main-comparison metrics. Specifically,
+Tables~\ref{tab:in1k-full-results-acc} and
+\ref{tab:in1k-full-results-ece} report the Top-1 accuracy and ECE values
+shown in Figure~\ref{fig:in1k-main-results-top1}, while
+Tables~\ref{tab:in1k-full-results-nll} and
+\ref{tab:in1k-full-results-brier} report the NLL and Brier score values for
+the same runs.
+
+\input{fig/tab_in1k_full_results_acc}
+
+\input{fig/tab_in1k_full_results_ece}
+
+\input{fig/tab_in1k_full_results_nll}
+
+\input{fig/tab_in1k_full_results_brier}
+
+\section{COCO Transfer Details}
+\label{app:det-hparams}
+
+Table~\ref{tab:det-hparams} summarizes the ViTDet-style configurations used
+for the COCO transfer experiments. In all cases, \texttt{train.init\_checkpoint}
+is set to the corresponding checkpoint from the main classification
+experiments, and we fine-tune a Mask R-CNN model with a ViTDet-style adapter
+for 30 epochs on COCO.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Hyperparameters for the object-detection transfer experiments with
+  a ViTDet-style adapter and Mask R-CNN on COCO.}
+  \label{tab:det-hparams}
+  \begin{tabular}{lccccccc}
+    \toprule
+    Model & Embed Dim & Depth & Heads & MLP Ratio & Drop Path & LR & Layer Decay \\
+    \midrule
+    ViT-Wee & 256 & 14 & 4 & 5.0 & 0.1 & 6.0e-4 & 0.7 \\
+    ViT-Betwixt & 640 & 12 & 10 & 4.0 & 0.1 & 8.0e-4 & 0.7 \\
+    \bottomrule
+  \end{tabular}%
+\end{table*}
+
+Table~\ref{tab:coco-transfer-ap50} reports the box AP50 and mask AP50 metrics
+corresponding to the main-paper COCO transfer results in
+Table~\ref{tab:coco-transfer-results}.
+
+\input{fig/tab_coco_transfer_box_ap50}
+% Uncomment for the camera-ready version only.
+% \begin{ack}
+% Add acknowledgments, funding disclosures, and competing-interest disclosures
+% here after acceptance.
+% \end{ack}
+
+\section{Implementation Details}
+\paragraph{Loss functions in code}
+
+We include concise PyTorch reference implementations of TreemapMix-SCE
+(Figure~\ref{fig:treemapmix-sce-code}), TreemapMix-PL
+(Figure~\ref{fig:treemapmix-pl-code}), and the mixed-loss variant
+(Figure~\ref{fig:treemapmix-mixed-code}) used in our experiments.
+
+\input{fig/fig_treemapmix_sce_code}
+
+\input{fig/fig_treemapmix_pl_code}
+
+\input{fig/fig_treemapmix_mixed_code}
+
+
+\paragraph{Runtime overhead}
+In our ImageNet-1K experiments, we used a dataloader prefetch factor of 2. Under this configuration, layout generation and image compositing did not produce a material increase in end-to-end per-epoch training time in our implementation: augmented batches were prepared ahead of GPU consumption, so training remained GPU-bound rather than augmentation-bound. This means TreemapMix adds CPU-side data-loading work, but we did not observe it becoming the throughput bottleneck
+under the hardware and dataloader settings used in our experiments.

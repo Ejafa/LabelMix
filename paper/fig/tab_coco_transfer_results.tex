@@ -1,0 +1,23 @@
+\begin{table*}[t]
+  \centering
+  \small
+\caption{COCO transfer results after ViTDet-style Mask R-CNN fine-tuning from
+the main ImageNet-1K experiment checkpoints with 3 seeds per method. TreemapMix-PL achieves the best box and mask AP for both ViT-Wee and
+ViT-Betwixt, while TreemapMix-SCE also improves over Mixup+CutMix and RICAP.
+Values are mean $\pm$ standard deviation over these three transferred seeds;
+higher is better. Corresponding AP50 results are reported in Appendix
+Table~\ref{tab:coco-transfer-ap50}.}
+  \label{tab:coco-transfer-results}
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{ViT-Wee} & \multicolumn{2}{c}{ViT-Betwixt} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+    Method & Box AP $\uparrow$ & Mask AP $\uparrow$ & Box AP $\uparrow$ & Mask AP $\uparrow$ \\
+    \midrule
+    \makecell[l]{Mixup+CutMix} & \makecell{23.66 $\pm$ 0.01} & \makecell{20.34 $\pm$ 0.10} & \makecell{29.04 $\pm$ 0.07} & \makecell{25.25 $\pm$ 0.10} \\
+    RICAP & \makecell{23.08 $\pm$ 0.17} & \makecell{19.82 $\pm$ 0.07} & \makecell{27.86 $\pm$ 0.08} & \makecell{24.21 $\pm$ 0.06} \\
+    \makecell[l]{TreemapMix-SCE} & \makecell{24.00 $\pm$ 0.17} & \makecell{20.55 $\pm$ 0.20} & \makecell{29.44 $\pm$ 0.16} & \makecell{25.56 $\pm$ 0.14} \\
+    \makecell[l]{TreemapMix-PL} & \makecell{\bfseries 24.32 $\pm$ 0.12} & \makecell{\bfseries 20.71 $\pm$ 0.04} & \makecell{\bfseries 29.71 $\pm$ 0.09} & \makecell{\bfseries 25.75 $\pm$ 0.10} \\
+    \bottomrule
+  \end{tabular}
+\end{table*}

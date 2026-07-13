@@ -1,0 +1,14 @@
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.pdf
+*.synctex.gz
+data/
+out/
+prism-uploads/
+tmp/
+tmp_pdfcheck/

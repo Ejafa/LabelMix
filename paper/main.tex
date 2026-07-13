@@ -1,0 +1,85 @@
+\documentclass{article}
+
+% If you need natbib options, pass them before loading neurips_2026, e.g.:
+% \PassOptionsToPackage{numbers, compress}{natbib}
+\PassOptionsToPackage{numbers,sort&compress}{natbib}
+
+% Default: anonymous main-track submission.
+\usepackage{neurips_2026}
+
+% Common packages.
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsthm}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\newcommand{\todo}[1]{}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{pgfplots}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{makecell}
+\usepackage{subcaption}
+
+% \pgfplotsset{compat=1.18}
+
+% \newcommand{\mainresultsmethodcolwidth}{1.75cm}
+% \newcommand{\mainresultsmetriccolwidth}{1.28cm}
+\newtheorem{lemma}{Lemma}
+
+% Submission notes:
+% - Main text is limited to 9 content pages, including figures and tables.
+% - References, appendices, and the checklist do not count toward that limit.
+% - Keep the submission anonymous.
+% - For a public preprint, switch to \usepackage[preprint]{neurips_2026}.
+% - For a camera-ready version, switch to \usepackage[main,final]{neurips_2026}.
+
+\title{TreemapMix: Dirichlet-Controlled Multi-Image Augmentation for Probability and Ordinal Supervision}
+
+% \author{%
+%   Anonymous Authors \\
+%   Anonymous Institution \\
+%   Anonymous City, Country \\
+%   \texttt{anonymous@anonymous.anon}
+% }
+
+\begin{document}
+
+\maketitle
+
+\todo{Do we refer to the model as "VIT" or "EVA02"?}
+\todo{Remove duplicate cutmix and mixup citation}
+\todo{Replace "baseline" with Cutmix+Mixup}
+\todo{Do we have to add a part regarding performance of method in terms of runtime}
+\todo{Add to appendix or experimental details that we always plot the \sigma 1 error bars}
+
+\input{sections/abstract}
+\input{sections/introduction}
+\input{sections/related_work}
+\input{sections/method}
+\input{sections/empirical_evaluation}
+\input{sections/diagnostic_transfer_analysis}
+%\input{sections/limitations}
+\input{sections/conclusion}
+
+\clearpage
+\appendix
+
+\input{sections/appendix}
+
+\clearpage
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\clearpage
+\input{checklist}
+
+\end{document}
