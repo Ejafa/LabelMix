@@ -46,7 +46,9 @@ def plot(df: pd.DataFrame) -> plt.Figure:
     x = np.arange(len(models))
     width = 0.8 / max(len(methods), 1)
 
-    fig, ax = plt.subplots(figsize=(DOUBLE_COL_WIDTH, 2.6))
+    fig, ax = plt.subplots(
+        figsize=(DOUBLE_COL_WIDTH, 2.6 * (DOUBLE_COL_WIDTH / 6.8))
+    )
 
     for i, method in enumerate(methods):
         sub = df[df["method"] == method].set_index("model").reindex(models)
@@ -68,8 +70,28 @@ def plot(df: pd.DataFrame) -> plt.Figure:
     ax.set_xticklabels(models)
     ax.set_ylabel("ECE ($n_{bins}=15$, lower is better)")
     ax.set_xlabel("Model")
-    ax.legend(ncol=min(len(methods), 3), loc="upper right")
     fig.tight_layout()
+    return fig
+
+
+def plot_legend(methods: list[str]) -> plt.Figure:
+    apply_paper_style()
+    from matplotlib.patches import Patch
+
+    handles = [
+        Patch(facecolor=bar_color(method), edgecolor="black", linewidth=0.5,
+              label=method_display(method))
+        for method in methods
+    ]
+    fig = plt.figure(figsize=(DOUBLE_COL_WIDTH, 0.55 * (DOUBLE_COL_WIDTH / 6.8)))
+    fig.legend(
+        handles,
+        [h.get_label() for h in handles],
+        loc="center",
+        ncol=min(len(handles), 3),
+        frameon=False,
+        borderaxespad=0.0,
+    )
     return fig
 
 
@@ -85,7 +107,13 @@ def main(argv: list[str] | None = None) -> int:
     df = pd.read_csv(args.input)
     fig = plot(df)
     savefig(fig, str(args.output))
+    plt.close(fig)
     _logger.info("Wrote %s", args.output)
+    leg_path = args.output.with_name(args.output.stem + "_legend.pdf")
+    leg_fig = plot_legend(sorted(df["method"].unique()))
+    savefig(leg_fig, str(leg_path))
+    plt.close(leg_fig)
+    _logger.info("Wrote %s", leg_path)
     return 0
 
 

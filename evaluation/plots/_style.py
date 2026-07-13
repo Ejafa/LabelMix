@@ -26,11 +26,29 @@ import matplotlib.pyplot as plt
 from cycler import cycler
 
 
-#: Single-column figure width (inches) — matches standard NeurIPS/ICML templates.
-SINGLE_COL_WIDTH: float = 3.3
+#: NeurIPS 2026 native figure widths (inches).  The paper deliberately does
+#: not resize PDFs in LaTeX, so generated canvases must fit these dimensions.
+SINGLE_COL_WIDTH: float = 2.625
+DOUBLE_COL_WIDTH: float = 5.5
 
-#: Double-column / two-panel figure width (inches).
-DOUBLE_COL_WIDTH: float = 6.8
+#: Native widths for the repeated panel layouts used by the paper.  The
+#: image-row layouts account for LaTeX's 2 pt ``\tabcolsep`` on both sides of
+#: every cell.
+THREE_PANEL_WIDTH: float = 0.32 * DOUBLE_COL_WIDTH
+FOUR_PANEL_WIDTH: float = (DOUBLE_COL_WIDTH - 16.0 / 72.27) / 4.0
+FIVE_PANEL_WIDTH: float = (DOUBLE_COL_WIDTH - 20.0 / 72.27) / 5.0
+
+# ---------------------------------------------------------------------------
+# Global typography
+# ---------------------------------------------------------------------------
+
+# Keep all plot text sizes defined in one place.  Individual plot modules
+# should call ``apply_paper_style()`` and avoid local font-size rcParams.
+BASE_FONT_SIZE: int = 9
+TITLE_FONT_SIZE: int = 9
+AXIS_LABEL_FONT_SIZE: int = 9
+TICK_LABEL_FONT_SIZE: int = 9
+LEGEND_FONT_SIZE: int = 9
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +141,13 @@ METHOD_COLORS: dict[str, str] = {
     "mixup":          PALETTE[9],   # cyan
     "cutmix":         PALETTE[5],   # brown
     "mosaic":         PALETTE[4],   # purple
+    "fmix":           PALETTE[6],   # pink
+    "gridmix":        PALETTE[0],   # blue
+    "resizemix":      PALETTE[3],   # red
+    "saliencymix":    PALETTE[8],   # olive
+    "smoothmix":      PALETTE[9],   # cyan
+    "tokenmix":       PALETTE[4],   # purple
+    "tla":            PALETTE[5],   # brown
     # LabelMix family — kept clearly distinct from the non-LabelMix block.
     "labelmix-mixed": PALETTE[1],   # orange
     "labelmix-pl":    PALETTE[0],   # blue
@@ -152,6 +177,13 @@ METHOD_COLORS_DARK: dict[str, str] = {
     "mixup":          PALETTE_DARK[9],   # cyan
     "cutmix":         PALETTE_DARK[5],   # brown
     "mosaic":         PALETTE_DARK[4],   # purple
+    "fmix":           PALETTE_DARK[6],   # pink
+    "gridmix":        PALETTE_DARK[0],   # blue
+    "resizemix":      PALETTE_DARK[3],   # red
+    "saliencymix":    PALETTE_DARK[8],   # olive
+    "smoothmix":      PALETTE_DARK[9],   # cyan
+    "tokenmix":       PALETTE_DARK[4],   # purple
+    "tla":            PALETTE_DARK[5],   # brown
     # LabelMix family — kept clearly distinct from the non-LabelMix block.
     "labelmix-mixed": PALETTE_DARK[1],   # orange
     "labelmix-pl":    PALETTE_DARK[0],   # blue
@@ -184,6 +216,13 @@ METHOD_DISPLAY: dict[str, str] = {
     "mixup":          "Mixup",
     "cutmix":         "CutMix",
     "mosaic":         "RICAP",
+    "fmix":           "FMix",
+    "gridmix":        "GridMix",
+    "resizemix":      "ResizeMix",
+    "saliencymix":    "SaliencyMix",
+    "smoothmix":      "SmoothMix",
+    "tokenmix":       "TokenMix",
+    "tla":            "TLA",
     # LabelMix family — canonical TreemapMix naming for every paper plot.
     "labelmix-mixed": "TreemapMix-mixed",
     "labelmix-pl":    "TreemapMix-PL",
@@ -222,18 +261,20 @@ def line_color(method: str, default: str = REF_DARK_GREY) -> str:
 
 _PAPER_RC = {
     "font.family": "serif",
-    "font.size": 9,
-    "axes.titlesize": 9,
-    "axes.labelsize": 9,
-    "xtick.labelsize": 8,
-    "ytick.labelsize": 8,
-    "legend.fontsize": 8,
+    "font.size": BASE_FONT_SIZE,
+    "axes.titlesize": TITLE_FONT_SIZE,
+    "axes.labelsize": AXIS_LABEL_FONT_SIZE,
+    "xtick.labelsize": TICK_LABEL_FONT_SIZE,
+    "ytick.labelsize": TICK_LABEL_FONT_SIZE,
+    "legend.fontsize": LEGEND_FONT_SIZE,
     "legend.frameon": False,
     "axes.spines.top": False,
     "axes.spines.right": False,
     "figure.dpi": 150,
     "savefig.dpi": 300,
-    "savefig.bbox": "tight",
+    # Keep the media box equal to ``figsize``. Tight bounding boxes make
+    # native-size LaTeX placement depend on the labels surrounding the axes.
+    "savefig.bbox": None,
     "pdf.fonttype": 42,   # embed TrueType so LaTeX can re-render cleanly
     "ps.fonttype": 42,
     # Use the seaborn ``pastel`` palette for matplotlib's default colour
@@ -256,12 +297,12 @@ def paper_style() -> Iterator[None]:
 
 
 def savefig(fig: plt.Figure, out_path: str) -> None:
-    """Save a figure in PDF *and* PNG next to each other.
+    """Save a figure as a PDF.
 
-    Passing ``out_path = ".../foo.pdf"`` will also write ``foo.png``.
+    Any suffix in ``out_path`` is normalised to ``.pdf`` so callers cannot
+    accidentally emit raster plot files with inconsistent text rendering.
     """
     import os
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     base, _ = os.path.splitext(out_path)
     fig.savefig(base + ".pdf")
-    fig.savefig(base + ".png")

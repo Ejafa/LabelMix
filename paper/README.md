@@ -31,5 +31,14 @@ cd paper
 latexmk -pdf main.tex
 ```
 
-The paper uses PDF plot assets. LaTeX figure paths should therefore target the
-PDF outputs in the evaluation tree.
+The paper uses PDF plot assets at their native page size. LaTeX figure imports
+must not pass `width`, `height`, `scale`, or other resizing options to
+`\includegraphics`; size changes belong in the plot exporter so the generated
+PDF is already at its final publication dimensions.
+
+The exporters use the NeurIPS 5.5-inch text block as their sizing contract:
+full-width plots are 5.5 inches wide, the area-logit panels are 1.76 inches
+wide for the three-across row, augmentation tiles are approximately 1.32
+inches for four-across rows, and Figure 1 tiles are approximately 1.045 inches
+for its five-across row. Width and height are reduced by the same factor. All
+plot text is 9 point to match the NeurIPS LaTeX `\small` font size.

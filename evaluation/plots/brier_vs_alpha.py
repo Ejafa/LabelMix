@@ -36,7 +36,9 @@ OUTPUT_FILE = FIGURES_DIR / "brier_vs_alpha.pdf"
 
 def plot(df: pd.DataFrame) -> plt.Figure:
     apply_paper_style()
-    fig, ax = plt.subplots(figsize=(SINGLE_COL_WIDTH, 2.4))
+    fig, ax = plt.subplots(
+        figsize=(SINGLE_COL_WIDTH, 2.4 * (SINGLE_COL_WIDTH / 3.3))
+    )
 
     df = df.copy()
     df["ma"] = pd.to_numeric(df["ma"], errors="coerce")
@@ -56,8 +58,28 @@ def plot(df: pd.DataFrame) -> plt.Figure:
 
     ax.set_xlabel(r"Mixed-alpha coefficient $\alpha_{\mathrm{mix}}$")
     ax.set_ylabel("Brier score (lower is better)")
-    ax.legend()
     fig.tight_layout()
+    return fig
+
+
+def plot_legend(models: list[str]) -> plt.Figure:
+    apply_paper_style()
+    from matplotlib.lines import Line2D
+
+    handles = [
+        Line2D([0], [0], color=line_color(model), marker="o",
+               label=method_display(model))
+        for model in models
+    ]
+    fig = plt.figure(figsize=(SINGLE_COL_WIDTH, 0.55 * (SINGLE_COL_WIDTH / 3.3)))
+    fig.legend(
+        handles,
+        [h.get_label() for h in handles],
+        loc="center",
+        ncol=min(len(handles), 2),
+        frameon=False,
+        borderaxespad=0.0,
+    )
     return fig
 
 
@@ -73,7 +95,13 @@ def main(argv: list[str] | None = None) -> int:
     df = pd.read_csv(args.input)
     fig = plot(df)
     savefig(fig, str(args.output))
+    plt.close(fig)
     _logger.info("Wrote %s", args.output)
+    leg_path = args.output.with_name(args.output.stem + "_legend.pdf")
+    leg_fig = plot_legend(sorted(df["model"].unique()))
+    savefig(leg_fig, str(leg_path))
+    plt.close(leg_fig)
+    _logger.info("Wrote %s", leg_path)
     return 0
 
 

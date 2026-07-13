@@ -1,21 +1,20 @@
 """Plot: per-experiment NLL + Brier score bars for ImageNet-1k.
 
 Companion to :mod:`evaluation.plots.in1k_per_experiment`. Same grouped
-bar-chart layout, same palette, same standalone-legend export, but the
-two panels show proper-scoring-rule losses instead of accuracy / ECE:
+bar-chart layout, same palette, same standalone-legend export, but
+the two panels show proper-scoring-rule losses instead of accuracy / ECE:
 
 * **Top row** -- Negative log-likelihood (NLL), lower is better.
 * **Bottom row** -- Brier score, lower is better.
 
-Only the *short*-horizon CSV is rendered; the long-horizon figure is
-delivered as a standalone PDF instead.
+Only the *short*-horizon CSV is rendered.
 
 Input (default run, ``--input`` overrides):
   - ``data/processed/in1k_per_experiment_short.csv``
 
 Outputs:
-  - ``figures/per_experiment/in1k_per_experiment_nll_brier_short.pdf`` + ``.png``
-  - ``figures/per_experiment/in1k_per_experiment_nll_brier_short_legend.pdf`` + ``.png``
+  - ``figures/per_experiment/in1k_per_experiment_nll_brier_short.pdf``
+  - ``figures/per_experiment/in1k_per_experiment_nll_brier_short_legend.pdf``
 """
 from __future__ import annotations
 
@@ -44,7 +43,8 @@ from .in1k_per_experiment import (
 
 _logger = logging.getLogger(__name__)
 
-_PANEL_WIDTH = DOUBLE_COL_WIDTH * 1.15
+_PANEL_WIDTH = DOUBLE_COL_WIDTH
+_PANEL_HEIGHT = 3.8 * (DOUBLE_COL_WIDTH / (6.8 * 1.15))
 
 _NLL_MEAN_COL = "nll_mean"
 _NLL_STD_COL = "nll_std"
@@ -88,7 +88,7 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1k") -> plt.Figure:
 
     fig, (ax_nll, ax_brier) = plt.subplots(
         2, 1,
-        figsize=(_PANEL_WIDTH, 3.8),
+        figsize=(_PANEL_WIDTH, _PANEL_HEIGHT),
         sharex=True,
         gridspec_kw={"hspace": 0.28},
     )
@@ -185,16 +185,20 @@ _DEFAULT_INPUT: tuple[str, Path, Path] = (
 )
 
 
-def _legend_path_for(panel_path: Path) -> Path:
-    return panel_path.with_name(panel_path.stem + "_legend.pdf")
-
-
 def _render_one(title: str, in_path: Path, out_path: Path) -> int:
     if not in_path.is_file():
         _logger.warning("Skipping %s (no such file)", in_path)
         return 0
     _logger.info("Reading %s", in_path)
     df = pd.read_csv(in_path)
+    if df.empty:
+        _logger.info("Skipping %s (empty CSV)", in_path)
+        return 0
+
+    if title == "ImageNet-1k" and "dataset" in df.columns:
+        datasets = " ".join(str(v).lower() for v in df["dataset"].dropna().unique())
+        if "cifar100" in datasets:
+            title = "CIFAR100"
 
     fig = plot(df, title=title)
     savefig(fig, str(out_path))
@@ -203,7 +207,7 @@ def _render_one(title: str, in_path: Path, out_path: Path) -> int:
 
     types = _ordered(_filter_types(df)["type"].unique(), _TYPE_ORDER)
     leg_fig = plot_legend(types)
-    leg_path = _legend_path_for(out_path)
+    leg_path = out_path.with_name(out_path.stem + "_legend.pdf")
     savefig(leg_fig, str(leg_path))
     plt.close(leg_fig)
     _logger.info("Wrote %s", leg_path)
@@ -221,8 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--output", type=Path, default=None,
         help="Output PDF path for the panel figure. "
-             "Only honoured when --input is given. "
-             "The legend is written to <stem>_legend.pdf next to it.",
+             "Only honoured when --input is given.",
     )
     p.add_argument("--title", type=str, default="ImageNet-1k",
                    help="Figure title for the top panel.")

@@ -294,7 +294,7 @@ class PaperFiguresConfig:
     overwrite: bool = False
     render: bool = True                 # also render PDF + PNG via matplotlib
     render_dpi: int = 300
-    tile_size_inches: float = 1.6       # per-panel width in inches
+    tile_size_inches: float = 1.06      # five panels in the 5.5-inch text block
     max_samples: Optional[int] = None   # cap total number of figures produced
     sample_ids: Optional[Sequence[str]] = None   # filter to these sample_ids
     k_values: Optional[Sequence[int]] = None     # filter to these k values
@@ -432,13 +432,17 @@ def _render_panel_pdf(
             return m.display
         return f"{m.display}\np={p:.2f}"
 
-    panels: List[Tuple[str, Path]] = [("Input (target boxed)", input_panel_path)]
+    # The caption explains the red target box; the short title avoids clipping
+    # at the left edge in the five-across native-width layout.
+    panels: List[Tuple[str, Path]] = [("Input", input_panel_path)]
     for m in models:
         panels.append((_panel_title(m), pkg_dir / f"{m.label}_boxed.png"))
 
     n = len(panels)
     fig_w = tile_size_inches * n + 0.05 * (n - 1)
-    fig_h = tile_size_inches + 0.50  # taller: second-line probability label
+    # Preserve the original 8.2:2.1 canvas ratio while shrinking both
+    # dimensions to the native 5.5-inch paper width. Plot fonts stay at 8/9 pt.
+    fig_h = fig_w * (2.1 / 8.2)
     fig, axes = plt.subplots(
         1, n, figsize=(fig_w, fig_h),
         constrained_layout=True,
@@ -459,7 +463,7 @@ def _render_panel_pdf(
         ax.set_xticks([]); ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-        ax.set_title(title, fontsize=8, pad=2, fontfamily="sans-serif")
+        ax.set_title(title, fontsize=9, pad=2, fontfamily="sans-serif")
 
     cls_part = spec.get("class_name") or f"class {spec['class_id']}"
     area = spec.get("area_ratio")
@@ -469,9 +473,8 @@ def _render_panel_pdf(
         supt = f"{cls_part}  (k={spec['k']})"
     fig.suptitle(supt, fontsize=9, fontfamily="sans-serif")
 
-    fig.savefig(pkg_dir / "figure.pdf", bbox_inches="tight", pad_inches=0.02)
-    fig.savefig(pkg_dir / "figure.png",
-                bbox_inches="tight", pad_inches=0.02, dpi=dpi)
+    fig.savefig(pkg_dir / "figure.pdf")
+    fig.savefig(pkg_dir / "figure.png", dpi=dpi)
     plt.close(fig)
     return True
 
@@ -691,7 +694,7 @@ def _parse_cli(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--no-render", action="store_true",
                    help="Skip PDF/PNG rendering; only emit tile PNGs + spec.")
     p.add_argument("--render-dpi", type=int, default=300)
-    p.add_argument("--tile-size-inches", type=float, default=1.6)
+    p.add_argument("--tile-size-inches", type=float, default=1.06)
     p.add_argument("--max-samples", type=int, default=None,
                    help="Cap the total number of figure packages produced.")
     p.add_argument("--per-k-samples", type=int, default=DEFAULT_PER_K_SAMPLES,

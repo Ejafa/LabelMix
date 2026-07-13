@@ -24,9 +24,9 @@ sidecar so downstream tooling can quote headline numbers without
 re-reading the CSV.
 
 Styling is inherited from :mod:`evaluation.plots._style` (paper rcParams,
-categorical x-axis, dotted horizontal grid, ``.pdf`` + ``.png`` siblings
-via :func:`._style.savefig`).  The shared legend is rendered separately in
-horizontal and vertical variants so the three metric panels can be reused
+categorical x-axis, dotted horizontal grid, PDF output via
+:func:`._style.savefig`).  The shared legend is rendered separately in
+horizontal and vertical variants so the metric panels can be reused
 without repeating the same legend.
 
 Naming note: the ``labelmix-*`` runs in the source CSV are rendered as
@@ -42,7 +42,7 @@ Output  : ``data/processed/figures/diagnostic_area_logit/area_logit_spearman.pdf
           ``data/processed/figures/diagnostic_area_logit/area_logit_top_acc_with_std.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_legend_horizontal.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_legend_vertical.pdf``
-          (+ ``.png`` and ``.meta.json`` siblings for each)
+          (+ ``.meta.json`` sidecars for each)
 """
 from __future__ import annotations
 
@@ -61,6 +61,8 @@ import pandas as pd
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
 from ._style import (
+    DOUBLE_COL_WIDTH,
+    THREE_PANEL_WIDTH,
     apply_paper_style,
     line_color,
     method_display,
@@ -109,29 +111,26 @@ MODEL_ORDER: Sequence[ModelStyle] = (
     ModelStyle("cutmix",       method_display("cutmix"),       line_color("cutmix"),       "-", "^"),
     ModelStyle("mixup",        method_display("mixup"),        line_color("mixup"),        "-", "v"),
     ModelStyle("mosaic",       method_display("mosaic"),       line_color("mosaic"),       "-", "D"),
+    ModelStyle("fmix",         method_display("fmix"),         line_color("fmix"),         "-", "<"),
+    ModelStyle("gridmix",      method_display("gridmix"),      line_color("gridmix"),      "-", ">"),
+    ModelStyle("resizemix",    method_display("resizemix"),    line_color("resizemix"),    "-", "d"),
+    ModelStyle("saliencymix",  method_display("saliencymix"),  line_color("saliencymix"),  "-", "p"),
+    ModelStyle("smoothmix",    method_display("smoothmix"),    line_color("smoothmix"),    "-", "8"),
+    ModelStyle("tokenmix",     method_display("tokenmix"),     line_color("tokenmix"),     "-", "H"),
+    ModelStyle("tla",          method_display("tla"),          line_color("tla"),          "-", "+"),
     ModelStyle("labelmix-sce",   method_display("labelmix-sce"),   line_color("labelmix-sce"),   "-", "X"),
     ModelStyle("labelmix-mixed", method_display("labelmix-mixed"), line_color("labelmix-mixed"), "-", "h"),
     ModelStyle("labelmix-pl",    method_display("labelmix-pl"),    line_color("labelmix-pl"),    "-", "*"),
 )
 
 K_VALUES: Sequence[int] = (3, 4, 5, 6)
-DIAG_FIG_WIDTH = 4.6
+DIAG_FIG_WIDTH = THREE_PANEL_WIDTH
+DIAG_FIG_HEIGHT = DIAG_FIG_WIDTH * (3.6 / 4.6)
 K_DISPLAY_SPACING = 0.55
 K_EDGE_PAD = 0.10
 
-DIAG_RC = {
-    "font.size": 14,
-    "axes.titlesize": 14,
-    "axes.labelsize": 14,
-    "xtick.labelsize": 13,
-    "ytick.labelsize": 13,
-    "legend.fontsize": 13,
-}
-
-
 def _apply_diag_style() -> None:
     apply_paper_style()
-    plt.rcParams.update(DIAG_RC)
 
 
 def _k_positions() -> dict[int, float]:
@@ -163,7 +162,7 @@ _METRICS = {
     "spearman": {
         "column": "spearman_mean_mean",
         "std_column": "spearman_mean_std",
-        "label": r"Mean Spearman $\rho$ ($\uparrow$)",
+        "label": r"Spearman $\rho$",
         "title": "Area-logit Spearman correlation",
         "direction": "higher is better",
         "filename": "area_logit_spearman",
@@ -173,7 +172,7 @@ _METRICS = {
     "pair_acc": {
         "column": "pair_acc_mean",
         "std_column": "pair_acc_std",
-        "label": r"Pair ranking accuracy ($\uparrow$)",
+        "label": "Rank accuracy",
         "title": "Pairwise area-vs-logit ranking accuracy",
         "direction": "higher is better",
         "filename": "area_logit_pair_acc",
@@ -183,7 +182,7 @@ _METRICS = {
     "top_acc": {
         "column": "top_acc_mean",
         "std_column": "top_acc_std",
-        "label": r"Largest area $=$ top logit ($\uparrow$)",
+        "label": "Top accuracy",
         "title": "Largest-area top-logit accuracy",
         "direction": "higher is better",
         "filename": "area_logit_top_acc",
@@ -281,7 +280,7 @@ def _plot_metric(
     ax.set_xticks(list(pos.values()))
     ax.set_xticklabels([str(k) for k in K_VALUES])
     ax.set_xlim(x.min() - K_EDGE_PAD, x.max() + K_EDGE_PAD)
-    ax.set_xlabel(r"Number of patches $K$ per image")
+    ax.set_xlabel(r"Patches $K$")
     ax.set_ylabel(ylabel)
     # Grid intentionally disabled for the area-vs-logit diagnostic panels.
     ax.grid(False)
@@ -300,9 +299,9 @@ def plot_metric(df: pd.DataFrame, metric: str, *, with_std: bool = False) -> plt
     wide = _per_k(df, cfg["column"])
     wide_std = _per_k(df, cfg["std_column"]) if with_std else None
 
-    fig, ax = plt.subplots(figsize=(DIAG_FIG_WIDTH, 3.6))
+    fig, ax = plt.subplots(figsize=(DIAG_FIG_WIDTH, DIAG_FIG_HEIGHT))
     _plot_metric(ax, wide, ylabel=cfg["label"], wide_std=wide_std)
-    fig.tight_layout()
+    fig.tight_layout(pad=0.35)
     return fig
 
 
@@ -314,8 +313,8 @@ def plot_legend(orientation: str) -> plt.Figure:
     labels = [h.get_label() for h in handles]
 
     if orientation == "horizontal":
-        figsize = (5.2, 1.3)
-        ncol = int(np.ceil(len(handles) / 2))
+        figsize = (DOUBLE_COL_WIDTH, 1.35)
+        ncol = 4
         handlelength = 1.4
         columnspacing = 0.9
     elif orientation == "vertical":
@@ -448,26 +447,10 @@ def build_metric_metadata(
         ),
         "file": {
             "pdf": out_path.with_suffix(".pdf").name,
-            "png": out_path.with_suffix(".png").name,
             "directory": str(out_path.parent),
         },
     }
     return meta
-
-
-def _write_metadata(meta: dict, out_path: Path) -> Path:
-    """Write a ``<stem>.meta.json`` sidecar next to ``out_path``."""
-    meta = {
-        **meta,
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "generator": "evaluation.plots.area_logit_diagnostic",
-    }
-    meta_path = out_path.with_suffix(".meta.json")
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
-    with meta_path.open("w") as f:
-        json.dump(meta, f, indent=2, sort_keys=False)
-        f.write("\n")
-    return meta_path
 
 
 def build_legend_metadata(out_path: Path, orientation: str) -> dict:
@@ -487,15 +470,29 @@ def build_legend_metadata(out_path: Path, orientation: str) -> dict:
             for style in MODEL_ORDER
         ],
         "renaming": {
-            "labelmix-pl": "TreemapMix (PL)",
-            "labelmix-sce": "TreemapMix (SCE)",
+            "labelmix-pl": method_display("labelmix-pl"),
+            "labelmix-sce": method_display("labelmix-sce"),
         },
         "file": {
             "pdf": out_path.with_suffix(".pdf").name,
-            "png": out_path.with_suffix(".png").name,
             "directory": str(out_path.parent),
         },
     }
+
+
+def _write_metadata(meta: dict, out_path: Path) -> Path:
+    """Write a ``<stem>.meta.json`` sidecar next to ``out_path``."""
+    meta = {
+        **meta,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generator": "evaluation.plots.area_logit_diagnostic",
+    }
+    meta_path = out_path.with_suffix(".meta.json")
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    with meta_path.open("w") as f:
+        json.dump(meta, f, indent=2, sort_keys=False)
+        f.write("\n")
+    return meta_path
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
         _logger.info("Wrote %s", out_path)
         _logger.info("Wrote %s", meta_path)
         plt.close(fig)
+
     return 0
 
 

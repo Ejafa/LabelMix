@@ -9,9 +9,9 @@ chart:
 * **Bottom row** -- Expected Calibration Error at ``n_bins=15`` expressed
   in percentage points (``ECE x 100``), lower is better.
 
-The figure itself is clean -- no in-figure legend, no schedule annotation
-in the title -- and a matching standalone legend PDF is written next to
-each panel figure so it can be placed independently in the paper.
+The figure itself is clean -- no in-figure legend -- and a matching
+standalone legend PDF is written next to each panel figure so it can be
+placed independently in the paper.
 
 The three LabelMix variants use three standard, clearly distinct
 tab10-palette colours (orange / green / red) so each variant is
@@ -23,16 +23,13 @@ Inputs (default run, ``--input`` overrides):
   - ``data/processed/in1k_per_experiment_long.csv``
 
 Outputs (per input):
-  - ``figures/per_experiment/<stem>.pdf`` + ``.png`` (panels only)
-  - ``figures/per_experiment/<stem>_legend.pdf`` + ``.png`` (shared legend)
+  - ``figures/per_experiment/<stem>.pdf``
 
 For the short-horizon CSV an additional companion figure is emitted in
 the same run:
-  - ``figures/per_experiment/<stem>_nll_brier.pdf`` + ``.png``
-  - ``figures/per_experiment/<stem>_nll_brier_legend.pdf`` + ``.png``
+  - ``figures/per_experiment/<stem>_nll_brier.pdf``
 
-The long-horizon run intentionally skips the NLL/Brier companion -- that
-figure is delivered as a standalone PDF instead.
+The long-horizon run intentionally skips the NLL/Brier companion.
 """
 from __future__ import annotations
 
@@ -64,7 +61,8 @@ _logger = logging.getLogger(__name__)
 
 # Subdirectory for these paper figures.
 _OUT_SUBDIR = "per_experiment"
-_PANEL_WIDTH = DOUBLE_COL_WIDTH * 1.15
+_PANEL_WIDTH = DOUBLE_COL_WIDTH
+_PANEL_HEIGHT = 4.0 * (DOUBLE_COL_WIDTH / (6.8 * 1.15))
 
 # Reference ECE bin count (Guo et al., 2017).
 _ECE_BINS = 15
@@ -84,6 +82,13 @@ _TYPE_ORDER: Sequence[str] = (
     "mixup",
     "cutmix",
     "mosaic",
+    "fmix",
+    "gridmix",
+    "resizemix",
+    "saliencymix",
+    "smoothmix",
+    "tokenmix",
+    "tla",
     "labelmix-sce",
     "labelmix-mixed",
     "labelmix-pl",
@@ -177,7 +182,7 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1K") -> plt.Figure:
 
     fig, (ax_top, ax_ece) = plt.subplots(
         2, 1,
-        figsize=(_PANEL_WIDTH, 4),
+        figsize=(_PANEL_WIDTH, _PANEL_HEIGHT),
         sharex=True,
         gridspec_kw={"hspace": 0.28},
     )
@@ -262,15 +267,9 @@ def plot(df: pd.DataFrame, title: str | None = "ImageNet-1K") -> plt.Figure:
 # Standalone legend
 # ---------------------------------------------------------------------------
 
-def plot_legend(types: Sequence[str]) -> plt.Figure:
-    """Render the shared legend as a standalone horizontal figure.
-
-    ``types`` is the ordered list actually present in the data so the
-    legend matches the panel figure exactly (no orphan entries).
-    """
-    apply_paper_style()
-
-    handles = [
+def _legend_handles(types: Sequence[str]) -> list[Patch]:
+    """Return legend handles matching the ordered types present in the data."""
+    return [
         Patch(
             facecolor=_style_for(t)["color"],
             hatch=_style_for(t)["hatch"] or "",
@@ -280,12 +279,18 @@ def plot_legend(types: Sequence[str]) -> plt.Figure:
         )
         for t in types
     ]
+
+
+def plot_legend(types: Sequence[str]) -> plt.Figure:
+    """Render the shared legend as a standalone horizontal figure."""
+    apply_paper_style()
+
+    handles = _legend_handles(types)
     labels = [h.get_label() for h in handles]
 
-    ncol = min(len(handles), 5)
-    # Rough sizing: 1.2in per column, plus padding for two rows of text.
-    width = max(DOUBLE_COL_WIDTH, 1.2 * ncol)
-    nrows = int(np.ceil(len(handles) / ncol))
+    ncol = min(len(handles), 4)
+    width = DOUBLE_COL_WIDTH
+    nrows = int(np.ceil(len(handles) / ncol)) if ncol else 1
     height = 0.35 + 0.28 * nrows
 
     fig = plt.figure(figsize=(width, height))
@@ -318,18 +323,18 @@ _DEFAULT_INPUTS: tuple[tuple[str, Path, Path, bool], ...] = (
         "ImageNet-1K",
         PROCESSED_DIR / "in1k_per_experiment_long.csv",
         FIGURES_DIR / _OUT_SUBDIR / "in1k_per_experiment_long.pdf",
-        False,  # long horizon is delivered as a standalone PDF instead
+        False,  # no NLL/Brier companion for the long horizon
     ),
 )
-
-
-def _legend_path_for(panel_path: Path) -> Path:
-    return panel_path.with_name(panel_path.stem + "_legend.pdf")
 
 
 def _nll_brier_path_for(panel_path: Path) -> Path:
     """Companion NLL/Brier PDF next to ``panel_path`` (same stem + suffix)."""
     return panel_path.with_name(panel_path.stem + "_nll_brier.pdf")
+
+
+def _legend_path_for(panel_path: Path) -> Path:
+    return panel_path.with_name(panel_path.stem + "_legend.pdf")
 
 
 def _render_one(
@@ -344,14 +349,20 @@ def _render_one(
         return 0
     _logger.info("Reading %s", in_path)
     df = pd.read_csv(in_path)
+    if df.empty:
+        _logger.info("Skipping %s (empty CSV)", in_path)
+        return 0
 
-    # Panel figure (no in-figure legend).
+    if title == "ImageNet-1K" and "dataset" in df.columns:
+        datasets = " ".join(str(v).lower() for v in df["dataset"].dropna().unique())
+        if "cifar100" in datasets:
+            title = "CIFAR100"
+
     fig = plot(df, title=title)
     savefig(fig, str(out_path))
     plt.close(fig)
     _logger.info("Wrote %s", out_path)
 
-    # Standalone legend matching the types present in this CSV.
     types = _ordered(_filter_types(df)["type"].unique(), _TYPE_ORDER)
     leg_fig = plot_legend(types)
     leg_path = _legend_path_for(out_path)
@@ -371,8 +382,6 @@ def _render_one(
         plt.close(nb_fig)
         _logger.info("Wrote %s", nb_path)
 
-        # Same legend applies -- write it next to the NLL/Brier panel too
-        # so the figure + legend pair can be moved around independently.
         nb_leg_fig = plot_legend(types)
         nb_leg_path = _legend_path_for(nb_path)
         savefig(nb_leg_fig, str(nb_leg_path))
@@ -392,8 +401,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--output", type=Path, default=None,
         help="Output PDF path for the panel figure. "
-             "Only honoured when --input is given. "
-             "The legend is written to <stem>_legend.pdf next to it.",
+             "Only honoured when --input is given.",
     )
     p.add_argument("--title", type=str, default="ImageNet-1K",
                    help="Figure title for the top panel.")

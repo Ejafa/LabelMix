@@ -15,7 +15,6 @@ Public API (stable) — legacy imports keep working:
 """
 from .config import EvalConfig
 from .metrics import METRIC_REGISTRY, MetricResult, register_metric
-from .offline_eval import evaluate_mapping, evaluate_run
 from .types import EvalResult
 
 __all__ = [
@@ -27,3 +26,20 @@ __all__ = [
     "evaluate_mapping",
     "evaluate_run",
 ]
+
+
+def __getattr__(name: str):
+    """Lazily expose offline evaluation entry points.
+
+    Plotting and processing modules should import without pulling in the
+    checkpoint/data-loader stack.  The offline evaluator still remains
+    available through the legacy ``from evaluation import evaluate_run`` API.
+    """
+    if name in {"evaluate_mapping", "evaluate_run"}:
+        from .offline_eval import evaluate_mapping, evaluate_run
+
+        return {
+            "evaluate_mapping": evaluate_mapping,
+            "evaluate_run": evaluate_run,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

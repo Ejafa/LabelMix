@@ -65,8 +65,29 @@ def plot(logits: torch.Tensor, targets: torch.Tensor, n_bins: int = 15) -> plt.F
     ax.set_ylim(0, 1)
     ax.set_xlabel("Confidence")
     ax.set_ylabel("Accuracy / fraction")
-    ax.legend(loc="upper left")
     fig.tight_layout()
+    return fig
+
+
+def plot_legend() -> plt.Figure:
+    apply_paper_style()
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    handles = [
+        Line2D([0], [0], linestyle="--", linewidth=0.8, color="gray", label="Perfect"),
+        Patch(facecolor=PALETTE[0], edgecolor="black", linewidth=0.5, label="Accuracy"),
+        Patch(facecolor=PALETTE[1], alpha=0.25, label="Fraction of samples"),
+    ]
+    fig = plt.figure(figsize=(SINGLE_COL_WIDTH, 0.8 * (SINGLE_COL_WIDTH / 3.3)))
+    fig.legend(
+        handles,
+        [h.get_label() for h in handles],
+        loc="center",
+        ncol=1,
+        frameon=False,
+        borderaxespad=0.0,
+    )
     return fig
 
 
@@ -87,7 +108,13 @@ def main(argv: list[str] | None = None) -> int:
 
     fig = plot(logits, targets, n_bins=args.n_bins)
     savefig(fig, str(output))
+    plt.close(fig)
     _logger.info("Wrote %s", output)
+    leg_path = output.with_name(output.stem + "_legend.pdf")
+    leg_fig = plot_legend()
+    savefig(leg_fig, str(leg_path))
+    plt.close(leg_fig)
+    _logger.info("Wrote %s", leg_path)
     return 0
 
 

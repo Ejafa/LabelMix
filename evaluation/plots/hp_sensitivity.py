@@ -20,8 +20,8 @@ Produces three figures from
    The legend is rendered separately as
    ``hp_sensitivity_k_vit_wee_legend.pdf``.
 
-3. ``hp_sensitivity_heatmaps_vit_wee.pdf`` (appendix, 2x2 grid):
-   rows = metric, cols = loss.  Each cell is an 8x8 α × K heatmap of the
+3. ``hp_sensitivity_heatmaps_*_vit_wee.pdf`` (appendix, one metric per PDF):
+   cols = loss.  Each cell is an 8x8 α × K heatmap of the
    *absolute* metric value.  Colour uses a symmetric linear scale centred
    on the Cutmix + Mixup mean and the dark global TreemapMix method colours
    (blue = better than Cutmix + Mixup, red = worse).
@@ -38,8 +38,9 @@ Output  : ``data/processed/figures/hyperparameter/hp_sensitivity_vit_wee.pdf``
           ``data/processed/figures/hyperparameter/hp_sensitivity_vit_wee_legend.pdf``
           ``data/processed/figures/hyperparameter/hp_sensitivity_k_vit_wee.pdf``
           ``data/processed/figures/hyperparameter/hp_sensitivity_k_vit_wee_legend.pdf``
-          ``data/processed/figures/hyperparameter/hp_sensitivity_heatmaps_vit_wee.pdf``
-          (+ ``.png`` and ``.meta.json`` siblings for each)
+          ``data/processed/figures/hyperparameter/hp_sensitivity_heatmaps_top1_vit_wee.pdf``
+          ``data/processed/figures/hyperparameter/hp_sensitivity_heatmaps_ece_vit_wee.pdf``
+          (+ ``.meta.json`` sidecars for each)
 """
 from __future__ import annotations
 
@@ -57,10 +58,13 @@ from matplotlib.lines import Line2D
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
 from ._style import (
+    AXIS_LABEL_FONT_SIZE,
     DOUBLE_COL_WIDTH,
     METHOD_COLORS_DARK,
     REF_DARK_GREY,
     REF_MID_GREY,
+    TICK_LABEL_FONT_SIZE,
+    TITLE_FONT_SIZE,
     apply_paper_style,
     method_display,
     savefig,
@@ -242,7 +246,7 @@ def plot_sensitivity(df: pd.DataFrame, *, sweep: str = "alpha") -> plt.Figure:
 
     fig, axes = plt.subplots(
         1, 2,
-        figsize=(DOUBLE_COL_WIDTH, 2.4),
+        figsize=(DOUBLE_COL_WIDTH, 2.4 * (DOUBLE_COL_WIDTH / 6.8)),
         sharex=True,
     )
 
@@ -293,7 +297,7 @@ def plot_sensitivity_legend() -> plt.Figure:
     handles = _sensitivity_legend_handles()
     labels = [h.get_label() for h in handles]
 
-    fig = plt.figure(figsize=(DOUBLE_COL_WIDTH, 0.55))
+    fig = plt.figure(figsize=(DOUBLE_COL_WIDTH, 0.55 * (DOUBLE_COL_WIDTH / 6.8)))
     fig.legend(
         handles,
         labels,
@@ -361,7 +365,6 @@ def build_sensitivity_metadata(
             {
                 "rendered_separately": True,
                 "pdf": legend_path.with_suffix(".pdf").name,
-                "png": legend_path.with_suffix(".png").name,
             }
             if legend_path is not None
             else {"rendered_separately": True}
@@ -412,7 +415,6 @@ def build_sensitivity_metadata(
         ),
         "file": {
             "pdf": out_path.with_suffix(".pdf").name,
-            "png": out_path.with_suffix(".png").name,
             "directory": str(out_path.parent),
         },
     }
@@ -442,10 +444,10 @@ def build_sensitivity_legend_metadata(out_path: Path, *, sweep: str) -> dict:
         ],
         "file": {
             "pdf": out_path.with_suffix(".pdf").name,
-            "png": out_path.with_suffix(".png").name,
             "directory": str(out_path.parent),
         },
     }
+
 
 # --------------------------------------------------------------------------
 # Figure 2: Δ-vs-baseline heatmaps (symmetric log colour)
@@ -577,7 +579,7 @@ def _draw_heatmap(
             txt_colour = "white" if abs(rel - 0.5) > 0.40 else "black"
             ax.text(j, i, f"{v:.2f}",
                     ha="center", va="center",
-                    fontsize=6.8, color=txt_colour)
+                    fontsize=TICK_LABEL_FONT_SIZE, color=txt_colour)
 
     ax.set_xlabel(r"$\alpha$")
     ax.set_ylabel(r"$K$")
@@ -589,7 +591,7 @@ def _draw_heatmap(
         transform=ax.transAxes,
         ha="center",
         va="center",
-        fontsize=9,
+        fontsize=TITLE_FONT_SIZE,
         clip_on=False,
     )
     ax.text(
@@ -598,7 +600,7 @@ def _draw_heatmap(
         transform=ax.transAxes,
         ha="center",
         va="center",
-        fontsize=8.6,
+        fontsize=TICK_LABEL_FONT_SIZE,
         clip_on=False,
     )
     ax.text(
@@ -607,7 +609,7 @@ def _draw_heatmap(
         transform=ax.transAxes,
         ha="center",
         va="center",
-        fontsize=8.6,
+        fontsize=TICK_LABEL_FONT_SIZE,
         clip_on=False,
     )
     return im
@@ -615,7 +617,7 @@ def _draw_heatmap(
 
 _METRIC_CFG = {
     # metric -> (lower_is_better, label)
-    "top1": (False, "Accuracy (%)"),
+    "top1": (False, "Top-1 (%)"),
     "ece":  (True,  "ECE (p.p.)"),
 }
 
@@ -661,7 +663,7 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
     # bottom reserves room for the shared horizontal colourbar.
     fig, axes = plt.subplots(
         1, 2,
-        figsize=(DOUBLE_COL_WIDTH * 1.15, 3.4),
+        figsize=(DOUBLE_COL_WIDTH, 3.4 * (DOUBLE_COL_WIDTH / (6.8 * 1.15))),
         constrained_layout=True,
     )
 
@@ -669,7 +671,7 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
     for col, loss in enumerate(LOSS_ORDER):
         piv = _pivot(lm, loss, metric)
         ax = axes[col]
-        title = f"{metric_label} — {LOSS_LABELS[loss]}"
+        title = f"{metric_label}: {LOSS_LABELS[loss]}"
         last_im = _draw_heatmap(
             ax, piv,
             baseline_mean=bl_m, baseline_std=bl_s,
@@ -689,9 +691,9 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
     )
     cbar.set_label(
         f"{HEATMAP_BETTER_LABEL} = better; {HEATMAP_WORSE_LABEL.lower()} = worse",
-        fontsize=9,
+        fontsize=AXIS_LABEL_FONT_SIZE,
     )
-    cbar.ax.tick_params(labelsize=7)
+    cbar.ax.tick_params(labelsize=TICK_LABEL_FONT_SIZE)
 
     return fig
 
@@ -813,7 +815,6 @@ def build_heatmap_metadata(
         ),
         "file": {
             "pdf": out_path.with_suffix(".pdf").name,
-            "png": out_path.with_suffix(".png").name,
             "directory": str(out_path.parent),
         },
     }

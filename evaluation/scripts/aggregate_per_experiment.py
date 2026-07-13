@@ -20,6 +20,13 @@ Pipeline
    ``mixup_switch_prob=0.0``               ``mixup``
    ``noaug``                               ``noaug``
    ``mosaic``                              ``mosaic``
+   ``openmixup-fmix``                      ``fmix``
+   ``openmixup-gridmix``                   ``gridmix``
+   ``openmixup-resizemix``                 ``resizemix``
+   ``openmixup-saliencymix``               ``saliencymix``
+   ``openmixup-smoothmix``                 ``smoothmix``
+   ``openmixup-tokenmix``                  ``tokenmix``
+   ``openmixup-tla``                       ``tla``
    ``mixed``                               ``labelmix-mixed``
    ``pl-loss``                             ``labelmix-pl``
    ``soft-ce``                             ``labelmix-sce``
@@ -126,6 +133,15 @@ _KEYWORD_RULES: Sequence[tuple[str, str]] = (
     ("baseline", "baseline"),
     ("mixup_switch_prob=1.0", "cutmix"),
     ("mixup_switch_prob=0.0", "mixup"),
+    ("openmixup-fmix", "fmix"),
+    ("openmixup-gridmix", "gridmix"),
+    ("openmixup-resizemix", "resizemix"),
+    ("openmixup-saliencymix", "saliencymix"),
+    ("openmixup-smoothmix", "smoothmix"),
+    ("openmixup-tokenmix", "tokenmix"),
+    ("openmixup-tla", "tla"),
+    ("cutmix", "cutmix"),
+    ("mixup", "mixup"),
     ("pl-loss", "labelmix-pl"),
     ("soft-ce", "labelmix-sce"),
     ("mosaic", "mosaic"),
@@ -138,6 +154,15 @@ _KEYWORD_RULES: Sequence[tuple[str, str]] = (
 _UNBALANCED_SECONDARIES: Sequence[tuple[str, str]] = (
     ("mixup_switch_prob=1.0", "cutmix"),
     ("mixup_switch_prob=0.0", "mixup"),
+    ("openmixup-fmix", "fmix"),
+    ("openmixup-gridmix", "gridmix"),
+    ("openmixup-resizemix", "resizemix"),
+    ("openmixup-saliencymix", "saliencymix"),
+    ("openmixup-smoothmix", "smoothmix"),
+    ("openmixup-tokenmix", "tokenmix"),
+    ("openmixup-tla", "tla"),
+    ("cutmix", "cutmix"),
+    ("mixup", "mixup"),
     ("pl-loss", "labelmix-pl"),
     ("soft-ce", "labelmix-sce"),
     ("mosaic", "mosaic"),

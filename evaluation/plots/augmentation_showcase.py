@@ -102,6 +102,7 @@ from timm.data.labelmix_layout import squarify_core  # noqa: E402
 from timm.data.mosaic_dataset import MosaicDataset  # noqa: E402
 
 from evaluation.common.paths import FIGURES_DIR, ensure_dirs  # noqa: E402
+from evaluation.plots._style import FOUR_PANEL_WIDTH, FIVE_PANEL_WIDTH  # noqa: E402
 
 _logger = logging.getLogger("augmentation_showcase")
 
@@ -892,14 +893,29 @@ def _save_png(arr_hwc_uint8: np.ndarray, path: str, *, overwrite: bool = False) 
     Image.fromarray(arr_hwc_uint8).save(path, format="PNG", optimize=False)
 
 
-def _save_pdf(arr_hwc_uint8: np.ndarray, path: str, *, overwrite: bool = False) -> None:
-    """Write a paper-ready PDF wrapper for an HWC uint8 image."""
+def _save_pdf(
+    arr_hwc_uint8: np.ndarray,
+    path: str,
+    *,
+    size_inches: float,
+    overwrite: bool = False,
+) -> None:
+    """Write a square PDF at its final native size for the LaTeX row."""
     if os.path.exists(path) and not overwrite:
         return
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    resolution = float(arr_hwc_uint8.shape[0]) / size_inches
     Image.fromarray(arr_hwc_uint8).convert("RGB").save(
-        path, format="PDF", resolution=300.0,
+        path, format="PDF", resolution=resolution,
     )
+
+
+def _paper_tile_width(dir_path: str) -> float:
+    """Return the native tile width implied by the paper's LaTeX layout."""
+    group = os.path.basename(os.path.normpath(dir_path))
+    if group == "aug_comparison_clean":
+        return FIVE_PANEL_WIDTH
+    return FOUR_PANEL_WIDTH
 
 
 def _save_tensor_at_sizes(
@@ -916,15 +932,24 @@ def _save_tensor_at_sizes(
     """
     base = _tensor_to_uint8_hwc(t)
     written: List[str] = []
+    pdf_size_inches = _paper_tile_width(dir_path)
     for tile_px in tile_sizes:
         resized = _resize_uint8(base, tile_px)
         png_path = os.path.join(dir_path, f"{stem}_{tile_px}.png")
         pdf_path = os.path.join(dir_path, f"{stem}_{tile_px}.pdf")
-        for out_path, save in ((png_path, _save_png), (pdf_path, _save_pdf)):
-            if overwrite or not os.path.exists(out_path):
-                save(resized, out_path, overwrite=overwrite)
-                _logger.info("Wrote %s", out_path)
-            written.append(out_path)
+        if overwrite or not os.path.exists(png_path):
+            _save_png(resized, png_path, overwrite=overwrite)
+            _logger.info("Wrote %s", png_path)
+        written.append(png_path)
+        if overwrite or not os.path.exists(pdf_path):
+            _save_pdf(
+                resized,
+                pdf_path,
+                size_inches=pdf_size_inches,
+                overwrite=overwrite,
+            )
+            _logger.info("Wrote %s", pdf_path)
+        written.append(pdf_path)
     return written
 
 
