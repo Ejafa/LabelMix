@@ -11,6 +11,16 @@ from .dataset_info import DatasetInfo, CustomDatasetInfo
 from .imagenet_info import ImageNetInfo, infer_imagenet_subset
 from .loader import create_loader
 from .mixup import Mixup, FastCollateMixup
+from .openmixup_augs import (
+    OPENMIXUP_AUG_NAMES,
+    OPENMIXUP_CLI_AUG_NAMES,
+    OPENMIXUP_IMAGE_ONLY_AUGS,
+    OPENMIXUP_MODEL_AWARE_AUGS,
+    OPENMIXUP_AUG_INFO,
+    OpenMixupAug,
+    apply_openmixup_aug,
+    openmixup_to_soft_target,
+)
 from .naflex_dataset import NaFlexMapDatasetWrapper, calculate_naflex_batch_size
 from .naflex_loader import create_naflex_loader
 from .naflex_mixup import NaFlexMixup, pairwise_mixup_target, mix_batch_variable_size

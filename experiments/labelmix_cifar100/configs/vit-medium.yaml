@@ -1,10 +1,10 @@
-aa: rand-m2-inc1-mstd1.0-n3
+aa: rand-m4-inc1-mstd1.0-n3
 amp: true
 amp_dtype: float16
 amp_impl: native
-aug_repeats: 3.0
+aug_repeats: 0
 aug_splits: 0
-batch_size: 512
+batch_size: 256
 bce_loss: false
 bce_target_thresh: null
 bn_eps: null
@@ -58,9 +58,9 @@ local_rank: 0
 log_interval: 50
 log_wandb: false
 lr: null
-lr_base: 7.5e-4
+lr_base: 3.75e-4
 lr_base_scale: ''
-lr_base_size: 1024
+lr_base_size: 512
 lr_cycle_decay: 0.5
 lr_cycle_limit: 1
 lr_cycle_mul: 1.0

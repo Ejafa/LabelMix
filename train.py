@@ -28,7 +28,7 @@ from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
 from functools import partial
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -41,6 +41,24 @@ from timm.data import BalancedBucketDataset, MosaicDataset
 from timm import utils
 from timm.data import create_dataset, create_loader, create_naflex_loader, resolve_data_config, \
     create_transform, Mixup, FastCollateMixup, AugMixDataset
+from timm.data import (
+    OPENMIXUP_AUG_NAMES,
+    OPENMIXUP_CLI_AUG_NAMES,
+    OPENMIXUP_IMAGE_ONLY_AUGS,
+    OPENMIXUP_AUG_INFO,
+    OpenMixupAug,
+)
+
+OPENMIXUP_DEFAULT_ALPHA = {
+    'resizemix': 0.1,
+    'tokenmix': 0.4,
+    'fmix': 0.4,
+    'tla': 0.2,
+    'saliencymix': 0.25,
+    'gridmix': 0.1,
+    'smoothmix': 0.6,
+}
+
 from timm.data.loader import PrefetchLoader, _worker_init, fast_collate
 from timm.layers import convert_splitbn_model, convert_sync_batchnorm, set_fast_norm
 from timm.loss import (
@@ -460,6 +478,32 @@ group.add_argument('--mixup-mode', type=str, default='batch',
                    help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 group.add_argument('--mixup-off-step', default=0, type=int, metavar='N',
                    help='Turn off mixup after this step, disabled if 0 (default: 0)')
+
+# ---- OpenMixup-style augmentations ----
+# Each augmentation gets its own --<name> boolean flag. At most one of
+# them may be enabled, and they are mutually exclusive with --mixup /
+# --cutmix / --mosaic / --labelmix (see _resolve_multi_image_aug).
+# ``mixup``, ``cutmix`` and ``augmix`` are not exposed here because the
+# repo already implements them: use --mixup / --cutmix / --aa augmix-...
+for _om_name in OPENMIXUP_CLI_AUG_NAMES:
+    _info = OPENMIXUP_AUG_INFO[_om_name]
+    _suffix = ' (model-aware: needs feature/attention maps; not wired into the training loop)' \
+        if not _info['image_only'] else ''
+    group.add_argument(
+        f'--{_om_name}', action='store_true', default=False,
+        help=f"Enable OpenMixup '{_om_name}': {_info['desc']}{_suffix}",
+    )
+del _om_name, _info, _suffix
+group.add_argument('--puzzlemix', action='store_true', default=False,
+                   help='Disabled: the local PuzzleMix port is only a simplified approximation, '
+                        'not the full graph-cut/transport implementation.')
+group.add_argument('--openmixup-alpha', type=float, default=None,
+                   help='Alpha (Beta/Dirichlet) parameter for the active OpenMixup aug; defaults are method-specific.')
+group.add_argument('--openmixup-prob', type=float, default=1.0,
+                   help='Per-batch probability of applying the active OpenMixup aug.')
+group.add_argument('--openmixup-extra-kwargs', nargs='*', default={}, action=utils.ParseKwargs,
+                   help='Additional keyword arguments to forward to the active OpenMixup aug, '
+                        'e.g. n_holes=20 hole_aspect_ratio=1.0 for --gridmix.')
 group.add_argument('--smoothing', type=float, default=0.1,
                    help='Label smoothing (default: 0.1)')
 group.add_argument('--train-interpolation', type=str, default='random',
@@ -663,6 +707,62 @@ def build_args(
     return args, args_text
 
 
+# Methods that mix or reshape MULTIPLE source images into a single training
+# sample. At most one of them may be active per training configuration.
+# The dispatcher below collects every per-flag switch into a single name
+# and surfaces any conflict as a clean error message.
+#
+# The list is ordered: when error messages enumerate conflicting flags,
+# they appear in this order. Adding a new multi-image augmentation just
+# means appending its (CLI flag, predicate) pair to this table.
+def _multi_image_aug_table() -> Tuple[Tuple[str, str, str], ...]:
+    """Return ``((name, cli_flag, attr_predicate), ...)`` for every multi-image aug."""
+    base: List[Tuple[str, str, str]] = [
+        ("mixup",     "--mixup / --cutmix / --cutmix-minmax", "_mixup_or_cutmix"),
+        ("mosaic",    "--mosaic",                              "mosaic"),
+        ("labelmix",  "--labelmix",                            "labelmix"),
+        ("puzzlemix", "--puzzlemix",                           "puzzlemix"),
+    ]
+    for name in OPENMIXUP_CLI_AUG_NAMES:
+        base.append((name, f"--{name}", name))
+    return tuple(base)
+
+
+def _multi_image_aug_active(args, attr: str) -> bool:
+    """Return True iff the given aug is enabled in ``args``."""
+    if attr == "_mixup_or_cutmix":
+        # ``--mixup``/``--cutmix`` are floats. They count as active when > 0
+        # (or when --cutmix-minmax is set, which is an alternative param).
+        return (
+            (float(getattr(args, "mixup", 0.0) or 0.0) > 0.0)
+            or (float(getattr(args, "cutmix", 0.0) or 0.0) > 0.0)
+            or (getattr(args, "cutmix_minmax", None) is not None)
+        )
+    return bool(getattr(args, attr, False))
+
+
+def _resolve_multi_image_aug(args) -> Optional[str]:
+    """Resolve the single active multi-image augmentation.
+
+    Returns the canonical name (e.g. ``"fmix"``, ``"mixup"``, ``"mosaic"``)
+    or ``None`` if no multi-image augmentation is enabled. Raises
+    ``ValueError`` if more than one is enabled, listing every conflicting
+    CLI flag in a single message.
+    """
+    active: List[Tuple[str, str]] = []
+    for name, flag, attr in _multi_image_aug_table():
+        if _multi_image_aug_active(args, attr):
+            active.append((name, flag))
+    if len(active) > 1:
+        flags = ", ".join(f"{flag}" for _, flag in active)
+        raise ValueError(
+            "Only one multi-image augmentation may be enabled per training "
+            f"configuration, but the following are all set: {flags}. "
+            "Disable all but one."
+        )
+    return active[0][0] if active else None
+
+
 def validate_args(args) -> None:
     """Run the validation checks that ``main()`` performs on parsed args.
 
@@ -704,6 +804,32 @@ def validate_args(args) -> None:
             raise ValueError('--balanced-mode must be "min", "max", or a positive int')
         if isinstance(mode, int) and mode < 1:
             raise ValueError('--balanced-mode int value must be >= 1')
+
+    if getattr(args, 'puzzlemix', False):
+        raise ValueError(
+            '--puzzlemix is disabled. The local PuzzleMix port is only a '
+            'simplified approximation, not the full graph-cut/transport '
+            'implementation from OpenMixup.'
+        )
+
+    # Single multi-image-augmentation rule: --mixup/--cutmix, --mosaic,
+    # --labelmix and the per-method OpenMixup flags (--fmix, --gridmix,
+    # ...) are all mutually exclusive. Raises ValueError if any two are
+    # set together.
+    om_aug = _resolve_multi_image_aug(args)
+    if om_aug is not None and om_aug in OPENMIXUP_AUG_NAMES:
+        info = OPENMIXUP_AUG_INFO[om_aug]
+        if not info['image_only']:
+            raise ValueError(
+                f'--{om_aug} is a model-aware OpenMixup augmentation and is '
+                'not currently wired into the training loop. Use one of: '
+                f'{OPENMIXUP_IMAGE_ONLY_AUGS}'
+            )
+        if getattr(args, 'naflex_loader', False):
+            raise ValueError(f'--{om_aug} is not compatible with --naflex-loader.')
+        prob = float(getattr(args, 'openmixup_prob', 1.0))
+        if prob < 0.0 or prob > 1.0:
+            raise ValueError('--openmixup-prob must be in [0, 1].')
 
 
 
@@ -1701,6 +1827,24 @@ def run_training(args=None, args_text=None):
     mixup_fn = None
     mixup_args = {}
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    # Resolve which (if any) OpenMixup per-method flag is set. Conflict
+    # detection (mixup vs cutmix vs ... vs fmix vs ...) is centralized in
+    # ``_resolve_multi_image_aug``; we use ``parser.error`` so the user
+    # gets the standard CLI error format.
+    if getattr(args, 'puzzlemix', False):
+        parser.error(
+            '--puzzlemix is disabled. The local PuzzleMix port is only a '
+            'simplified approximation, not the full graph-cut/transport '
+            'implementation from OpenMixup.'
+        )
+    try:
+        _resolved_aug = _resolve_multi_image_aug(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    openmixup_aug_name: Optional[str] = (
+        _resolved_aug if _resolved_aug in OPENMIXUP_CLI_AUG_NAMES else None
+    )
+    openmixup_active = openmixup_aug_name is not None
     labelmix_train_dataset = None
     labelmix_k_total_epochs_auto = False
     if mixup_active:
@@ -1713,6 +1857,39 @@ def run_training(args=None, args_text=None):
             mode=args.mixup_mode,
             label_smoothing=args.smoothing,
             num_classes=args.num_classes
+        )
+
+    if openmixup_active:
+        # ``_resolve_multi_image_aug`` already guarantees mixup/cutmix/
+        # mosaic/labelmix are off when an OpenMixup flag is set, so the
+        # only remaining checks are aug-specific.
+        if args.naflex_loader:
+            parser.error(f'--{openmixup_aug_name} is not compatible with --naflex-loader.')
+        info = OPENMIXUP_AUG_INFO[openmixup_aug_name]
+        if not info['image_only']:
+            parser.error(
+                f"--{openmixup_aug_name} is a model-aware OpenMixup method "
+                f"({info['desc']}); training-time wiring requires feature/attention "
+                f"hooks that are not available in this entrypoint. Use one of: "
+                f"{', '.join(OPENMIXUP_IMAGE_ONLY_AUGS)}."
+            )
+        if args.prefetcher:
+            if utils.is_primary(args):
+                _logger.info(
+                    'Disabling prefetcher for --%s (target format not compatible).',
+                    openmixup_aug_name,
+                )
+            args.prefetcher = False
+        # OpenMixup expects a soft-label tensor downstream; reuse the
+        # SoftTargetCrossEntropy path used for mixup-style training.
+        mixup_active = True  # downstream switches to SoftTargetCrossEntropy
+
+    openmixup_alpha = None
+    if openmixup_active:
+        openmixup_alpha = (
+            args.openmixup_alpha
+            if args.openmixup_alpha is not None
+            else OPENMIXUP_DEFAULT_ALPHA.get(openmixup_aug_name, 1.0)
         )
 
     naflex_mode = False
@@ -1766,7 +1943,24 @@ def run_training(args=None, args_text=None):
     else:
         # setup mixup / cutmix
         collate_fn = None
-        if mixup_active:
+        if openmixup_active:
+            mixup_fn = OpenMixupAug(
+                openmixup_aug_name,
+                num_classes=args.num_classes,
+                alpha=openmixup_alpha,
+                prob=args.openmixup_prob,
+                label_smoothing=args.smoothing,
+                mean=data_config['mean'],
+                std=data_config['std'],
+                **dict(getattr(args, 'openmixup_extra_kwargs', {}) or {}),
+            )
+            if utils.is_primary(args):
+                _logger.info(
+                    'OpenMixup augmentation enabled: name=%s alpha=%g prob=%g extras=%s',
+                    openmixup_aug_name, openmixup_alpha, args.openmixup_prob,
+                    dict(getattr(args, 'openmixup_extra_kwargs', {}) or {}),
+                )
+        elif mixup_active:
             if args.prefetcher:
                 assert not num_aug_splits  # collate conflict (need to support de-interleaving in collate mixup)
                 collate_fn = FastCollateMixup(**mixup_args)

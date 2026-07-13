@@ -87,11 +87,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -115,6 +116,23 @@ BACKUP_FILES: tuple[str, ...] = (
 
 #: Wandb run states that we consider "finished" and therefore backup-worthy.
 FINISHED_STATES: frozenset[str] = frozenset({"finished"})
+
+# 120-epoch over-train edge case (W&B / timm pipeline only). A subset of
+# the in1k_round1_openmixup_4models_3seed_110e_bs512 sweep was accidentally
+# trained for ~120 total epochs instead of 110. We detect this from
+# args.yaml and substitute the closest-to-110-epoch periodic checkpoint
+# for model_best.pth.tar in the backup. Constants below are tuned for
+# global bs=512 on ImageNet-1k (1.281M training images, ~2502 steps/epoch).
+_IN1K_TRAIN_SIZE: int = 1_281_167
+_OVERTRAIN_KNOWN_DATASETS: Dict[str, int] = {
+    "hfds/ILSVRC/imagenet-1k": _IN1K_TRAIN_SIZE,
+}
+_OVERTRAIN_TARGET_EPOCHS: int = 110
+_OVERTRAIN_TRIGGER_EPOCHS: int = 120
+_OVERTRAIN_TRIGGER_EPS: float = 0.5
+_TIMM_STEP_CKPT_RE: re.Pattern[str] = re.compile(
+    r"^checkpoint-(\d+)\.pth\.tar$"
+)
 
 #: Name of the manifest we drop next to the backup root.
 MANIFEST_NAME: str = "_manifest.json"
@@ -297,17 +315,220 @@ def _resolve_run_dir(config: Dict[str, Any], project_root: Path) -> Optional[Pat
     return None
 
 
+def _list_step_checkpoints(src_dir: Path) -> List[Tuple[int, Path]]:
+    """Return ``(step, path)`` for every ``checkpoint-<step>.pth.tar``.
+
+    Sorted ascending by step. Files whose name doesn't match the pattern
+    are silently skipped.
+    """
+    out: List[Tuple[int, Path]] = []
+    if not src_dir.is_dir():
+        return out
+    for p in src_dir.iterdir():
+        if not p.is_file():
+            continue
+        m = _TIMM_STEP_CKPT_RE.match(p.name)
+        if not m:
+            continue
+        try:
+            step = int(m.group(1))
+        except ValueError:
+            continue
+        out.append((step, p))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _read_last_step(src_dir: Path) -> Optional[int]:
+    """Best-effort read of ``last_step`` from ``run_status.yaml``.
+
+    The on-disk schema wraps everything under a single experiment key,
+    so we walk one level of nesting if the top-level lookup fails.
+    """
+    rs_path = src_dir / "run_status.yaml"
+    if not rs_path.is_file():
+        return None
+    rs = _load_yaml(rs_path)
+    if not rs:
+        return None
+    candidate = rs.get("last_step")
+    if candidate is None:
+        for v in rs.values():
+            if isinstance(v, dict) and "last_step" in v:
+                candidate = v["last_step"]
+                break
+    try:
+        ls = int(candidate)
+        return ls if ls > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _wandb_config_value(
+    cfg: Optional[Dict[str, Any]], key: str,
+) -> Optional[Any]:
+    """Read a scalar from a W&B-mirrored ``config.yaml``.
+
+    W&B wraps every entry in ``{"value": ...}``; some sync paths leave
+    certain keys un-wrapped. This helper accepts either form.
+    """
+    if not cfg:
+        return None
+    raw = cfg.get(key)
+    if isinstance(raw, dict) and "value" in raw:
+        return raw["value"]
+    return raw
+
+
+def _infer_world_size(
+    wandb_config: Optional[Dict[str, Any]],
+) -> int:
+    """Best-effort world-size lookup for the bs/steps-per-epoch math.
+
+    ``args.yaml`` does NOT record the distributed world size. The W&B
+    config IS the reliable source (it's what timm reports at startup),
+    so we read it from there. We deliberately do NOT fall back to
+    ``lr_base_size / batch_size`` because that ratio is the LR
+    *reference* batch and only coincidentally equals world_size.
+    """
+    ws_raw = _wandb_config_value(wandb_config, "world_size")
+    try:
+        if ws_raw is not None:
+            ws_int = int(ws_raw)
+            if ws_int > 0:
+                return ws_int
+    except (TypeError, ValueError):
+        pass
+    return 1
+
+
+def _detect_overtrained_substitute(
+    args_yaml: Dict[str, Any],
+    src_dir: Path,
+    wandb_config: Optional[Dict[str, Any]] = None,
+    *,
+    target_epochs: int = _OVERTRAIN_TARGET_EPOCHS,
+    trigger_epochs: int = _OVERTRAIN_TRIGGER_EPOCHS,
+    trigger_eps: float = _OVERTRAIN_TRIGGER_EPS,
+) -> Optional[Dict[str, Any]]:
+    """Detect the 120-epoch over-train bug and pick a 110-epoch substitute.
+
+    Returns ``None`` when the run does not match the bug signature,
+    otherwise a dict describing the substitution (see the keys built at
+    the bottom of this function).
+
+    Detection fires when ALL of the following hold:
+
+    1. ``dataset`` is in :data:`_OVERTRAIN_KNOWN_DATASETS` (so we can
+       compute steps-per-epoch precisely).
+    2. ``num_steps`` and ``batch_size`` are positive integers.
+    3. The total scheduled updates round to ``trigger_epochs`` within
+       ``trigger_eps`` epochs. We compute this BOTH ways with respect
+       to ``warmup_prefix`` (since the user reports they're not 100%%
+       sure whether ``warmup_prefix`` was set correctly on the buggy
+       runs) and fire if EITHER reading yields ~trigger_epochs epochs.
+    4. A ``checkpoint-<step>.pth.tar`` file exists in ``src_dir``.
+
+    The substitute is the ``checkpoint-<step>.pth.tar`` whose step
+    count is closest to ``target_epochs * steps_per_epoch``; ties are
+    broken in favour of the EARLIER step.
+    """
+    dataset = str(args_yaml.get("dataset") or "").strip()
+    train_size = _OVERTRAIN_KNOWN_DATASETS.get(dataset)
+    if not train_size:
+        return None
+
+    try:
+        num_steps = int(args_yaml.get("num_steps") or 0)
+        warmup_steps = int(args_yaml.get("warmup_steps") or 0)
+        batch_size = int(args_yaml.get("batch_size") or 0)
+    except (TypeError, ValueError):
+        return None
+    if num_steps <= 0 or batch_size <= 0:
+        return None
+
+    world_size = _infer_world_size(wandb_config)
+    global_batch = batch_size * max(world_size, 1)
+    steps_per_epoch = train_size / global_batch
+    if steps_per_epoch <= 0:
+        return None
+
+    warmup_prefix = bool(args_yaml.get("warmup_prefix"))
+
+    total_with_prefix = num_steps + warmup_steps
+    total_without_prefix = num_steps
+    epochs_with_prefix = total_with_prefix / steps_per_epoch
+    epochs_without_prefix = total_without_prefix / steps_per_epoch
+
+    detected_epochs, detected_total_steps, detected_via_prefix = min(
+        (
+            (epochs_with_prefix, total_with_prefix, True),
+            (epochs_without_prefix, total_without_prefix, False),
+        ),
+        key=lambda c: abs(c[0] - trigger_epochs),
+    )
+    if abs(detected_epochs - trigger_epochs) > trigger_eps:
+        return None
+
+    last_step = _read_last_step(src_dir)
+    target_step = target_epochs * steps_per_epoch
+    available = _list_step_checkpoints(src_dir)
+    if not available:
+        return None
+
+    chosen_step, chosen_path = min(
+        available,
+        key=lambda item: (abs(item[0] - target_step), item[0]),
+    )
+    chosen_epoch = chosen_step / steps_per_epoch
+
+    return {
+        "substitute_path": chosen_path,
+        "substitute_filename": chosen_path.name,
+        "substitute_step": chosen_step,
+        "substitute_epoch": chosen_epoch,
+        "target_epochs": target_epochs,
+        "target_step": target_step,
+        "trigger_epochs": trigger_epochs,
+        "detected_total_epochs": detected_epochs,
+        "detected_total_steps": detected_total_steps,
+        "detected_via_warmup_prefix": detected_via_prefix,
+        "last_step": last_step,
+        "steps_per_epoch": steps_per_epoch,
+        "global_batch_size": global_batch,
+        "world_size": world_size,
+        "warmup_prefix_in_args": warmup_prefix,
+        "reason": (
+            f"args.yaml describes a {detected_epochs:.2f}-epoch schedule "
+            f"(num_steps={num_steps}, warmup_steps={warmup_steps}, "
+            f"warmup_prefix={warmup_prefix}, global_bs={global_batch}, "
+            f"world_size={world_size}, last_step={last_step}); this "
+            f"matches the {trigger_epochs}-epoch over-train bug and we "
+            f"are substituting the closest-to-{target_epochs}-epoch "
+            f"checkpoint ({chosen_path.name}, step={chosen_step}, "
+            f"epoch~={chosen_epoch:.2f}) for model_best.pth.tar."
+        ),
+    }
+
+
 def _copy_run_files(
     src_dir: Path,
     dst_dir: Path,
     *,
     dry_run: bool,
+    best_checkpoint_override: Optional[Path] = None,
 ) -> tuple[List[str], List[str]]:
     """Copy the backup files from ``src_dir`` into ``dst_dir``.
 
     Returns ``(copied, missing)`` -- two lists of filenames, classifying
     each entry of :data:`BACKUP_FILES` as either successfully copied (or
     would-be-copied in ``dry_run`` mode) or missing at the source.
+
+    If ``best_checkpoint_override`` is provided, that file is copied to
+    the destination as ``model_best.pth.tar`` instead of the source's
+    own ``model_best.pth.tar``. This is used by the 120-epoch over-train
+    edge case so the on-disk best (which is the 120-epoch state) gets
+    replaced by a checkpoint closer to 110 epochs.
     """
     if not dry_run:
         dst_dir.mkdir(parents=True, exist_ok=True)
@@ -315,7 +536,10 @@ def _copy_run_files(
     copied: List[str] = []
     missing: List[str] = []
     for name in BACKUP_FILES:
-        src = src_dir / name
+        if name == "model_best.pth.tar" and best_checkpoint_override is not None:
+            src = best_checkpoint_override
+        else:
+            src = src_dir / name
         if not src.is_file():
             missing.append(name)
             continue
@@ -344,6 +568,7 @@ class BackupStats:
     skipped_no_best_checkpoint: int = 0
     skipped_incomplete: int = 0
     failed: int = 0
+    overtrained_substituted: int = 0  # 120e -> closest-to-110e ckpt
 
 
 @dataclass
@@ -365,6 +590,7 @@ def backup_runs(
     force: bool = False,
     dry_run: bool = False,
     require_best_checkpoint: bool = True,
+    apply_overtrain_substitution: bool = True,
 ) -> BackupStats:
     """Walk ``wandb_root`` and back up every finished run into ``backup_root``.
 
@@ -384,6 +610,14 @@ def backup_runs(
             Set to False via ``--allow-missing-best-checkpoint`` if you
             genuinely want to archive non-checkpoint artifacts (e.g. logs
             from a crashed sweep).
+        apply_overtrain_substitution: If True (the default), runs whose
+            ``args.yaml`` describes a ~120-epoch ImageNet-1k schedule
+            (the known accidental over-train of the bs=512 110-epoch
+            sweep) get their ``model_best.pth.tar`` replaced in the
+            backup with the ``checkpoint-<step>.pth.tar`` whose step
+            count is closest to 110 epochs. Set to False to disable and
+            copy the on-disk best verbatim; see
+            :func:`_detect_overtrained_substitute` for the full guard.
     """
     wandb_root = wandb_root.resolve()
     backup_root = backup_root.resolve()
@@ -450,10 +684,38 @@ def backup_runs(
             stats.skipped_no_best_checkpoint += 1
             continue
 
+        # Edge case: detect the 120-epoch over-train and, if so, redirect
+        # the model_best copy to the closest-to-110-epoch checkpoint. We
+        # read args.yaml from disk (NOT from the W&B-mirrored config,
+        # which is a different schema) because the substitution logic
+        # operates on timm's raw args fields. The W&B config is still
+        # consulted for world_size since args.yaml doesn't record it.
+        substitution: Optional[Dict[str, Any]] = None
+        if apply_overtrain_substitution:
+            args_yaml_disk = _load_yaml(src_dir / "args.yaml")
+            if args_yaml_disk:
+                try:
+                    substitution = _detect_overtrained_substitute(
+                        args_yaml_disk, src_dir, wandb_config=config,
+                    )
+                except Exception as exc:  # never let detection block backup
+                    _logger.warning(
+                        "[%s] overtrain detection raised %s; falling "
+                        "back to standard backup.", run_id, exc,
+                    )
+                    substitution = None
+        if substitution is not None:
+            _logger.warning("[%s] %s", run_id, substitution["reason"])
+
         dst_dir = backup_root / str(group) / experiment
 
         try:
-            copied, missing = _copy_run_files(src_dir, dst_dir, dry_run=dry_run)
+            copied, missing = _copy_run_files(
+                src_dir, dst_dir, dry_run=dry_run,
+                best_checkpoint_override=(
+                    substitution["substitute_path"] if substitution else None
+                ),
+            )
         except OSError as exc:
             _logger.exception("[%s] copy failed: %s", run_id, exc)
             stats.failed += 1
@@ -482,16 +744,43 @@ def backup_runs(
             stats.skipped_incomplete += 1
             continue
 
+        manifest_entry: Dict[str, Any] = {
+            "group": group,
+            "experiment": experiment,
+            "src_dir": str(src_dir),
+            "dst_dir": str(dst_dir),
+            "copied": copied,
+            "missing": missing,
+            "state": state,
+        }
+        if substitution is not None:
+            stats.overtrained_substituted += 1
+            manifest_entry["overtrained_120e"] = True
+            manifest_entry["overtrain_substitution"] = {
+                "substitute_filename": substitution["substitute_filename"],
+                "substitute_step": substitution["substitute_step"],
+                "substitute_epoch": round(
+                    substitution["substitute_epoch"], 4
+                ),
+                "target_epochs": substitution["target_epochs"],
+                "trigger_epochs": substitution["trigger_epochs"],
+                "detected_total_epochs": round(
+                    substitution["detected_total_epochs"], 4
+                ),
+                "detected_via_warmup_prefix":
+                    substitution["detected_via_warmup_prefix"],
+                "warmup_prefix_in_args":
+                    substitution["warmup_prefix_in_args"],
+                "last_step": substitution["last_step"],
+                "steps_per_epoch": round(
+                    substitution["steps_per_epoch"], 4
+                ),
+                "global_batch_size": substitution["global_batch_size"],
+                "world_size": substitution["world_size"],
+            }
+
         if not dry_run:
-            manifest.record(run_id, {
-                "group": group,
-                "experiment": experiment,
-                "src_dir": str(src_dir),
-                "dst_dir": str(dst_dir),
-                "copied": copied,
-                "missing": missing,
-                "state": state,
-            })
+            manifest.record(run_id, manifest_entry)
             # Persist after every run so a crash doesn't lose progress.
             manifest.save()
 
@@ -500,10 +789,11 @@ def backup_runs(
     _logger.info(
         "Done: scanned=%d backed_up=%d skipped_not_finished=%d skipped_cached=%d "
         "skipped_no_run_dir=%d skipped_no_best_checkpoint=%d "
-        "skipped_incomplete=%d failed=%d",
+        "skipped_incomplete=%d overtrained_substituted=%d failed=%d",
         stats.scanned, stats.backed_up, stats.skipped_not_finished,
         stats.skipped_cached, stats.skipped_no_run_dir,
-        stats.skipped_no_best_checkpoint, stats.skipped_incomplete, stats.failed,
+        stats.skipped_no_best_checkpoint, stats.skipped_incomplete,
+        stats.overtrained_substituted, stats.failed,
     )
     return stats
 
@@ -747,6 +1037,18 @@ def main(argv: Optional[List[str]] = None) -> int:
              "from a crashed sweep). The manifest will record which files "
              "were missing.",
     )
+    p.add_argument(
+        "--no-overtrain-substitution",
+        dest="apply_overtrain_substitution",
+        action="store_false", default=True,
+        help="(W&B pipeline only) Disable the 120-epoch over-train edge "
+             "case. By default, runs whose args.yaml describes a ~120-"
+             "epoch ImageNet-1k schedule (the known bug in the bs=512 "
+             "110-epoch sweep) have their model_best.pth.tar replaced "
+             "in the backup with the closest-to-110-epoch periodic "
+             "checkpoint; pass this flag to archive the on-disk best "
+             "verbatim instead.",
+    )
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
 
@@ -763,6 +1065,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             force=args.force,
             dry_run=args.dry_run,
             require_best_checkpoint=args.require_best_checkpoint,
+            apply_overtrain_substitution=args.apply_overtrain_substitution,
         )
 
     if args.only in ("both", "vitdet"):

@@ -1,8 +1,39 @@
 #!/usr/bin/env python3
 """Render the augmentation-showcase *images* for the TreemapMix paper.
 
+Quick reference — running this script
+-------------------------------------
+From the LabelMix project root::
+
+    # Render every figure (mixup/cutmix/mosaic/treemapmix + OpenMixup grid)
+    python -m evaluation.plots.augmentation_showcase \\
+        --out evaluation/data/processed/figures/aug_showcase
+
+    # Only a subset of OpenMixup methods (fast iteration) — pass
+    # augmentation names positionally.
+    python -m evaluation.plots.augmentation_showcase \\
+        --out evaluation/data/processed/figures/aug_showcase \\
+        fmix gridmix resizemix smoothmix saliencymix
+
+    # All 15 OpenMixup methods, skipping the other figures
+    python -m evaluation.plots.augmentation_showcase \\
+        --out evaluation/data/processed/figures/aug_showcase \\
+        --skip-aug-comparison --skip-mosaic --skip-labelmix \\
+        --skip-aug-distribution \\
+        fmix gridmix resizemix smoothmix saliencymix \\
+        alignmix attentivemix snapmix transmix mixpro \\
+        smmix tla tokenmix guidedmix puzzlemix
+
+    # See every CLI knob (--seed, --num-samples, --skip-*, ...)
+    python -m evaluation.plots.augmentation_showcase --help
+
+Outputs land under ``<--out>/openmixup_augs/`` (one PNG per method) and
+``<--out>/{aug_comparison_clean, treemapmix_*}/`` for the other figures.
+
+Overview
+--------
 This script emits raw per-image PNGs only — the final figures (captions,
-column labels, etc.) are composed in LaTeX later.  Four image sets are
+column labels, etc.) are composed in LaTeX later.  Five image sets are
 produced, all reading from the *same* pool of source images so that
 visual differences between augmentations are attributable to the
 augmentation itself, not to a different image crop:
@@ -22,6 +53,18 @@ augmentation itself, not to a different image crop:
     4. ``treemapmix_alpha_sweep/`` — one PNG per ``alpha`` in
        ``[0.05, 0.1, 0.3, 0.5, 1.0, 1.5, 3.0, 5.0]``, all with ``K=5`` and
        ``sampling_max_aspect=10``.
+
+    5. ``openmixup_augs/`` — one PNG per OpenMixup-style augmentation
+       defined in ``data_augs.xml`` that is *not* already covered by the
+       canonical timm implementations (``fmix``, ``gridmix``,
+       ``resizemix``, ``smoothmix``, ``saliencymix``, ``alignmix``,
+       ``attentivemix``, ``snapmix``, ``transmix``, ``mixpro``, ``smmix``,
+       ``tla``, ``tokenmix``, ``guidedmix``, ``puzzlemix``).  The basic
+       ``mixup`` / ``cutmix`` / ``augmix`` methods are intentionally
+       skipped here because they are already shown in figure 1 (and are
+       implemented by ``timm.data.Mixup`` / ``timm.data.auto_augment``).
+       Model-aware methods are rendered using synthetic stand-in
+       feature/attention maps.
 
 Every PNG is written at two resolutions (256x256 and 1024x1024) and a
 render is skipped if the output PNG already exists.  The random seed is
@@ -47,6 +90,69 @@ ImageNet-1k is not always cached locally.  The renderer tries, in order:
        populated.
 
 If no source yields enough images, the renderer prints a clear error.
+
+OpenMixup methods — at-a-glance summary
+---------------------------------------
+The 15 OpenMixup methods are grouped by what *signal* they need to
+produce the mixing mask, and how many forward / backward passes that
+costs in this script.  The full render loop is wrapped in
+``@torch.no_grad()`` so **no method ever performs a backward pass**;
+where the original paper uses ``∂loss/∂x`` saliency we substitute a
+cheap feature-norm proxy.  Methods marked "image-only" do not need
+``--checkpoint`` to be loaded.
+
+* **fmix** (image-only, 0 fwd / 0 bwd) — low-frequency Fourier mask:
+  sample a complex spectrum, decay by ``1/f^decay_power``, IFFT,
+  threshold at ``lam``.  *Harris et al., 2020.*
+* **gridmix** (image-only, 0 fwd / 0 bwd) — paste a regular grid of
+  rectangular patches of image B onto image A.  *Baek et al., 2021.*
+* **resizemix** (image-only, 0 fwd / 0 bwd) — resize image B to a
+  random ``[lo, hi]`` fraction of the canvas and paste it at a random
+  location.  *Qin et al., 2020.*
+* **smoothmix** (image-only, 0 fwd / 0 bwd) — CutMix with a
+  Gaussian-feathered bounding box (soft edges).  *Lee et al., 2020.*
+* **saliencymix** (image-only*, 0 fwd / 0 bwd) — bbox centred on the
+  most-salient pixel of image B; the openmixup reference uses an
+  image-space (channel-stddev) proxy, *not* a model.  *Uddin et al.,
+  2021.*
+* **tla** (image-only, 0 fwd / 0 bwd) — patch-grid CutMix at ViT
+  patch resolution.  *Jiang et al., 2021.*
+* **tokenmix** (image-only, 0 fwd / 0 bwd) — random token-mask
+  (block/random) CutMix.  *Liu et al., 2022.*
+* **alignmix** (feature, 1 fwd / 0 bwd) — Sinkhorn OT plan over ViT
+  patch features; transports image B's patches onto image A's grid.
+  *Venkataramanan et al., 2022.*
+* **attentivemix** (saliency, 1 fwd / 0 bwd) — paste image B's top-k
+  highest-saliency patches onto image A.  Saliency = feature L2-norm.
+  *Walawalkar et al., 2020.*
+* **snapmix** (saliency, 1 fwd / 0 bwd) — CutMix bbox + saliency-
+  weighted ``lam`` (label is reweighted by the fraction of total
+  saliency inside the bbox).  *Huang et al., 2021.*
+* **guidedmix** (saliency, 1 fwd / 0 bwd) — soft mix using a Gaussian-
+  blurred saliency map as the per-pixel mixing coefficient.  *Kang &
+  Kim, 2023.* Per-pixel-mask for mixup.
+* **puzzlemix** (saliency, 1 fwd / 0 bwd) — split into ``block_num²``
+  blocks; each block independently picks A or B by relative saliency.
+  *Kim et al., 2020.*
+* **transmix** (attention, 1 fwd / 0 bwd) — CutMix bbox swap +
+  attention-mass reweighting of ``lam``; mask is geometric.  *Chen et
+  al., 2022.* transformer attention mass reweights CutMix labels
+* **mixpro** (attention, 1 fwd / 0 bwd) — MaskMix Bernoulli token mask
+  at ``mask_patch_size`` resolution + attention reweighting.  *Zhao et
+  al., 2023.* We use vit attention for the label generation. However we choose the token mask randomly.
+* **smmix** (attention, 1 fwd / 0 bwd) — swap a rectangular token
+  region of image B (chosen by attention) into image A.  ``side`` is
+  auto-set from the loaded model's patch grid.  *Chen et al., 2023.*
+
+(*) saliencymix's *original* paper uses spectral-residual saliency;
+the openmixup reference shipped here substitutes a cheap pixel-space
+proxy.  Either way, no network is invoked.
+
+In the showcase, features and attention are extracted **once per
+source pair** (one ``forward_features`` + attention-hook call) and
+reused across every method that needs them, so the marginal cost of
+running all 15 methods is one forward pass per pair, regardless of
+how many model-aware methods are in the list.
 
 Output
 ------
@@ -75,9 +181,11 @@ import argparse
 import json
 import logging
 import os
+import random
 import sys
+import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # Make the repo root importable when running this file as a script.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -91,6 +199,11 @@ import torch.nn.functional as F  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from timm.data import Mixup, create_transform  # noqa: E402
+from timm.data import (  # noqa: E402
+    OPENMIXUP_AUG_NAMES,
+    OPENMIXUP_AUG_INFO,
+    apply_openmixup_aug,
+)
 from timm.data.balanced_dataset import (  # noqa: E402
     _apply_box_symmetry,
     _apply_box_symmetry_rect,
@@ -100,6 +213,7 @@ from timm.data.balanced_dataset import (  # noqa: E402
 )
 from timm.data.labelmix_layout import squarify_core  # noqa: E402
 from timm.data.mosaic_dataset import MosaicDataset  # noqa: E402
+from timm.models import create_model, load_checkpoint  # noqa: E402
 
 from evaluation.common.paths import FIGURES_DIR, ensure_dirs  # noqa: E402
 from evaluation.plots._style import FOUR_PANEL_WIDTH, FIVE_PANEL_WIDTH  # noqa: E402
@@ -425,6 +539,210 @@ def _build_clean_transform(size: int, crop_pct: float = 0.95) -> Callable[[Image
         t = _resize_centercrop(t, size=size, crop_pct=crop_pct)
         return _normalize(t)
     return _apply
+
+
+# ---------------------------------------------------------------------------
+# Model provider for saliency / feature / attention extraction.
+# ---------------------------------------------------------------------------
+
+
+class ModelProvider:
+    """Wraps a trained ViT (e.g. ``vit_wee_patch16_reg1_gap_256``) so the
+    OpenMixup augmentation showcase can extract real per-image features,
+    saliency maps and attention maps instead of falling back to the
+    analytic stand-ins in :func:`_make_synthetic_features` and
+    :func:`_make_synthetic_attention`.
+
+    The model is loaded once and re-used. We deliberately use the *raw*
+    classifier (not the EMA copy) because the EMA was tracked separately
+    in this codebase and the architectural sanity-checks below are easier
+    to reason about for the canonical weights.
+
+    The provider is a no-op-like stand-in if instantiated without a
+    checkpoint: callers can always defer to the synthetic helpers in
+    that case.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        checkpoint_path: str,
+        *,
+        device: torch.device,
+        img_size: int,
+        num_classes: int = 1000,
+        model_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.model_name = model_name
+        self.checkpoint_path = checkpoint_path
+        self.device = device
+        self.img_size = int(img_size)
+        kwargs: Dict[str, Any] = dict(model_kwargs or {})
+        _logger.info(
+            "ModelProvider: building %s (img_size=%d, num_classes=%d, kwargs=%s)",
+            model_name, img_size, num_classes, kwargs,
+        )
+        self.model = create_model(
+            model_name,
+            pretrained=False,
+            num_classes=num_classes,
+            img_size=img_size,
+            **kwargs,
+        )
+        _logger.info("ModelProvider: loading weights from %s", checkpoint_path)
+        load_checkpoint(self.model, checkpoint_path, use_ema=False, strict=True)
+        self.model.to(device).eval()
+        # Lookup ViT geometry once for callers.
+        self.embed_dim = int(getattr(self.model, "embed_dim", 0))
+        self.num_reg_tokens = int(getattr(self.model, "num_reg_tokens", 0))
+        self.has_class_token = bool(getattr(self.model, "has_class_token", False))
+        self.num_prefix_tokens = int(getattr(self.model, "num_prefix_tokens", 0))
+        patch_embed = getattr(self.model, "patch_embed", None)
+        grid_size = getattr(patch_embed, "grid_size", None) if patch_embed is not None else None
+        if grid_size is None:
+            ps = int(getattr(patch_embed, "patch_size", (16, 16))[0]) if patch_embed is not None else 16
+            grid_size = (img_size // ps, img_size // ps)
+        self.grid_size: Tuple[int, int] = (int(grid_size[0]), int(grid_size[1]))
+        self.num_heads = self._infer_num_heads()
+        _logger.info(
+            "ModelProvider: ready (embed_dim=%d, grid=%s, prefix_tokens=%d, heads=%d)",
+            self.embed_dim, self.grid_size, self.num_prefix_tokens, self.num_heads,
+        )
+
+    def _infer_num_heads(self) -> int:
+        blocks = getattr(self.model, "blocks", None)
+        if blocks is None:
+            return 1
+        try:
+            return int(getattr(blocks[-1].attn, "num_heads", 1))
+        except Exception:
+            return 1
+
+    @staticmethod
+    def _imagenet_normalize(batch01: torch.Tensor) -> torch.Tensor:
+        mean = torch.tensor(IMAGENET_MEAN, device=batch01.device).view(1, 3, 1, 1)
+        std = torch.tensor(IMAGENET_STD, device=batch01.device).view(1, 3, 1, 1)
+        return (batch01 - mean) / std
+
+    def _to_input(self, batch01: torch.Tensor) -> torch.Tensor:
+        """Move a [0, 1] CHW batch to the model's device + ImageNet-normalize."""
+        x = batch01.to(self.device, dtype=next(self.model.parameters()).dtype, non_blocking=True)
+        return self._imagenet_normalize(x)
+
+    def _split_patch_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Drop CLS / register tokens and return only the patch tokens."""
+        if self.num_prefix_tokens > 0:
+            tokens = tokens[:, self.num_prefix_tokens:, :]
+        return tokens
+
+    @torch.no_grad()
+    def extract_features(self, batch01: torch.Tensor) -> torch.Tensor:
+        """Return the last-block patch-token features as ``(N, C, h, w)``."""
+        x = self._to_input(batch01)
+        tokens = self.model.forward_features(x)  # (N, T, C)
+        if tokens.dim() == 4:
+            # Some timm variants already return BCHW feature maps.
+            return tokens.float()
+        patch_tokens = self._split_patch_tokens(tokens)
+        N, T, C = patch_tokens.shape
+        h, w = self.grid_size
+        if T != h * w:
+            # Fall back to a square grid if the geometry diverged.
+            side = int(round(T ** 0.5))
+            h, w = side, side
+        feat = patch_tokens.transpose(1, 2).reshape(N, C, h, w).contiguous().float()
+        return feat
+
+    @torch.no_grad()
+    def extract_saliency(self, batch01: torch.Tensor) -> torch.Tensor:
+        """Return per-image saliency upsampled to the input resolution as ``(N, H, W)``.
+
+        We use the L2 norm of the patch-token features as a saliency
+        proxy. This matches recent ViT saliency work that observes the
+        per-token feature magnitude at the final block correlates with
+        the network's foreground belief, and it does not require any
+        backward pass (so it is fast enough to run inside a render loop).
+        """
+        feat = self.extract_features(batch01)  # (N, C, h, w)
+        sal = feat.norm(dim=1)  # (N, h, w)
+        # Per-image min-max normalize so different images are visually comparable.
+        n = sal.shape[0]
+        flat = sal.view(n, -1)
+        mn = flat.min(dim=1, keepdim=True).values
+        mx = flat.max(dim=1, keepdim=True).values
+        sal = ((flat - mn) / (mx - mn + 1e-8)).view_as(sal)
+        # Upsample to the input resolution; the consuming OpenMixup ops
+        # (snapmix, puzzlemix, guidedmix) expect (N, H, W) at image res.
+        H = batch01.shape[-2]
+        W = batch01.shape[-1]
+        sal = F.interpolate(sal.unsqueeze(1), size=(H, W), mode="bilinear", align_corners=False).squeeze(1)
+        return sal.detach().cpu()
+
+    @torch.no_grad()
+    def extract_attention(self, batch01: torch.Tensor) -> torch.Tensor:
+        """Return last-block attention as ``(N, num_heads, T, T)``.
+
+        timm's ``Attention`` either calls
+        ``F.scaled_dot_product_attention`` (fused path) or computes
+        ``softmax(q @ k^T * scale)`` manually. We capture the attention
+        matrix by:
+
+        * monkey-patching ``F.scaled_dot_product_attention`` to also
+          compute the explicit softmax(q @ k^T) and store it, and
+        * monkey-patching ``torch.Tensor.softmax`` so the non-fused
+          path is also intercepted.
+
+        We only keep the **last** captured 4D attention map per batch,
+        which is the last block's pre-projection attention -- the
+        signal AttentiveMix/TransMix/MixPro consume.
+        """
+        captured: List[torch.Tensor] = []
+
+        orig_sdpa = F.scaled_dot_product_attention
+        orig_tensor_softmax = torch.Tensor.softmax
+
+        def _capturing_sdpa(q, k, v, attn_mask=None, dropout_p=0.0,
+                            is_causal=False, scale=None, **kw):
+            # Compute attention explicitly so we can save it, then run
+            # the original fused path to keep numerical equivalence.
+            with torch.no_grad():
+                s = scale if scale is not None else (q.shape[-1] ** -0.5)
+                a = (q * s) @ k.transpose(-2, -1)
+                if attn_mask is not None:
+                    a = a + attn_mask
+                a = a.softmax(dim=-1)
+                if a.dim() == 4:
+                    captured.append(a.detach())
+            return orig_sdpa(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p,
+                             is_causal=is_causal, scale=scale, **kw)
+
+        def _capturing_tensor_softmax(self_t, *args, **kwargs):
+            out = orig_tensor_softmax(self_t, *args, **kwargs)
+            if out.dim() == 4:
+                captured.append(out.detach())
+            return out
+
+        F.scaled_dot_product_attention = _capturing_sdpa
+        torch.Tensor.softmax = _capturing_tensor_softmax
+        try:
+            x = self._to_input(batch01)
+            _ = self.model.forward_features(x)
+        finally:
+            F.scaled_dot_product_attention = orig_sdpa
+            torch.Tensor.softmax = orig_tensor_softmax
+        if not captured:
+            _logger.warning("ModelProvider: attention capture missed; using fallback.")
+            return self._fallback_attention(batch01)
+        # The last 4D softmax in forward_features is the last block's attention.
+        attn = captured[-1].float().cpu()
+        return attn
+
+    def _fallback_attention(self, batch01: torch.Tensor) -> torch.Tensor:
+        n = batch01.shape[0]
+        side = self.grid_size[0]
+        T = self.num_prefix_tokens + side * side
+        attn = torch.rand(n, max(self.num_heads, 1), T, T)
+        return attn
 
 
 def _build_vit_wee_transform(size: int = VIT_WEE_IMG_SIZE) -> Callable[[Image.Image], torch.Tensor]:
@@ -1008,6 +1326,7 @@ class ShowcaseConfig:
     out_dir: str = str(FIGURES_DIR / "augmentation_showcase")
     tile_sizes: Tuple[int, ...] = (256, 1024)
     source_name: str = "ImageNet-1k"
+    model_provider: Optional["ModelProvider"] = None
 
     def dir_for(self, group: str) -> str:
         """Return the per-figure subdirectory for ``group``."""
@@ -1191,6 +1510,7 @@ def render_aug_comparison(
         pre_imgs = _apply_transform(cfg.source_images, transform)
 
         for aug in _AUG_ROW_ORDER:
+            _aug_t0 = time.perf_counter()
             panels = _panel_for_aug(
                 aug, pre_imgs=pre_imgs,
                 img_size=cfg.img_size,
@@ -1212,6 +1532,10 @@ def render_aug_comparison(
                     "panel": p + 1,
                     "notes": _AUG_NOTES[aug],
                 })
+            _logger.info(
+                "  [%s] aug=%s: %d panel(s) in %.2fs",
+                group, aug, num_panels, time.perf_counter() - _aug_t0,
+            )
     else:
         # We still want metadata.json refreshed even if PNGs were cached.
         _logger.info("%s: all assets already present, refreshing metadata only.", group)
@@ -1286,7 +1610,12 @@ def render_treemapmix_randomness(
     files_meta: List[Dict] = []
     for p in range(num_panels):
         stem = f"panel{p+1:02d}"
-        if overwrite_stale_cache or not _assets_exist(dir_path, stem, cfg.tile_sizes):
+        existing = [
+            os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
+            for tp in cfg.tile_sizes
+        ]
+        if overwrite_stale_cache or not all(existing):
+            _panel_t0 = time.perf_counter()
             # Deterministic, independent seed per panel.
             torch.manual_seed(cfg.seed + p * 7919)
             np.random.seed(cfg.seed + p * 7919)
@@ -1301,6 +1630,10 @@ def render_treemapmix_randomness(
                 stem,
                 cfg.tile_sizes,
                 overwrite=overwrite_stale_cache,
+            )
+            _logger.info(
+                "  [%s] panel %d/%d in %.2fs",
+                group, p + 1, num_panels, time.perf_counter() - _panel_t0,
             )
         files_meta.append({
             "stem": stem,
@@ -1376,7 +1709,12 @@ def render_treemapmix_k_sweep(
     files_meta: List[Dict] = []
     for i, k in enumerate(k_values):
         stem = f"k{k:02d}"
-        if overwrite_stale_cache or not _assets_exist(dir_path, stem, cfg.tile_sizes):
+        existing = [
+            os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
+            for tp in cfg.tile_sizes
+        ]
+        if overwrite_stale_cache or not all(existing):
+            _step_t0 = time.perf_counter()
             # Re-seed per k so the layout isn't identical across panels.
             torch.manual_seed(cfg.seed + i * 13)
             np.random.seed(cfg.seed + i * 13)
@@ -1395,6 +1733,10 @@ def render_treemapmix_k_sweep(
                 stem,
                 cfg.tile_sizes,
                 overwrite=overwrite_stale_cache,
+            )
+            _logger.info(
+                "  [%s] k=%d (%d/%d) in %.2fs",
+                group, k, i + 1, len(k_values), time.perf_counter() - _step_t0,
             )
         torch.manual_seed(cfg.seed + i * 13)
         ranked_weights_for_meta = _ranked_labelmix_weights(k, LABELMIX_K_SWEEP_ALPHA)
@@ -1491,10 +1833,15 @@ def render_treemapmix_alpha_sweep(
             overwrite_stale_cache = True
 
     files_meta: List[Dict] = []
-    for alpha in alpha_values:
+    for ai, alpha in enumerate(alpha_values):
         alpha = float(alpha)
         stem = _alpha_stem(alpha)
-        if overwrite_stale_cache or not _assets_exist(dir_path, stem, cfg.tile_sizes):
+        existing = [
+            os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
+            for tp in cfg.tile_sizes
+        ]
+        if overwrite_stale_cache or not all(existing):
+            _step_t0 = time.perf_counter()
             # Same seed base for every alpha: alpha changes the ranked
             # region weights, not the chosen source images or high-level seed.
             torch.manual_seed(cfg.seed + 104729)
@@ -1512,6 +1859,11 @@ def render_treemapmix_alpha_sweep(
                 stem,
                 cfg.tile_sizes,
                 overwrite=overwrite_stale_cache,
+            )
+            _logger.info(
+                "  [%s] alpha=%.4g (%d/%d) in %.2fs",
+                group, alpha, ai + 1, len(alpha_values),
+                time.perf_counter() - _step_t0,
             )
         torch.manual_seed(cfg.seed + 104729)
         ranked_weights_for_meta = _ranked_labelmix_weights(LABELMIX_K, alpha)
@@ -1558,6 +1910,442 @@ def render_treemapmix_alpha_sweep(
             "ranked_weight_floor": LABELMIX_RANKED_WEIGHT_FLOOR,
             "ranked_layout_pixel_eps": LABELMIX_RANKED_LAYOUT_EPS,
         },
+        "files": files_meta,
+    })
+
+
+# ---------------------------------------------------------------------------
+# OpenMixup-style augmentation showcase.
+# ---------------------------------------------------------------------------
+
+
+# How many source images each OpenMixup method consumes per panel.
+# (mixup/cutmix/augmix are not in this table because they're already
+# rendered by the standard ``aug_comparison_clean`` figure.)
+_OPENMIXUP_PANEL_SOURCES: Dict[str, int] = {
+    "fmix":         2,
+    "gridmix":      2,
+    "resizemix":    2,
+    "smoothmix":    2,
+    "saliencymix":  2,
+    "alignmix":     2,   # operates on feature maps
+    "attentivemix": 2,
+    "snapmix":      2,
+    "transmix":     2,
+    "mixpro":       2,
+    "smmix":        2,
+    "tla":          2,
+    "tokenmix":     2,
+    "guidedmix":    2,
+    "puzzlemix":    2,
+}
+
+# Per-aug extra kwargs passed when invoking the augmentation. Tuned so the
+# default values produce a visually informative output at 256x256.
+_OPENMIXUP_AUG_KWARGS: Dict[str, Dict[str, Any]] = {
+    "fmix":         dict(alpha=1.0, decay_power=3, max_soft=0.0),
+    "gridmix":      dict(alpha=1.0, n_holes=8, hole_aspect_ratio=1.0,
+                          cut_area_ratio=0.5, cut_aspect_ratio=1.0),
+    "resizemix":    dict(scope=(0.1, 0.8)),
+    "smoothmix":    dict(alpha=1.0),
+    "saliencymix":  dict(alpha=1.0),
+    "alignmix":     dict(alpha=1.0, eps=0.5, max_iter=20),
+    "attentivemix": dict(alpha=1.0, top_k=6, grid_scale=32),
+    "snapmix":      dict(alpha=1.0),
+    "transmix":     dict(alpha=1.0, ratio=0.5),
+    "mixpro":       dict(alpha=1.0, mask_patch_size=64, model_patch_size=16),
+    # ``side`` is overridden in ``_compose_openmixup`` from the loaded
+    # model's patch grid (or img_size // 16); the value here is just a
+    # safe default for ad-hoc calls to this dict.
+    "smmix":        dict(side=14, min_side_ratio=0.25, max_side_ratio=0.75),
+    "tla":          dict(alpha=1.0, patch_size=16),
+    "tokenmix":     dict(alpha=1.0, mask_type="block", minimum_tokens=14),
+    "guidedmix":    dict(alpha=1.0, size=(7, 7), sigma=(3.0, 3.0)),
+    "puzzlemix":    dict(alpha=0.5, block_num=4),
+}
+
+
+def _make_synthetic_features(
+    name: str,
+    batch: torch.Tensor,
+    *,
+    model_provider: Optional["ModelProvider"] = None,
+) -> Optional[torch.Tensor]:
+    """Generate feature / saliency tensors for model-aware methods.
+
+    When ``model_provider`` is supplied we extract real features /
+    saliency from the trained ViT. Without it we fall back to analytic
+    stand-ins (channel-mean for saliency, pooled image for feature
+    maps) so the showcase still produces *something* without a model.
+    """
+    info = OPENMIXUP_AUG_INFO[name]
+    if not info["needs_features"]:
+        return None
+    n, _, h, w = batch.shape
+    if name == "alignmix":
+        # AlignMix mixes feature maps. We'd rather use real ViT features
+        # for the OT alignment; the showcase replaces alignmix's image
+        # output via the dedicated _alignmix_image_visualization path,
+        # so the synthetic features here are only a placeholder for the
+        # function's call signature.
+        if model_provider is not None:
+            return model_provider.extract_features(batch)
+        feat = F.adaptive_avg_pool2d(batch.mean(dim=1, keepdim=True), (max(2, h // 16), max(2, w // 16)))
+        feat = feat.expand(-1, 4, -1, -1).contiguous()
+        return feat
+    if name == "attentivemix":
+        if model_provider is not None:
+            feat = model_provider.extract_features(batch)
+            # AttentiveMix expects a coarse top-k grid; downsample to h/32.
+            att_size = max(2, h // 32)
+            return F.adaptive_avg_pool2d(feat, (att_size, att_size)).cpu()
+        att_size = max(2, h // 32)
+        return F.adaptive_avg_pool2d(batch, (att_size, att_size))
+    if name in ("snapmix", "guidedmix", "puzzlemix"):
+        if model_provider is not None:
+            sal = model_provider.extract_saliency(batch)  # (N, H, W) on CPU
+            if name == "guidedmix":
+                sal = sal.unsqueeze(1)  # (N, 1, H, W)
+            return sal
+        sal = batch.mean(dim=1)  # (N, H, W)
+        if name == "guidedmix":
+            sal = sal.unsqueeze(1)
+        return sal
+    return None
+
+def _make_synthetic_attention(
+    name: str,
+    batch: torch.Tensor,
+    side: Optional[int] = None,
+    *,
+    model_provider: Optional["ModelProvider"] = None,
+) -> Optional[torch.Tensor]:
+    """ViT attention map shaped ``(N, num_heads, T, T)``.
+
+    With a ``ModelProvider`` we capture the real last-block softmax
+    attention; otherwise we synthesise a center-biased random map. The
+    grid ``side`` defaults to ``img_height // 16`` so the synthetic
+    output matches what the rest of the pipeline expects.
+    """
+    info = OPENMIXUP_AUG_INFO[name]
+    if not info["needs_attn"]:
+        return None
+    if model_provider is not None:
+        return model_provider.extract_attention(batch)
+    if side is None:
+        side = max(1, batch.shape[-2] // 16)
+    n = batch.size(0)
+    # Use one head, T = 1 + side*side tokens (cls + patches).
+    T = 1 + side * side
+    attn = torch.rand(n, 1, T, T, device=batch.device)
+    # Make it slightly biased toward the center to imitate real attention.
+    coords = torch.linspace(-1, 1, side, device=batch.device)
+    yy, xx = torch.meshgrid(coords, coords, indexing="ij")
+    bias = torch.exp(-(xx ** 2 + yy ** 2)).flatten()  # (side*side,)
+    attn[:, :, 0, 1:] = bias.view(1, 1, -1) + 0.1 * attn[:, :, 0, 1:]
+    return attn
+
+
+def _alignmix_image_visualization(
+    batch01: torch.Tensor,
+    *,
+    model_provider: Optional["ModelProvider"],
+    seed: int,
+    eps: float = 0.5,
+    sinkhorn_iters: int = 50,
+) -> torch.Tensor:
+    """Compute an RGB AlignMix visualization for ``batch01[0:2]``.
+
+    The official AlignMix algorithm performs an entropic optimal-
+    transport alignment between *feature* tokens of two images and then
+    mixes the **features**, which are decoded by the rest of the
+    network. That's the right thing at training time, but useless for a
+    showcase figure that needs to display an RGB image.
+
+    For the figure we take the same OT plan (computed between the
+    trained ViT's patch-token features when a model is available, or
+    between coarsened image patches as a fallback) and then transport
+    the **input image patches** of ``img_b`` according to that plan.
+    The result is a viewable RGB image where img_b's 16x16 patches
+    have been routed to match img_a's spatial layout, producing the
+    canonical "pixel-level" alignment view of AlignMix (Venkataramanan
+    et al., 2022, fig. 3).
+    """
+    assert batch01.shape[0] >= 2, "alignmix needs at least two images"
+    img_a = batch01[0:1]
+    img_b = batch01[1:2]
+    _, _, H, W = img_a.shape
+
+    # 1. Get a (1, C, h, w) feature map per image. Real features when a
+    #    model is loaded; pooled image as fallback.
+    if model_provider is not None:
+        f_a = model_provider.extract_features(img_a).cpu()
+        f_b = model_provider.extract_features(img_b).cpu()
+    else:
+        # Fallback: 16x16 pool of the raw image as a 3-channel "feature".
+        h_grid = max(2, H // 16)
+        w_grid = max(2, W // 16)
+        f_a = F.adaptive_avg_pool2d(img_a, (h_grid, w_grid)).cpu()
+        f_b = F.adaptive_avg_pool2d(img_b, (h_grid, w_grid)).cpu()
+
+    # f_*: (1, C, h, w). Treat each spatial position as a C-dim token.
+    _, C, h_grid, w_grid = f_a.shape
+    n_tokens = h_grid * w_grid
+    fa_tok = f_a.view(1, C, n_tokens).permute(0, 2, 1)  # (1, n, C)
+    fb_tok = f_b.view(1, C, n_tokens).permute(0, 2, 1)  # (1, n, C)
+
+    # 2. Sinkhorn OT plan between the two token sets.
+    P = _sinkhorn_plan(fa_tok, fb_tok, eps=eps, max_iter=sinkhorn_iters)
+    # Row-stochastic: each row of P sums to 1 after multiplying by n_tokens.
+    P = (P * n_tokens).squeeze(0)  # (n, n)
+
+    # 3. Build per-patch images of img_b at the same grid resolution and
+    #    transport them to img_a's grid via P.
+    patch_h = H // h_grid
+    patch_w = W // w_grid
+    # img_b's patches as (n_tokens, 3, patch_h, patch_w):
+    img_b_patches = img_b.unfold(2, patch_h, patch_h).unfold(3, patch_w, patch_w)
+    # img_b_patches: (1, 3, h_grid, w_grid, patch_h, patch_w)
+    img_b_patches = img_b_patches.permute(0, 2, 3, 1, 4, 5).reshape(
+        n_tokens, 3, patch_h, patch_w
+    )
+    # Transport: each of img_a's grid cells gets a P-weighted blend of img_b's patches.
+    # P: (n_a_tokens, n_b_tokens). Output: (n_a_tokens, 3, patch_h, patch_w).
+    transported = torch.einsum("ab,bchw->achw", P, img_b_patches)
+    # Reassemble into a full image at (3, h_grid * patch_h, w_grid * patch_w).
+    transported = transported.view(h_grid, w_grid, 3, patch_h, patch_w)
+    transported = transported.permute(2, 0, 3, 1, 4).reshape(
+        3, h_grid * patch_h, w_grid * patch_w
+    )
+    # Resize back to (H, W) in case the patch grid didn't divide evenly.
+    if transported.shape[-2:] != (H, W):
+        transported = F.interpolate(
+            transported.unsqueeze(0), size=(H, W),
+            mode="bilinear", align_corners=False,
+        ).squeeze(0)
+
+    # 4. Mix transported img_b with img_a using a Beta-sampled lam (same
+    #    convention as the underlying alignmix function).
+    rng = np.random.default_rng(seed)
+    lam = float(rng.beta(1.0, 1.0))
+    out = img_a.squeeze(0).cpu() * lam + transported * (1.0 - lam)
+    return out.clamp(0.0, 1.0)
+
+
+def _sinkhorn_plan(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    eps: float = 0.5,
+    max_iter: int = 50,
+) -> torch.Tensor:
+    """Entropic OT plan between two point clouds.
+
+    ``x``: ``(B, n, C)``, ``y``: ``(B, m, C)``. Returns ``(B, n, m)``
+    doubly-stochastic plan whose rows sum to ``1/n`` and columns to
+    ``1/m``. Multiplying by ``n`` (when ``n == m``) gives a row-
+    stochastic transport matrix.
+    """
+    B, n, C = x.shape
+    m = y.shape[1]
+    # Squared L2 cost. ``cdist`` is more stable than expanding manually.
+    cost = torch.cdist(x, y, p=2.0) ** 2  # (B, n, m)
+    mu = torch.full((B, n), 1.0 / n, dtype=x.dtype, device=x.device)
+    nu = torch.full((B, m), 1.0 / m, dtype=x.dtype, device=x.device)
+    log_mu = torch.log(mu + 1e-12)
+    log_nu = torch.log(nu + 1e-12)
+    u = torch.zeros_like(mu)
+    v = torch.zeros_like(nu)
+    for _ in range(max_iter):
+        # M(u, v) = (-cost + u_i + v_j) / eps
+        Mu = (-cost + u.unsqueeze(-1) + v.unsqueeze(-2)) / eps
+        u = eps * (log_mu - torch.logsumexp(Mu, dim=-1)) + u
+        Mu = (-cost + u.unsqueeze(-1) + v.unsqueeze(-2)) / eps
+        v = eps * (log_nu - torch.logsumexp(Mu.transpose(-2, -1), dim=-1)) + v
+    Mu = (-cost + u.unsqueeze(-1) + v.unsqueeze(-2)) / eps
+    return torch.exp(Mu)
+
+
+def _compose_openmixup(
+    name: str,
+    imgs: Sequence[torch.Tensor],
+    *,
+    seed: int,
+    img_size: int,
+    extra_kwargs: Optional[Dict[str, Any]] = None,
+    model_provider: Optional["ModelProvider"] = None,
+) -> torch.Tensor:
+    """Run the named OpenMixup augmentation on ``imgs`` and return CHW float."""
+    if len(imgs) == 0:
+        raise ValueError("_compose_openmixup needs at least one image")
+
+    torch.manual_seed(seed)
+    np.random.seed(seed % (2 ** 31 - 1))
+    random.seed(seed)
+
+    needed = _OPENMIXUP_PANEL_SOURCES.get(name, 2)
+    pool = list(imgs)
+    while len(pool) < needed:
+        pool.append(pool[len(pool) % len(imgs)])
+    chunk = pool[:needed]
+    batch = torch.stack(chunk, dim=0).contiguous()
+
+    # Resize to a common square canvas so the augmentations behave the
+    # same regardless of the source image aspect ratio.
+    batch = F.interpolate(batch, size=(img_size, img_size), mode="bilinear", align_corners=False)
+
+    # AlignMix has a special pixel-level visualization path that uses a
+    # real OT plan over ViT features (when a model is loaded) and
+    # transports image B's patches onto image A's grid. Skip the in-
+    # place feature-mixing call entirely for this case.
+    if name == "alignmix":
+        return _alignmix_image_visualization(
+            batch, model_provider=model_provider, seed=seed,
+        )
+
+    targets = torch.arange(batch.shape[0], dtype=torch.long)
+    kwargs = dict(_OPENMIXUP_AUG_KWARGS.get(name, {}))
+    if extra_kwargs:
+        kwargs.update(extra_kwargs)
+
+    info = OPENMIXUP_AUG_INFO[name]
+    if info["needs_features"]:
+        kwargs["features"] = _make_synthetic_features(
+            name, batch, model_provider=model_provider,
+        )
+    if info["needs_attn"]:
+        kwargs["attn"] = _make_synthetic_attention(
+            name, batch, model_provider=model_provider,
+        )
+        # Geometry-dependent overrides: smmix and transmix need the
+        # attention-grid side / patch-shape to match the actual token
+        # count of the attention map. With a model loaded this comes
+        # from the ViT's patch grid; otherwise we infer from img_size.
+        if model_provider is not None:
+            side = int(model_provider.grid_size[0])
+        else:
+            side = max(1, img_size // 16)
+        if name == "smmix":
+            kwargs["side"] = side
+        if name == "transmix":
+            kwargs.setdefault("patch_shape", (side, side))
+
+    out, _info = apply_openmixup_aug(name, batch, targets, **kwargs)
+    if isinstance(out, (tuple, list)):
+        out = out[0]
+    return out[0].clamp(0.0, 1.0)
+
+
+def render_openmixup_augs(
+    cfg: ShowcaseConfig,
+    *,
+    aug_names: Sequence[str] = OPENMIXUP_AUG_NAMES,
+    num_panels: int = 1,
+) -> None:
+    """Render one PNG per (OpenMixup augmentation, panel).
+
+    Output directory: ``<out>/openmixup_augs/`` with files named
+    ``<aug>__panel<i>_<size>.png``.  Source images come from the same
+    fixed pool as every other figure.  ``alignmix`` is visualized as a
+    min-max-normalized projection of the mixed feature map (it does not
+    return an RGB image).
+    """
+    group = "openmixup_augs"
+    dir_path = cfg.dir_for(group)
+    os.makedirs(dir_path, exist_ok=True)
+
+    # Build clean (resize + center-crop) source pool once.
+    transform = _build_clean_transform(cfg.img_size)
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    pre_imgs_norm = _apply_transform(cfg.source_images, transform)
+    # pre_imgs_norm is normalized; we need [0,1] for the openmixup augs,
+    # so denormalize back.
+    pre_imgs = [_denormalize(t).clamp(0.0, 1.0) for t in pre_imgs_norm]
+
+    expected_params = {
+        "tile_sizes": list(cfg.tile_sizes),
+        "img_size": cfg.img_size,
+        "num_panels_per_aug": num_panels,
+        "augmentations": list(aug_names),
+        "source_order_head": _source_order_head(cfg),
+    }
+    metadata_path = os.path.join(dir_path, "metadata.json")
+    overwrite_stale_cache = not os.path.exists(metadata_path)
+    if not overwrite_stale_cache:
+        try:
+            with open(metadata_path, "r") as f:
+                old_meta = json.load(f)
+            old_params = old_meta.get("params", {}) if isinstance(old_meta, dict) else {}
+            overwrite_stale_cache = any(
+                old_params.get(key) != value for key, value in expected_params.items()
+            )
+        except (OSError, json.JSONDecodeError):
+            overwrite_stale_cache = True
+
+    files_meta: List[Dict] = []
+    n_total = len(aug_names)
+    for idx, aug in enumerate(aug_names):
+        info = OPENMIXUP_AUG_INFO[aug]
+        _aug_t0 = time.perf_counter()
+        panels_done = 0
+        panels_skipped = 0
+        for p in range(num_panels):
+            stem = f"{aug}__panel{p+1}"
+            existing = [
+                os.path.exists(os.path.join(dir_path, f"{stem}_{tp}.png"))
+                for tp in cfg.tile_sizes
+            ]
+            if overwrite_stale_cache or not all(existing):
+                # Rotate the source-image window so each panel sees a
+                # different chunk; this is the same trick the comparison
+                # figure uses to keep the visible content varied.
+                needed = _OPENMIXUP_PANEL_SOURCES.get(aug, 2)
+                start = (p * needed) % max(1, len(pre_imgs))
+                window = (pre_imgs + pre_imgs)[start:start + max(needed, 1)]
+                seed = cfg.seed + hash((aug, p)) % (2 ** 16)
+                composite = _compose_openmixup(
+                    aug, window,
+                    seed=seed, img_size=cfg.img_size,
+                    model_provider=cfg.model_provider,
+                )
+                _save_tensor_at_sizes(
+                    composite,
+                    dir_path,
+                    stem,
+                    cfg.tile_sizes,
+                    overwrite=overwrite_stale_cache,
+                )
+                panels_done += 1
+            else:
+                panels_skipped += 1
+            files_meta.append({
+                "stem": stem,
+                "aug": aug,
+                "panel": p + 1,
+                "image_only": bool(info["image_only"]),
+                "needs_features": bool(info["needs_features"]),
+                "needs_attn": bool(info["needs_attn"]),
+                "notes": info["desc"],
+            })
+        _logger.info(
+            "  [%s] (%d/%d) aug=%s: %d rendered, %d cached in %.2fs",
+            group, idx + 1, n_total, aug, panels_done, panels_skipped,
+            time.perf_counter() - _aug_t0,
+        )
+
+    _write_metadata(dir_path, {
+        "group": group,
+        "purpose": (
+            "Visualizes the OpenMixup-style mixup augmentations described "
+            "in data_augs.xml. Image-only methods run as-is; model-aware "
+            "methods are rendered with synthetic stand-in features so the "
+            "method's spatial pattern is still observable. AlignMix is "
+            "shown as a min-max-normalized projection of its mixed feature "
+            "map because it does not return an RGB image."
+        ),
+        "source": f"{cfg.source_name}, clean (resize + center-crop) transform only",
+        "params": expected_params,
         "files": files_meta,
     })
 
@@ -1657,12 +2445,49 @@ def _parse_args() -> argparse.Namespace:
              "Rendered by default.",
     )
     parser.add_argument(
+        "aug_names", type=str, nargs="*",
+        default=list(OPENMIXUP_AUG_NAMES),
+        help="OpenMixup-style augmentations to render in figure 5 "
+             "(openmixup_augs/). Pass one or more augmentation names "
+             "positionally, e.g. 'fmix gridmix resizemix'. Defaults to "
+             "all of them when omitted.",
+    )
+    parser.add_argument(
+        "--num-openmixup-panels", type=int, default=1,
+        help="Panels per augmentation in the OpenMixup showcase (figure 5).",
+    )
+    parser.add_argument(
+        "--skip-openmixup-figure", action="store_true",
+        help="Skip rendering figure 5 (openmixup_augs/).",
+    )
+    parser.add_argument(
         "--tile-sizes", type=int, nargs="+", default=[256, 1024],
         help="Per-tile output resolutions; one PNG per size per figure.",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
-        help="Enable INFO logging.",
+        help="Enable DEBUG logging (INFO is on by default).",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default=None,
+        help="Path to a trained model checkpoint (e.g. model_best.pth.tar). "
+             "When provided, model-aware OpenMixup augmentations "
+             "(snapmix, guidedmix, puzzlemix, attentivemix, alignmix, "
+             "transmix, mixpro, smmix) use real features / saliency / "
+             "attention from this model instead of analytic stand-ins.",
+    )
+    parser.add_argument(
+        "--model-name", type=str, default="vit_wee_patch16_reg1_gap_256",
+        help="Architecture name passed to ``timm.create_model`` for the "
+             "saliency model (default: vit_wee_patch16_reg1_gap_256).",
+    )
+    parser.add_argument(
+        "--model-device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device for the saliency model forward passes.",
+    )
+    parser.add_argument(
+        "--model-num-classes", type=int, default=1000,
+        help="Number of classes the checkpoint was trained with.",
     )
     return parser.parse_args()
 
@@ -1708,12 +2533,68 @@ def _resolve_source_images(args: argparse.Namespace) -> Tuple[List[torch.Tensor]
 def main() -> None:
     args = _parse_args()
     logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
     ensure_dirs()
     os.makedirs(args.out_dir, exist_ok=True)
+
+    main_t0 = time.perf_counter()
+    _logger.info("augmentation_showcase: writing figures to %s", args.out_dir)
+
+    # Optionally load the trained model for real saliency / features /
+    # attention used by the model-aware OpenMixup augmentations.
+    model_provider: Optional[ModelProvider] = None
+    if args.checkpoint:
+        if not os.path.isfile(args.checkpoint):
+            raise SystemExit(f"--checkpoint not found: {args.checkpoint}")
+        device = torch.device(args.model_device)
+        # Try to read the sibling args.yaml so we pick up the right
+        # img_size / num_classes / model_kwargs.
+        ckpt_dir = os.path.dirname(os.path.abspath(args.checkpoint))
+        sibling_args_yaml = os.path.join(ckpt_dir, "args.yaml")
+        loaded_img_size = args.img_size
+        loaded_num_classes = args.model_num_classes
+        loaded_model_kwargs: Dict[str, Any] = {}
+        loaded_model_name = args.model_name
+        if os.path.isfile(sibling_args_yaml):
+            try:
+                import yaml  # noqa: WPS433
+                with open(sibling_args_yaml, "r") as f:
+                    train_args = yaml.safe_load(f) or {}
+                loaded_model_name = str(train_args.get("model", loaded_model_name))
+                loaded_img_size = int(train_args.get("img_size", loaded_img_size))
+                loaded_num_classes = int(train_args.get("num_classes", loaded_num_classes))
+                mk = train_args.get("model_kwargs", {}) or {}
+                if isinstance(mk, dict):
+                    loaded_model_kwargs = dict(mk)
+                _logger.info(
+                    "Picked up training config from %s (model=%s, img_size=%d, num_classes=%d)",
+                    sibling_args_yaml, loaded_model_name, loaded_img_size, loaded_num_classes,
+                )
+            except Exception as e:  # pragma: no cover - best-effort discovery
+                _logger.warning("Could not parse %s: %s", sibling_args_yaml, e)
+        model_provider = ModelProvider(
+            model_name=loaded_model_name,
+            checkpoint_path=args.checkpoint,
+            device=device,
+            img_size=loaded_img_size,
+            num_classes=loaded_num_classes,
+            model_kwargs=loaded_model_kwargs,
+        )
+        # Override the showcase image size to match the model's input.
+        if loaded_img_size != args.img_size:
+            _logger.info(
+                "Overriding --img-size %d -> %d to match the trained model.",
+                args.img_size, loaded_img_size,
+            )
+            args.img_size = loaded_img_size
+    else:
+        _logger.info(
+            "No --checkpoint provided; model-aware OpenMixup methods will use "
+            "analytic stand-ins for features / saliency / attention."
+        )
 
     images, source_image_names = _resolve_source_images(args)
 
@@ -1739,16 +2620,57 @@ def main() -> None:
         out_dir=args.out_dir,
         tile_sizes=tuple(args.tile_sizes),
         source_name=source_name,
+        model_provider=model_provider,
     )
 
     # Figure 1: basic-form augmentations only.
+    _t = time.perf_counter()
+    _logger.info("[figure 1/5] aug_comparison_clean: rendering...")
     render_aug_comparison(cfg, flavor="clean", num_panels=args.num_comparison_panels)
+    _logger.info("[figure 1/5] aug_comparison_clean: done in %.2fs", time.perf_counter() - _t)
     # Figure 2.
+    _t = time.perf_counter()
+    _logger.info("[figure 2/5] treemapmix_randomness: rendering %d panels...", args.num_randomness_panels)
     render_treemapmix_randomness(cfg, num_panels=args.num_randomness_panels)
+    _logger.info("[figure 2/5] treemapmix_randomness: done in %.2fs", time.perf_counter() - _t)
     # Figure 3.
+    _t = time.perf_counter()
+    _logger.info("[figure 3/5] treemapmix_k_sweep: rendering k=%s...", list(args.k_sweep))
     render_treemapmix_k_sweep(cfg, k_values=tuple(args.k_sweep))
+    _logger.info("[figure 3/5] treemapmix_k_sweep: done in %.2fs", time.perf_counter() - _t)
     # Figure 4.
+    _t = time.perf_counter()
+    _logger.info("[figure 4/5] treemapmix_alpha_sweep: rendering alpha=%s...", list(args.alpha_sweep))
     render_treemapmix_alpha_sweep(cfg, alpha_values=tuple(args.alpha_sweep))
+    _logger.info("[figure 4/5] treemapmix_alpha_sweep: done in %.2fs", time.perf_counter() - _t)
+    # Figure 5: OpenMixup-style augmentations from data_augs.xml.
+    if not args.skip_openmixup_figure:
+        aug_names = list(args.aug_names) if args.aug_names else list(OPENMIXUP_AUG_NAMES)
+        # Validate aug names early so users get a useful error.
+        unknown = [a for a in aug_names if a not in OPENMIXUP_AUG_NAMES]
+        if unknown:
+            raise SystemExit(
+                f"Unknown augmentation names: {unknown}. "
+                f"Valid names: {list(OPENMIXUP_AUG_NAMES)}"
+            )
+        _t = time.perf_counter()
+        _logger.info(
+            "[figure 5/5] openmixup_augs: rendering %d augmentation(s) x %d panel(s)...",
+            len(aug_names), args.num_openmixup_panels,
+        )
+        render_openmixup_augs(
+            cfg,
+            aug_names=tuple(aug_names),
+            num_panels=args.num_openmixup_panels,
+        )
+        _logger.info("[figure 5/5] openmixup_augs: done in %.2fs", time.perf_counter() - _t)
+    else:
+        _logger.info("[figure 5/5] openmixup_augs: skipped (--skip-openmixup-figure)")
+
+    _logger.info(
+        "augmentation_showcase: ALL DONE in %.2fs",
+        time.perf_counter() - main_t0,
+    )
 
 
 if __name__ == "__main__":
