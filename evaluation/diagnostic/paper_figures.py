@@ -416,6 +416,12 @@ def _render_panel_pdf(
     if plt is None:
         return False
 
+    # Match every other generated paper figure instead of maintaining a
+    # separate sans-serif / hard-coded-size style for attribution panels.
+    from evaluation.plots._style import BASE_FONT_SIZE, apply_paper_style
+
+    apply_paper_style()
+
     input_panel_path = (pkg_dir / "input_with_box.png"
                         if (pkg_dir / "input_with_box.png").is_file()
                         else pkg_dir / "input.png")
@@ -441,7 +447,7 @@ def _render_panel_pdf(
     n = len(panels)
     fig_w = tile_size_inches * n + 0.05 * (n - 1)
     # Preserve the original 8.2:2.1 canvas ratio while shrinking both
-    # dimensions to the native 5.5-inch paper width. Plot fonts stay at 8/9 pt.
+    # dimensions to the native 5.5-inch paper width.
     fig_h = fig_w * (2.1 / 8.2)
     fig, axes = plt.subplots(
         1, n, figsize=(fig_w, fig_h),
@@ -463,7 +469,7 @@ def _render_panel_pdf(
         ax.set_xticks([]); ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-        ax.set_title(title, fontsize=9, pad=2, fontfamily="sans-serif")
+        ax.set_title(title, fontsize=BASE_FONT_SIZE, pad=2)
 
     cls_part = spec.get("class_name") or f"class {spec['class_id']}"
     area = spec.get("area_ratio")
@@ -471,7 +477,7 @@ def _render_panel_pdf(
         supt = f"{cls_part}  (k={spec['k']}, area={area*100:.1f}%)"
     else:
         supt = f"{cls_part}  (k={spec['k']})"
-    fig.suptitle(supt, fontsize=9, fontfamily="sans-serif")
+    fig.suptitle(supt, fontsize=BASE_FONT_SIZE)
 
     fig.savefig(pkg_dir / "figure.pdf")
     fig.savefig(pkg_dir / "figure.png", dpi=dpi)

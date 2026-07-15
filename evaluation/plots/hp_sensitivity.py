@@ -577,7 +577,11 @@ def _draw_heatmap(
                 continue
             rel = norm(v)  # in [0, 1], with 0.5 at value = baseline
             txt_colour = "white" if abs(rel - 0.5) > 0.40 else "black"
-            ax.text(j, i, f"{v:.2f}",
+            # One decimal is sufficient for an in-cell percentage label and
+            # keeps neighbouring values from colliding in the two-panel row.
+            # Full-precision values remain available in the source CSV and
+            # metadata sidecar.
+            ax.text(j, i, f"{v:.1f}",
                     ha="center", va="center",
                     fontsize=TICK_LABEL_FONT_SIZE, color=txt_colour)
 
@@ -587,7 +591,7 @@ def _draw_heatmap(
     # panel label remains easy to scan.
     baseline_label = BASELINE_DISPLAY.replace(" + ", "+")
     ax.text(
-        0.5, 1.24, title,
+        0.5, 1.20, title,
         transform=ax.transAxes,
         ha="center",
         va="center",
@@ -595,7 +599,7 @@ def _draw_heatmap(
         clip_on=False,
     )
     ax.text(
-        0.5, 1.155,
+        0.5, 1.12,
         f"{baseline_label}={baseline_mean:.2f}\u00B1{baseline_std:.2f}",
         transform=ax.transAxes,
         ha="center",
@@ -604,7 +608,7 @@ def _draw_heatmap(
         clip_on=False,
     )
     ax.text(
-        0.5, 1.075,
+        0.5, 1.04,
         f"{SINGLE_AUG_DISPLAY}={single_aug_mean:.2f}\u00B1{single_aug_std:.2f}",
         transform=ax.transAxes,
         ha="center",
@@ -659,12 +663,19 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
         lower_bound=0.0 if metric == "ece" else None,
     )
 
-    # 1 row × 2 cols (one panel per loss).  Extra vertical budget at the
-    # bottom reserves room for the shared horizontal colourbar.
+    # Use the complete 5.5-inch paper width and a slightly taller canvas.
+    # Tight constrained-layout padding makes the heatmap cells themselves
+    # larger without producing a PDF that overflows the LaTeX text block.
     fig, axes = plt.subplots(
         1, 2,
-        figsize=(DOUBLE_COL_WIDTH, 3.4 * (DOUBLE_COL_WIDTH / (6.8 * 1.15))),
+        figsize=(DOUBLE_COL_WIDTH, 2.85),
         constrained_layout=True,
+    )
+    fig.set_constrained_layout_pads(
+        w_pad=0.005,
+        h_pad=0.01,
+        wspace=0.015,
+        hspace=0.02,
     )
 
     last_im = None
@@ -680,13 +691,17 @@ def plot_heatmaps(df: pd.DataFrame, metric: str = "top1") -> plt.Figure:
             norm=shared_norm,
         )
 
+    # The left panel already establishes the shared K axis. Dropping the
+    # duplicate right-side label gives both heatmaps more horizontal room.
+    axes[1].set_ylabel("")
+
     # Single shared horizontal colourbar underneath both panels.
     # ``extend='both'`` grows pointy ends that advertise the clipped
     # outliers so the figure stays honest.
     cbar = fig.colorbar(
         last_im, ax=axes[:],
         location="bottom", orientation="horizontal",
-        shrink=0.7, pad=0.08, aspect=40,
+        shrink=0.82, pad=0.05, aspect=40,
         extend="both" if clipped else "neither",
     )
     cbar.set_label(

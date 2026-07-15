@@ -44,11 +44,11 @@ FIVE_PANEL_WIDTH: float = (DOUBLE_COL_WIDTH - 20.0 / 72.27) / 5.0
 
 # Keep all plot text sizes defined in one place.  Individual plot modules
 # should call ``apply_paper_style()`` and avoid local font-size rcParams.
-BASE_FONT_SIZE: int = 9
-TITLE_FONT_SIZE: int = 9
-AXIS_LABEL_FONT_SIZE: int = 9
-TICK_LABEL_FONT_SIZE: int = 9
-LEGEND_FONT_SIZE: int = 9
+BASE_FONT_SIZE: int = 8
+TITLE_FONT_SIZE: int = 8
+AXIS_LABEL_FONT_SIZE: int = 8
+TICK_LABEL_FONT_SIZE: int = 8
+LEGEND_FONT_SIZE: int = 8
 
 
 # ---------------------------------------------------------------------------
