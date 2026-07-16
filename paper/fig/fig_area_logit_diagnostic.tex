@@ -1,28 +1,12 @@
 \begin{figure*}[t]
   \centering
-  \includegraphics{../evaluation/data/processed/figures/diagnostic_area_logit/area_logit_legend_horizontal.pdf}\\[6pt]
-  \begin{subfigure}[t]{0.32\textwidth}
-    \centering
-    \includegraphics{../evaluation/data/processed/figures/diagnostic_area_logit/area_logit_pair_acc_with_std.pdf}
-    \caption{Pairwise rank accuracy}
-    \label{fig:area-logit-diagnostic-pair-acc}
-  \end{subfigure}\hfill
-  \begin{subfigure}[t]{0.32\textwidth}
-    \centering
-    \includegraphics{../evaluation/data/processed/figures/diagnostic_area_logit/area_logit_spearman_with_std.pdf}
-    \caption{Area-logit Spearman correlation}
-    \label{fig:area-logit-diagnostic-spearman}
-  \end{subfigure}\hfill
-  \begin{subfigure}[t]{0.32\textwidth}
-    \centering
-    \includegraphics{../evaluation/data/processed/figures/diagnostic_area_logit/area_logit_top_acc_with_std.pdf}
-    \caption{Largest-area top-class accuracy}
-    \label{fig:area-logit-diagnostic-top-acc}
-  \end{subfigure}
+  \includegraphics{../evaluation/data/processed/figures/diagnostic_area_logit/area_logit_heatmaps.pdf}
 \caption{Area-logit alignment diagnostics on the held-out composed diagnostic
-set for ViT-Betwixt checkpoints from the main ImageNet-1K study. Curves show
-the mean over three seeds, and shaded bands denote $\pm 1$ standard deviation.
-Across patch counts, TreemapMix-PL most consistently aligns target-logit
-magnitude rankings with target-patch area rankings.}
+set for ViT-Betwixt checkpoints from the main ImageNet-1K study. Cells show the
+mean over three seeds for pairwise rank accuracy (left), area-logit Spearman
+correlation (center), and largest-area top-class accuracy (right); lighter
+colors indicate larger values. Across patch counts, TreemapMix-PL most
+consistently aligns target-logit magnitude rankings with target-patch area
+rankings.}
   \label{fig:area-logit-diagnostic}
 \end{figure*}

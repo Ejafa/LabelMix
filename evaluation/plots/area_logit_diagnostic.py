@@ -42,6 +42,7 @@ Output  : ``data/processed/figures/diagnostic_area_logit/area_logit_spearman.pdf
           ``data/processed/figures/diagnostic_area_logit/area_logit_top_acc_with_std.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_legend_horizontal.pdf``
           ``data/processed/figures/diagnostic_area_logit/area_logit_legend_vertical.pdf``
+          ``data/processed/figures/diagnostic_area_logit/area_logit_heatmaps.pdf``
           (+ ``.meta.json`` sidecars for each)
 """
 from __future__ import annotations
@@ -55,6 +56,7 @@ from pathlib import Path
 from typing import Sequence
 
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MaxNLocator
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -85,6 +87,7 @@ OUTPUT_PAIR_ACC_STD = DIAG_FIGURES_DIR / "area_logit_pair_acc_with_std.pdf"
 OUTPUT_TOP_ACC_STD = DIAG_FIGURES_DIR / "area_logit_top_acc_with_std.pdf"
 OUTPUT_LEGEND_HORIZONTAL = DIAG_FIGURES_DIR / "area_logit_legend_horizontal.pdf"
 OUTPUT_LEGEND_VERTICAL = DIAG_FIGURES_DIR / "area_logit_legend_vertical.pdf"
+OUTPUT_HEATMAPS = DIAG_FIGURES_DIR / "area_logit_heatmaps.pdf"
 
 # ---------------------------------------------------------------------------
 # Model catalogue
@@ -305,6 +308,78 @@ def plot_metric(df: pd.DataFrame, metric: str, *, with_std: bool = False) -> plt
     return fig
 
 
+def _heatmap_order(df: pd.DataFrame) -> list[str]:
+    """Return one shared order based on mean rank across all three metrics."""
+    ranks: list[pd.Series] = []
+    for cfg in _METRICS.values():
+        values = pd.Series(_all_row(df, cfg["column"]), dtype=float)
+        ranks.append(values.rank(ascending=False))
+    average_rank = pd.concat(ranks, axis=1).mean(axis=1)
+    present = [style.key for style in MODEL_ORDER if style.key in average_rank]
+    return sorted(
+        present,
+        key=lambda method: (
+            0 if method.startswith("labelmix-") else 1,
+            float(average_rank.get(method, np.inf)),
+            method,
+        ),
+    )
+
+
+def plot_heatmaps(df: pd.DataFrame) -> plt.Figure:
+    """Render the three diagnostic metrics as aligned paper heatmaps."""
+    _apply_diag_style()
+    methods = _heatmap_order(df)
+    panels = (
+        ("pair_acc", "Rank accuracy"),
+        ("spearman", r"Spearman $\rho$"),
+        ("top_acc", "Top accuracy"),
+    )
+
+    fig, axes = plt.subplots(
+        1, 3, figsize=(DOUBLE_COL_WIDTH, 3.55),
+        gridspec_kw={"wspace": 0.18},
+    )
+    for panel_index, (metric, title) in enumerate(panels):
+        ax = axes[panel_index]
+        cfg = _METRICS[metric]
+        wide = _per_k(df, cfg["column"]).reindex(methods)
+        values = wide.to_numpy(dtype=float)
+        image = ax.imshow(
+            values, cmap="viridis", aspect="auto", interpolation="none",
+        )
+
+        ax.set_title(title, pad=4)
+        ax.set_xticks(np.arange(len(K_VALUES)))
+        ax.set_xticklabels([str(k) for k in K_VALUES])
+        ax.set_xlabel(r"Patches $K$")
+        ax.set_yticks(np.arange(len(methods)))
+        ax.tick_params(axis="both", length=0)
+        if panel_index == 0:
+            ax.set_yticklabels([method_display(method) for method in methods])
+            for label, method in zip(ax.get_yticklabels(), methods):
+                if method.startswith("labelmix-"):
+                    label.set_fontweight("bold")
+        else:
+            ax.set_yticklabels([])
+
+        ax.set_xticks(np.arange(-0.5, len(K_VALUES), 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, len(methods), 1), minor=True)
+        ax.grid(which="minor", color="white", linewidth=0.45)
+        ax.tick_params(which="minor", bottom=False, left=False)
+
+        colorbar = fig.colorbar(
+            image, ax=ax, orientation="horizontal",
+            fraction=0.045, pad=0.07, aspect=14,
+        )
+        colorbar.ax.tick_params(length=2, pad=1)
+        colorbar.locator = MaxNLocator(3)
+        colorbar.update_ticks()
+
+    fig.subplots_adjust(left=0.255, right=0.99, top=0.92, bottom=0.12)
+    return fig
+
+
 def plot_legend(orientation: str) -> plt.Figure:
     """Render the shared model legend as a standalone figure."""
     _apply_diag_style()
@@ -514,6 +589,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="Top-acc panel with mean +/- std band.")
     p.add_argument("--out-legend-horizontal", type=Path, default=OUTPUT_LEGEND_HORIZONTAL)
     p.add_argument("--out-legend-vertical", type=Path, default=OUTPUT_LEGEND_VERTICAL)
+    p.add_argument("--out-heatmaps", type=Path, default=OUTPUT_HEATMAPS)
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
     setup_logging(args.log_level)
@@ -524,6 +600,12 @@ def main(argv: list[str] | None = None) -> int:
 
     _logger.info("Reading %s", args.input)
     df = _load(args.input)
+
+    args.out_heatmaps.parent.mkdir(parents=True, exist_ok=True)
+    heatmap_fig = plot_heatmaps(df)
+    savefig(heatmap_fig, str(args.out_heatmaps))
+    plt.close(heatmap_fig)
+    _logger.info("Wrote %s", args.out_heatmaps)
 
     outputs = {
         "spearman": args.out_spearman,

@@ -23,24 +23,22 @@ samples for each
 $K \in \{3,4,5,6\}$. Figure~\ref{fig:area-logit-diagnostic} reports three
 diagnostics as separate panels: present-class pairwise rank accuracy over
 pairs satisfying $|\Delta\,\mathrm{area}| \ge 0.05$ in
-Figure~\ref{fig:area-logit-diagnostic-pair-acc}, area-logit Spearman
-correlation in Figure~\ref{fig:area-logit-diagnostic-spearman}, and
-largest-area top-class accuracy in
-Figure~\ref{fig:area-logit-diagnostic-top-acc}.
+the left heatmap, area-logit Spearman correlation in the center heatmap, and
+largest-area top-class accuracy in the right heatmap.
 
 \input{fig/fig_area_logit_diagnostic}
 
 As expected for a ranking-based objective, TreemapMix-PL yields the strongest
-present-class rank accuracy in Figure~\ref{fig:area-logit-diagnostic-pair-acc}
-and the strongest area-logit Spearman correlation in
-Figure~\ref{fig:area-logit-diagnostic-spearman}. TreemapMix-SCE does not match
+present-class rank accuracy in the left heatmap of
+Figure~\ref{fig:area-logit-diagnostic} and the strongest area-logit Spearman
+correlation in the center heatmap. TreemapMix-SCE does not match
 TreemapMix-PL on these diagnostics and, in some cases, trails RICAP. This
 suggests that compositional augmentation alone is not sufficient to induce the
 same ranking behavior; the PL objective is important for aligning logits with
 the area-induced ordering.
 
-A similar pattern appears for largest-area top-class accuracy in
-Figure~\ref{fig:area-logit-diagnostic-top-acc}. TreemapMix-PL achieves the
+A similar pattern appears for largest-area top-class accuracy in the right
+heatmap of Figure~\ref{fig:area-logit-diagnostic}. TreemapMix-PL achieves the
 highest largest-area top-class accuracy, indicating that it aligns logits most
 closely with relative patch area. In contrast, TreemapMix-SCE is less
 consistent and often remains closer to the baselines. As in the previous experiments, TreemapMix-mixed typically falls between TreemapMix-PL and TreemapMix-SCE on both ECE and Top-1 accuracy. RICAP is nevertheless a

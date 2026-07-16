@@ -1,13 +1,19 @@
-"""Plot: per-experiment Top-1 accuracy + ECE bars for ImageNet-1k.
+"""Plot: per-experiment Top-1 accuracy + ECE forests for ImageNet-1k.
 
 Renders the aggregated output of
-:mod:`evaluation.scripts.aggregate_per_experiment` as a 2-row grouped bar
-chart:
+:mod:`evaluation.scripts.aggregate_per_experiment` as two stacked forest-plot
+matrices:
 
-* **Top row** -- Top-1 accuracy (%) per (model, experiment type), higher is
-  better.
-* **Bottom row** -- Expected Calibration Error at ``n_bins=15`` expressed
+* **Top section** -- Top-1 accuracy (%) per (model, experiment type), higher
+  is better.
+* **Bottom section** -- Expected Calibration Error at ``n_bins=15`` expressed
   in percentage points (``ECE x 100``), lower is better.
+
+Methods form one shared row axis. Backbones use distinct markers and small
+within-row offsets in the side-by-side Top-1 and ECE forests. Points denote
+means and horizontal intervals denote +/- one standard deviation. Each metric
+has a mean within-backbone rank column. TreemapMix variants are pinned to the
+top; all other methods use one shared order based on their mean Top-1/ECE rank.
 
 The figure itself is clean -- no in-figure legend -- and a matching
 standalone legend PDF is written next to each panel figure so it can be
@@ -41,17 +47,17 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
-from ..processing.aggregate import confidence_interval_95
 from ._style import (
     DOUBLE_COL_WIDTH,
-    METHOD_COLORS,
     METHOD_DISPLAY,
-    REF_MID_GREY,
+    PALETTE_DARK,
     apply_paper_style,
     bar_color,
+    method_color_dark,
     method_display,
     savefig,
 )
@@ -62,7 +68,7 @@ _logger = logging.getLogger(__name__)
 # Subdirectory for these paper figures.
 _OUT_SUBDIR = "per_experiment"
 _PANEL_WIDTH = DOUBLE_COL_WIDTH
-_PANEL_HEIGHT = 4.0 * (DOUBLE_COL_WIDTH / (6.8 * 1.15))
+_PANEL_HEIGHT = 4.05
 
 # Reference ECE bin count (Guo et al., 2017).
 _ECE_BINS = 15
@@ -129,11 +135,6 @@ def _style_for(t: str) -> dict[str, str | None]:
     return _TYPE_STYLE.get(t, {"label": t, "color": "#7f7f7f", "hatch": None})
 
 
-def _ece_pp(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
-    """Return (mean, std) for ECE expressed in *percentage points* (x100)."""
-    return df[_ECE_MEAN_COL] * 100.0, df[_ECE_STD_COL] * 100.0
-
-
 def _filter_types(df: pd.DataFrame) -> pd.DataFrame:
     """Drop experiment types that should never appear in the paper figure."""
     return df[~df["type"].isin(_EXCLUDED_TYPES)].copy()
@@ -143,123 +144,304 @@ def _filter_types(df: pd.DataFrame) -> pd.DataFrame:
 # Main panel plot
 # ---------------------------------------------------------------------------
 
+def _average_ranks(
+    df: pd.DataFrame,
+    models: Sequence[str],
+    *,
+    value_col: str,
+    higher_is_better: bool,
+) -> pd.Series:
+    """Return each method's mean within-model rank (1 is best)."""
+    wide = df.pivot_table(
+        index="type", columns="model", values=value_col, aggfunc="mean",
+    ).reindex(columns=models)
+    return wide.rank(axis=0, ascending=not higher_is_better).mean(axis=1)
+
+
+def _rank_order(types: Sequence[str], ranks: pd.Series) -> list[str]:
+    """Sort by rank while keeping every TreemapMix variant at the top."""
+    present = list(dict.fromkeys(types))
+
+    def key(t: str) -> tuple[int, float, str]:
+        rank = float(ranks.get(t, np.inf))
+        return (0 if t.startswith("labelmix-") else 1, rank, t)
+
+    return sorted(present, key=key)
+
+
+def _plot_forest_section(
+    axes: Sequence[plt.Axes],
+    df: pd.DataFrame,
+    models: Sequence[str],
+    *,
+    mean_col: str,
+    std_col: str,
+    scale: float,
+    metric_title: str,
+    higher_is_better: bool,
+    types: Sequence[str] | None = None,
+) -> None:
+    """Draw one metric as four model forests plus an average-rank column."""
+    ranks = _average_ranks(
+        df, models, value_col=mean_col, higher_is_better=higher_is_better,
+    )
+    types = list(types) if types is not None else _rank_order(df["type"].unique(), ranks)
+    y = np.arange(len(types), dtype=float)
+
+    for model, ax in zip(models, axes[:-1]):
+        sub = df[df["model"] == model].set_index("type").reindex(types)
+        means = sub[mean_col].to_numpy(dtype=float) * scale
+        stds = sub[std_col].to_numpy(dtype=float) * scale
+
+        for row, method, mean, std in zip(y, types, means, stds):
+            if not np.isfinite(mean):
+                continue
+            color = method_color_dark(method)
+            ax.errorbar(
+                mean,
+                row,
+                xerr=std if np.isfinite(std) else None,
+                fmt="o",
+                markersize=3.4,
+                markerfacecolor=color,
+                markeredgecolor="black",
+                markeredgewidth=0.35,
+                ecolor=color,
+                elinewidth=1.15,
+                capsize=0,
+                zorder=3,
+            )
+
+        finite = np.isfinite(means) & np.isfinite(stds)
+        if finite.any():
+            low = float(np.min(means[finite] - stds[finite]))
+            high = float(np.max(means[finite] + stds[finite]))
+            span = max(high - low, 1e-6)
+            ax.set_xlim(low - 0.08 * span, high + 0.08 * span)
+
+        ax.set_title(_MODEL_LABELS.get(model, model), pad=4)
+        ax.set_ylim(len(types) - 0.5, -0.5)
+        ax.set_yticks(y)
+        ax.xaxis.grid(True, linestyle=":", linewidth=0.5, color="0.8", zorder=0)
+        ax.yaxis.grid(False)
+        ax.tick_params(axis="y", length=0)
+        ax.tick_params(axis="x", pad=1)
+        ax.spines["left"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["top"].set_visible(False)
+
+    labels = [method_display(t) for t in types]
+    axes[0].set_yticklabels(labels)
+    for label, method in zip(axes[0].get_yticklabels(), types):
+        if method.startswith("labelmix-"):
+            label.set_fontweight("bold")
+    for ax in axes[1:-1]:
+        ax.set_yticklabels([])
+
+    rank_ax = axes[-1]
+    rank_ax.set_title("Avg.\nrank", pad=1)
+    rank_ax.set_xlim(0.0, 1.0)
+    rank_ax.set_ylim(len(types) - 0.5, -0.5)
+    rank_ax.set_xticks([])
+    rank_ax.set_yticks(y)
+    rank_ax.set_yticklabels([])
+    rank_ax.tick_params(axis="y", length=0)
+    for spine in rank_ax.spines.values():
+        spine.set_visible(False)
+    for row, method in zip(y, types):
+        rank = ranks.get(method, np.nan)
+        if np.isfinite(rank):
+            rank_ax.text(
+                0.5,
+                row,
+                f"{rank:.1f}",
+                ha="center",
+                va="center",
+                fontweight="bold" if method.startswith("labelmix-") else "normal",
+            )
+
+    # Put the metric label above the shared method-name column rather than
+    # repeating it under every narrow model axis.
+    axes[0].text(
+        -0.03,
+        1.05,
+        metric_title,
+        transform=axes[0].transAxes,
+        ha="left",
+        va="bottom",
+        fontweight="bold",
+    )
+
+
+def _plot_compact_forest(
+    ax: plt.Axes,
+    rank_ax: plt.Axes,
+    df: pd.DataFrame,
+    models: Sequence[str],
+    types: Sequence[str],
+    *,
+    mean_col: str,
+    std_col: str,
+    scale: float,
+    title: str,
+    higher_is_better: bool,
+    show_method_labels: bool,
+) -> pd.Series:
+    """Draw one metric with model-specific points offset within each row."""
+    ranks = _average_ranks(
+        df, models, value_col=mean_col, higher_is_better=higher_is_better,
+    )
+    y = np.arange(len(types), dtype=float)
+    offsets = np.linspace(-0.27, 0.27, len(models))
+    markers = ("o", "s", "^", "D")
+    colors = (PALETTE_DARK[0], PALETTE_DARK[1], PALETTE_DARK[2], PALETTE_DARK[3])
+
+    all_low: list[float] = []
+    all_high: list[float] = []
+    for model_index, (model, offset) in enumerate(zip(models, offsets)):
+        sub = df[df["model"] == model].set_index("type").reindex(types)
+        means = sub[mean_col].to_numpy(dtype=float) * scale
+        stds = sub[std_col].to_numpy(dtype=float) * scale
+        finite = np.isfinite(means)
+        if finite.any():
+            finite_std = np.where(np.isfinite(stds), stds, 0.0)
+            all_low.extend((means[finite] - finite_std[finite]).tolist())
+            all_high.extend((means[finite] + finite_std[finite]).tolist())
+        ax.errorbar(
+            means,
+            y + offset,
+            xerr=stds,
+            fmt=markers[model_index],
+            markersize=3.2,
+            markerfacecolor=colors[model_index],
+            markeredgecolor="black",
+            markeredgewidth=0.3,
+            ecolor=colors[model_index],
+            elinewidth=0.9,
+            capsize=0,
+            linestyle="none",
+            zorder=3,
+        )
+
+    if all_low and all_high:
+        low, high = min(all_low), max(all_high)
+        span = max(high - low, 1e-6)
+        ax.set_xlim(low - 0.05 * span, high + 0.05 * span)
+    ax.set_title(title, pad=4)
+    ax.set_ylim(len(types) - 0.55, -0.55)
+    ax.set_yticks(y)
+    ax.tick_params(axis="y", length=0)
+    if show_method_labels:
+        ax.set_yticklabels([method_display(method) for method in types])
+        for label, method in zip(ax.get_yticklabels(), types):
+            if method.startswith("labelmix-"):
+                label.set_fontweight("bold")
+    else:
+        ax.set_yticklabels([])
+    ax.xaxis.grid(True, linestyle=":", linewidth=0.5, color="0.8", zorder=0)
+    ax.yaxis.grid(True, linestyle=":", linewidth=0.35, color="0.9", zorder=0)
+    ax.spines["left"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["top"].set_visible(False)
+
+    rank_ax.set_title("Avg.\nrank", pad=1)
+    rank_ax.set_xlim(0.0, 1.0)
+    rank_ax.set_ylim(len(types) - 0.55, -0.55)
+    rank_ax.set_xticks([])
+    rank_ax.set_yticks([])
+    for spine in rank_ax.spines.values():
+        spine.set_visible(False)
+    for row, method in zip(y, types):
+        rank = ranks.get(method, np.nan)
+        if np.isfinite(rank):
+            rank_ax.text(
+                0.5, row, f"{rank:.1f}", ha="center", va="center",
+                fontweight="bold" if method.startswith("labelmix-") else "normal",
+            )
+    return ranks
+
 def plot(df: pd.DataFrame, title: str | None = "ImageNet-1K") -> plt.Figure:
-    """Render the 2-row (Top-1, ECE) grouped bar chart."""
+    """Render stacked Top-1 and ECE forest-plot matrices."""
     apply_paper_style()
 
     df = _filter_types(df)
     models = _ordered(df["model"].unique(), list(_MODEL_LABELS))
-    types = _ordered(df["type"].unique(), _TYPE_ORDER)
+    top1_ranks = _average_ranks(
+        df, models, value_col="top1_acc_mean", higher_is_better=True,
+    )
+    ece_ranks = _average_ranks(
+        df, models, value_col=_ECE_MEAN_COL, higher_is_better=False,
+    )
+    overall_ranks = pd.concat(
+        [top1_ranks.rename("top1"), ece_ranks.rename("ece")], axis=1,
+    ).mean(axis=1)
+    shared_types = _rank_order(df["type"].unique(), overall_ranks)
 
-    x = np.arange(len(models))
-    # Slightly tighter group so bars within a model cluster visually.
-    width = 0.82 / max(len(types), 1)
+    fig = plt.figure(figsize=(_PANEL_WIDTH, _PANEL_HEIGHT))
+    grid = fig.add_gridspec(
+        1, 4,
+        width_ratios=(1.0, 0.22, 1.0, 0.22),
+        wspace=0.24,
+        left=0.255,
+        right=0.995,
+        bottom=0.075,
+        top=0.87,
+    )
+    top_ax = fig.add_subplot(grid[0, 0])
+    top_rank_ax = fig.add_subplot(grid[0, 1])
+    ece_ax = fig.add_subplot(grid[0, 2])
+    ece_rank_ax = fig.add_subplot(grid[0, 3])
 
-    # Visually separate the LabelMix family from the other methods by
-    # leaving half a bar-width of empty space between the last non-LabelMix
-    # bar and the first LabelMix bar. ``gap`` is added to every LabelMix
-    # bar's offset; the group as a whole is then recentred so the cluster
-    # still sits under its model tick.
-    def _is_labelmix(t: str) -> bool:
-        return t.startswith("labelmix")
-
-    gap = 0.5 * width
-    # Per-type positional index in the cluster, counting the gap as one
-    # extra "virtual slot" inserted before the first LabelMix bar.
-    positions: list[float] = []
-    seen_labelmix = False
-    for idx, t in enumerate(types):
-        pos = float(idx)
-        if _is_labelmix(t):
-            if not seen_labelmix:
-                seen_labelmix = True
-            pos += gap / width  # advance by the fractional gap
-        positions.append(pos)
-
-    # Recentre the whole cluster (including the gap) on 0.
-    centre = (positions[0] + positions[-1]) / 2.0
-    offsets = [(p - centre) * width for p in positions]
-
-    fig, (ax_top, ax_ece) = plt.subplots(
-        2, 1,
-        figsize=(_PANEL_WIDTH, _PANEL_HEIGHT),
-        sharex=True,
-        gridspec_kw={"hspace": 0.28},
+    _plot_compact_forest(
+        top_ax,
+        top_rank_ax,
+        df,
+        models,
+        shared_types,
+        mean_col="top1_acc_mean",
+        std_col="top1_acc_std",
+        scale=1.0,
+        title=(
+            f"{title} — Top-1 (%)"
+            if title else "Top-1 accuracy (%)  |  higher is better"
+        ),
+        higher_is_better=True,
+        show_method_labels=True,
+    )
+    _plot_compact_forest(
+        ece_ax,
+        ece_rank_ax,
+        df,
+        models,
+        shared_types,
+        mean_col=_ECE_MEAN_COL,
+        std_col=_ECE_STD_COL,
+        scale=100.0,
+        title="ECE (p.p.)",
+        higher_is_better=False,
+        show_method_labels=False,
     )
 
-    for i, t in enumerate(types):
-        sub = (
-            df[df["type"] == t]
-            .set_index("model")
-            .reindex(models)
+    markers = ("o", "s", "^", "D")
+    colors = (PALETTE_DARK[0], PALETTE_DARK[1], PALETTE_DARK[2], PALETTE_DARK[3])
+    handles = [
+        Line2D(
+            [0], [0], marker=markers[index], color=colors[index],
+            markeredgecolor="black", markeredgewidth=0.3, linewidth=1.0,
+            label=_MODEL_LABELS.get(model, model),
         )
-        offset = offsets[i]
-        style = _style_for(t)
-        color = style["color"]
-        hatch = style["hatch"]
+        for index, model in enumerate(models)
+    ]
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        ncol=len(handles),
+        frameon=False,
+        bbox_to_anchor=(0.61, 0.985),
+        handlelength=1.4,
+        columnspacing=1.0,
+    )
 
-        # Top-1 accuracy (already on a 0-100 scale).
-        top1_ci = confidence_interval_95(sub["top1_acc_std"], sub["n_seeds"])
-        ax_top.bar(
-            x + offset,
-            sub["top1_acc_mean"].values,
-            width=width,
-            yerr=top1_ci.values,
-            capsize=3.0,
-            color=color,
-            edgecolor="black",
-            linewidth=0.5,
-            hatch=hatch,
-            error_kw={"elinewidth": 0.4, "capthick": 0.4, "ecolor": "black"},
-            zorder=2,
-        )
-
-        # ECE in percentage points (4-decimal CSV precision -> ~0.01 pp).
-        ece_mean_pp, ece_std_pp = _ece_pp(sub)
-        ece_ci_pp = confidence_interval_95(ece_std_pp, sub["n_seeds"])
-        ax_ece.bar(
-            x + offset,
-            ece_mean_pp.values,
-            width=width,
-            yerr=ece_ci_pp.values,
-            capsize=3.0,
-            color=color,
-            edgecolor="black",
-            linewidth=0.5,
-            hatch=hatch,
-            error_kw={"elinewidth": 0.4, "capthick": 0.4, "ecolor": "black"},
-            zorder=2,
-        )
-
-    # --- Axis cosmetics -----------------------------------------------------
-    model_labels = [_MODEL_LABELS.get(m, m) for m in models]
-    for ax in (ax_top, ax_ece):
-        ax.set_xticks(x)
-        ax.set_xticklabels(model_labels)
-        # ``sharex=True`` hides upper tick labels by default; these stacked
-        # panels are often placed one after another, so each panel repeats the
-        # model names without repeating an extra x-axis label.
-        ax.tick_params(axis="x", labelbottom=True)
-
-    ax_top.set_ylabel("Accuracy (%)")
-    ax_ece.set_ylabel("ECE (p.p.)")
-
-    # Auto-zoom Top-1 so <1 pp differences remain visible.
-    top1_vals = df["top1_acc_mean"].dropna()
-    if not top1_vals.empty:
-        lo = float(np.floor(top1_vals.min() - 0.5))
-        hi = float(np.ceil(top1_vals.max() + 0.5))
-        ax_top.set_ylim(lo, hi)
-
-    for ax in (ax_top, ax_ece):
-        ax.yaxis.grid(True, linestyle=":", linewidth=0.5, color="0.8", zorder=0)
-        ax.set_axisbelow(True)
-        ax.tick_params(axis="x", length=0)  # no x-ticks -- bars already group
-
-    if title:
-        ax_top.set_title(title, pad=6)
-
-    fig.tight_layout()
     return fig
 
 
