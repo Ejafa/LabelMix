@@ -344,6 +344,16 @@ def compute_schedule(
 # ---------------------------------------------------------------------------
 
 MODEL_CONFIG_FILES: Dict[str, str] = {
+    "deit-tiny": "deit-tiny.yaml",
+    "deit-small": "deit-small.yaml",
+    "swin-tiny": "swin-tiny.yaml",
+    "swin-small": "swin-small.yaml",
+    "efficientnet-b0": "efficientnet-b0.yaml",
+    "efficientnet-b1": "efficientnet-b1.yaml",
+    "convnextv2-nano": "convnextv2-nano.yaml",
+    "convnextv2-tiny": "convnextv2-tiny.yaml",
+    "mnv4-hybrid-medium": "mnv4-hybrid-medium.yaml",
+    "mnv4-hybrid-large": "mnv4-hybrid-large.yaml",
     "vit-medium": "vit-medium.yaml",
     "vit-wee": "vit-wee.yaml",
     "vit-little": "vit-little.yaml",
@@ -407,6 +417,8 @@ def build_common_overrides(
     base_batch_size: int = DEFAULT_BATCH_SIZE,
     num_steps: Optional[int] = None,
     warmup_steps: Optional[int] = None,
+    workers: int = 8,
+    loader_prefetch_factor: int = 2,
 ) -> Dict[str, Any]:
     """Build the merged common-overrides dict for one experiment family.
 
@@ -418,6 +430,13 @@ def build_common_overrides(
         raise ValueError("Dataset config must be provided")
     if num_steps is None or warmup_steps is None:
         raise ValueError("num_steps and warmup_steps must be provided")
+    if workers < 0:
+        raise ValueError(f"workers must be non-negative, got {workers}")
+    if loader_prefetch_factor <= 0:
+        raise ValueError(
+            "loader_prefetch_factor must be positive, got "
+            f"{loader_prefetch_factor}"
+        )
 
     if base_batch_size % nproc_per_experiment != 0:
         raise ValueError(
@@ -440,8 +459,8 @@ def build_common_overrides(
         "wandb_project": "labelmix",
         "wandb_tags": dataset_cfg.dataset_id,
         "log_wandb": True,
-        "workers": 8,
-        "loader_prefetch_factor": 2,
+        "workers": workers,
+        "loader_prefetch_factor": loader_prefetch_factor,
         "balanced_buffer_steps": 4,
         "balanced_cache_threshold_steps": 3,
         "pin_mem": True,
@@ -852,6 +871,8 @@ def generate(
     randaug_magnitudes: List[int] | None = None,
     randaug_n: int = 3,
     seeds: List[int] | None = None,
+    workers: int = 8,
+    loader_prefetch_factor: int = 2,
 ) -> None:
     """Expand the experiment grid and write ``jobs.yaml``.
 
@@ -973,6 +994,8 @@ def generate(
         base_batch_size=batch_size,
         num_steps=num_steps,
         warmup_steps=warmup_steps,
+        workers=workers,
+        loader_prefetch_factor=loader_prefetch_factor,
     )
 
     # Build LabelMix trials from the CLI-selected variants.  If none were
@@ -1716,6 +1739,18 @@ def main() -> None:
              "per seed listed here. When omitted, falls back to the "
              "hard-coded SEEDS list at the top of this file.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="DataLoader workers per GPU process (default: 8).",
+    )
+    parser.add_argument(
+        "--loader-prefetch-factor",
+        type=int,
+        default=2,
+        help="Batches prefetched by each DataLoader worker (default: 2).",
+    )
     args = parser.parse_args()
 
     # --all is shorthand for turning on every augmentation flavor.  We
@@ -1797,6 +1832,8 @@ def main() -> None:
         randaug_magnitudes=args.randaug_magnitudes,
         randaug_n=args.randaug_n,
         seeds=args.seeds,
+        workers=args.workers,
+        loader_prefetch_factor=args.loader_prefetch_factor,
     )
 
 

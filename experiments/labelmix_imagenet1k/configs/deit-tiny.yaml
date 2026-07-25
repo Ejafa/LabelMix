@@ -84,12 +84,14 @@ mixup_mode: batch
 mixup_off_epoch: 0
 mixup_prob: 1.0
 mixup_switch_prob: 0.5
-model: convnextv2_tiny
+model: deit_tiny_patch16_224
 model_ema: false
 model_ema_decay: 0.9998
 model_ema_force_cpu: false
 model_ema_warmup: false
-model_kwargs: {}
+model_kwargs:
+  fix_init: true
+  img_size: 256
 momentum: 0.9
 no_aug: false
 no_ddp_bb: false
