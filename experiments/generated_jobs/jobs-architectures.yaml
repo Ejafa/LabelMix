@@ -1,10 +1,10 @@
 defaults:
   gpus: 2
   max_retries: 3
-  working_dir: /home/konstantin-garbers/Desktop/LabelMix
+  working_dir: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix
 jobs:
 - name: deit-tiny__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
@@ -22,7 +22,7 @@ jobs:
     0.0 --seed 42 --experiment deit-tiny__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: deit-tiny__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -40,7 +40,7 @@ jobs:
     0.0 --seed 42 --experiment deit-tiny__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: deit-tiny__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -51,7 +51,7 @@ jobs:
     5000 --seed 42 --experiment deit-tiny__in1k__img256__baseline__seed=42 --output
     output_runs/labelmix_imagenet1k-architectures
 - name: deit-small__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/deit-small.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/deit-small.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
@@ -69,7 +69,7 @@ jobs:
     0.0 --seed 42 --experiment deit-small__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: deit-small__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/deit-small.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/deit-small.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -87,7 +87,7 @@ jobs:
     0.0 --seed 42 --experiment deit-small__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: deit-small__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/deit-small.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/deit-small.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -97,26 +97,26 @@ jobs:
     1000 --num-steps 125000 --warmup-steps 12500 --check-resume --recovery-interval
     5000 --seed 42 --experiment deit-small__in1k__img256__baseline__seed=42 --output
     output_runs/labelmix_imagenet1k-architectures
-- name: swin-tiny__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
-    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
-    256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
-    2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
-    hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
-    validation --input-key image --target-key label --balanced-mode 1280 --num-classes
-    1000 --num-steps 125000 --warmup-steps 12500 --labelmix --labelmix-schedule cosine
-    --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
-    0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
-    0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
-    128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
-    5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
-    0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 42 --experiment swin-tiny__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-    --output output_runs/labelmix_imagenet1k-architectures
+#- name: swin-tiny__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+#  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
+#    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
+#    256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
+#    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
+#    2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
+#    hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
+#    validation --input-key image --target-key label --balanced-mode 1280 --num-classes
+#    1000 --num-steps 125000 --warmup-steps 12500 --labelmix --labelmix-schedule cosine
+#    --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
+#    0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
+#    0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
+#    128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
+#    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+#    5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
+#    0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
+#    0.0 --seed 42 --experiment swin-tiny__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+#    --output output_runs/labelmix_imagenet1k-architectures
 - name: swin-tiny__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -134,7 +134,7 @@ jobs:
     0.0 --seed 42 --experiment swin-tiny__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: swin-tiny__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -144,26 +144,26 @@ jobs:
     1000 --num-steps 125000 --warmup-steps 12500 --check-resume --recovery-interval
     5000 --seed 42 --experiment swin-tiny__in1k__img256__baseline__seed=42 --output
     output_runs/labelmix_imagenet1k-architectures
-- name: swin-small__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/swin-small.yaml
-    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
-    256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
-    2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
-    hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
-    validation --input-key image --target-key label --balanced-mode 1280 --num-classes
-    1000 --num-steps 125000 --warmup-steps 12500 --labelmix --labelmix-schedule cosine
-    --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
-    0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
-    0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
-    128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
-    5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
-    0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 42 --experiment swin-small__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-    --output output_runs/labelmix_imagenet1k-architectures
+#- name: swin-small__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+#  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/swin-small.yaml
+#    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
+#    256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
+#    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
+#    2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
+#    hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
+#    validation --input-key image --target-key label --balanced-mode 1280 --num-classes
+#    1000 --num-steps 125000 --warmup-steps 12500 --labelmix --labelmix-schedule cosine
+#    --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
+#    0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
+#    0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
+#    128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
+#    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+#    5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
+#    0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
+#    0.0 --seed 42 --experiment swin-small__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+#    --output output_runs/labelmix_imagenet1k-architectures
 - name: swin-small__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/swin-small.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/swin-small.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -181,7 +181,7 @@ jobs:
     0.0 --seed 42 --experiment swin-small__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: swin-small__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/swin-small.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/swin-small.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -192,7 +192,7 @@ jobs:
     5000 --seed 42 --experiment swin-small__in1k__img256__baseline__seed=42 --output
     output_runs/labelmix_imagenet1k-architectures
 - name: efficientnet-b0__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
@@ -210,7 +210,7 @@ jobs:
     0.0 --seed 42 --experiment efficientnet-b0__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: efficientnet-b0__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -228,7 +228,7 @@ jobs:
     0.0 --seed 42 --experiment efficientnet-b0__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: efficientnet-b0__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -239,7 +239,7 @@ jobs:
     5000 --seed 42 --experiment efficientnet-b0__in1k__img256__baseline__seed=42 --output
     output_runs/labelmix_imagenet1k-architectures
 - name: efficientnet-b1__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b1.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b1.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
@@ -257,7 +257,7 @@ jobs:
     0.0 --seed 42 --experiment efficientnet-b1__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: efficientnet-b1__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b1.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b1.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -275,7 +275,7 @@ jobs:
     0.0 --seed 42 --experiment efficientnet-b1__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: efficientnet-b1__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b1.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/efficientnet-b1.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -286,7 +286,7 @@ jobs:
     5000 --seed 42 --experiment efficientnet-b1__in1k__img256__baseline__seed=42 --output
     output_runs/labelmix_imagenet1k-architectures
 - name: convnextv2-nano__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
@@ -304,7 +304,7 @@ jobs:
     0.0 --seed 42 --experiment convnextv2-nano__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: convnextv2-nano__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -322,7 +322,7 @@ jobs:
     0.0 --seed 42 --experiment convnextv2-nano__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: convnextv2-nano__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -333,7 +333,7 @@ jobs:
     5000 --seed 42 --experiment convnextv2-nano__in1k__img256__baseline__seed=42 --output
     output_runs/labelmix_imagenet1k-architectures
 - name: convnextv2-tiny__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-tiny.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
@@ -351,7 +351,7 @@ jobs:
     0.0 --seed 42 --experiment convnextv2-tiny__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: convnextv2-tiny__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-tiny.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -369,7 +369,7 @@ jobs:
     0.0 --seed 42 --experiment convnextv2-tiny__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: convnextv2-tiny__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-tiny.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/convnextv2-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -380,7 +380,7 @@ jobs:
     5000 --seed 42 --experiment convnextv2-tiny__in1k__img256__baseline__seed=42 --output
     output_runs/labelmix_imagenet1k-architectures
 - name: mnv4-hybrid-medium__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
@@ -398,7 +398,7 @@ jobs:
     0.0 --seed 42 --experiment mnv4-hybrid-medium__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: mnv4-hybrid-medium__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -416,7 +416,7 @@ jobs:
     0.0 --seed 42 --experiment mnv4-hybrid-medium__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: mnv4-hybrid-medium__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
@@ -427,7 +427,7 @@ jobs:
     5000 --seed 42 --experiment mnv4-hybrid-medium__in1k__img256__baseline__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: mnv4-hybrid-large__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-large.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-large.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
@@ -445,7 +445,7 @@ jobs:
     0.0 --seed 42 --experiment mnv4-hybrid-large__in1k__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: mnv4-hybrid-large__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-large.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-large.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
@@ -463,7 +463,7 @@ jobs:
     0.0 --seed 42 --experiment mnv4-hybrid-large__in1k__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling__seed=42
     --output output_runs/labelmix_imagenet1k-architectures
 - name: mnv4-hybrid-large__in1k__img256__baseline__seed=42
-  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /home/konstantin-garbers/Desktop/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-large.yaml
+  cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix/experiments/labelmix_imagenet1k/configs/mnv4-hybrid-large.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
