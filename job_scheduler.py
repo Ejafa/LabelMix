@@ -6,9 +6,8 @@ This scheduler keeps responsibilities minimal and explicit:
 1. Analyze all jobs and identify unique model configurations (VRAM classes).
 2. Profile each unique model for peak GPU memory on the LOCAL node
    (with cache reuse).
-3. Statically distribute jobs class-balanced round-robin across ``N`` nodes
-   so each node gets the same number of jobs per VRAM class (±1).  With
-   3 seeds per (model, trial), each node naturally handles ~1 seed.
+3. Statically distribute jobs across ``N`` nodes using either class-balanced
+   or global round-robin scheduling.
 4. Attach model/memory metadata to each job in per-node YAML output.
 5. Leave GPU placement and runtime admission control to ``jobdaemon.py``.
 
@@ -52,6 +51,10 @@ Usage::
     # Preview without writing files
     python job_scheduler.py --input vit.yaml --num-nodes 3 \\
         --schedule-name in1k_main --dry-run
+
+    # Balance the total job count across nodes
+    python job_scheduler.py --input vit.yaml --num-nodes 7 \\
+        --scheduling round-robin
 
     # Then on each node, start daemon (dynamic GPU scheduling):
     #   python jobdaemon.py -s in1k_main --node-index 0 start --gpus 0,1,...,7
@@ -927,6 +930,49 @@ def write_node_yaml(
         yaml.safe_dump(output, f, default_flow_style=False, sort_keys=False)
 
 
+def distribute_jobs(
+    jobs: List[Dict[str, Any]],
+    num_nodes: int,
+    scheduling: str,
+) -> Tuple[List[List[Dict[str, Any]]], Dict[str, List[int]]]:
+    """Distribute annotated jobs and return node jobs plus per-class counts.
+
+    ``class-balanced`` deals every VRAM class from node zero, minimizing the
+    per-class count difference between nodes.  This can skew total counts when
+    there are many small classes because every remainder favors the first
+    nodes.  ``round-robin`` instead deals the complete input sequence with one
+    global cursor, guaranteeing total node counts differ by at most one.
+    """
+    if num_nodes < 1:
+        raise ValueError(f"num_nodes must be >= 1, got {num_nodes}")
+    if scheduling not in {"class-balanced", "round-robin"}:
+        raise ValueError(f"Unknown scheduling mode: {scheduling}")
+
+    node_jobs: List[List[Dict[str, Any]]] = [[] for _ in range(num_nodes)]
+    class_counts: Dict[str, List[int]] = {}
+
+    if scheduling == "round-robin":
+        for idx, job in enumerate(jobs):
+            target = idx % num_nodes
+            node_jobs[target].append(job)
+            model_key = job.get("model_key", "unknown")
+            class_counts.setdefault(model_key, [0] * num_nodes)[target] += 1
+        return node_jobs, class_counts
+
+    class_buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for job in jobs:
+        model_key = job.get("model_key", "unknown")
+        class_buckets.setdefault(model_key, []).append(job)
+
+    for model_key in sorted(class_buckets):
+        counts = class_counts.setdefault(model_key, [0] * num_nodes)
+        for idx, job in enumerate(class_buckets[model_key]):
+            target = idx % num_nodes
+            node_jobs[target].append(job)
+            counts[target] += 1
+    return node_jobs, class_counts
+
+
 def schedule(
     input_path: str,
     num_nodes: int,
@@ -937,6 +983,7 @@ def schedule(
     profile_gpu: int = 0,
     working_dir: Optional[str] = None,
     skip_profile: bool = False,
+    scheduling: str = "class-balanced",
 ) -> None:
     """Profile models locally, annotate jobs, and split across ``num_nodes``.
 
@@ -965,9 +1012,15 @@ def schedule(
         Working directory for profile runs.
     skip_profile : bool
         If True, skip profiling even if no cache exists (use conservative estimates).
+    scheduling : str
+        Distribution mode: ``class-balanced`` balances every model/VRAM class
+        independently; ``round-robin`` balances the total number of jobs.
     """
     if num_nodes < 1:
         print(f"Error: num_nodes must be >= 1, got {num_nodes}")
+        sys.exit(1)
+    if scheduling not in {"class-balanced", "round-robin"}:
+        print(f"Error: unknown scheduling mode: {scheduling}")
         sys.exit(1)
 
     # Derive the output filename prefix from the input YAML's basename so
@@ -1155,14 +1208,11 @@ def schedule(
                 "gpus_needed": representative.get("gpus", 1),
             }
 
-    # ── Step 4: Class-balanced round-robin distribution ────────────
+    # ── Step 4: Job distribution ───────────────────────────────────
     #
-    # Strategy: group jobs by VRAM class (model_key), then deal each
-    # class's jobs round-robin across nodes.  This ensures every node
-    # gets the same number of jobs per class (±1 when not evenly
-    # divisible).  Because generate_jobs.py emits N seeds per
-    # (model, trial), each node naturally ends up owning ~1 seed per
-    # configuration — giving a balanced workload without bin-packing.
+    # Class-balanced mode restarts at node zero for every model/VRAM class.
+    # Global round-robin mode uses one cursor over the complete input order,
+    # guaranteeing that total node counts differ by at most one.
     #
     conservative_fallback = gpu_total_mib // 2
 
@@ -1171,25 +1221,25 @@ def schedule(
         jobs, model_profiles, fallback_memory_mib=conservative_fallback,
     )
 
-    # Group by VRAM class (model_key).
+    # Group by VRAM class for reporting.
     class_buckets: Dict[str, List[Dict[str, Any]]] = {}
     for job in all_annotated:
         mk = job.get("model_key", "unknown")
         class_buckets.setdefault(mk, []).append(job)
 
-    # Round-robin each class across nodes.
-    node_jobs: List[List[Dict[str, Any]]] = [[] for _ in range(num_nodes)]
-    print(f"\n🔄 Class-balanced round-robin distribution across {num_nodes} node(s):")
+    node_jobs, class_counts = distribute_jobs(
+        all_annotated, num_nodes, scheduling,
+    )
+    mode_label = (
+        "Global round-robin" if scheduling == "round-robin"
+        else "Class-balanced round-robin"
+    )
+    print(f"\n🔄 {mode_label} distribution across {num_nodes} node(s):")
     for mk in sorted(class_buckets):
         bucket = class_buckets[mk]
         mem = bucket[0].get("memory_mib_per_gpu", "?")
-        per_node_counts = [0] * num_nodes
-        for idx, job in enumerate(bucket):
-            target = idx % num_nodes
-            node_jobs[target].append(job)
-            per_node_counts[target] += 1
         print(f"   {mk} ({len(bucket)} jobs, ~{mem} MiB/GPU): "
-              f"per-node → {per_node_counts}")
+              f"per-node → {class_counts[mk]}")
 
     # Summary per node
     for i, info in enumerate(node_info):
@@ -1257,6 +1307,7 @@ def schedule(
             "profile_steps": profile_steps,
             "model_profiles": model_profiles,
             "num_nodes": num_nodes,
+            "scheduling": scheduling,
             "nodes": [],
         }
         for i, (info, node_list) in enumerate(zip(node_info, node_jobs)):
@@ -1328,7 +1379,7 @@ def schedule(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Smart job scheduler with profiling cache and class-balanced round-robin splitting",
+        description="Smart job scheduler with profiling cache and configurable job distribution",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -1346,6 +1397,10 @@ def main() -> None:
             "\n"
             "  # Preview without writing:\n"
             "  python job_scheduler.py --input vit.yaml --num-nodes 3 --dry-run\n"
+            "\n"
+            "  # Balance total job counts (28 jobs / 7 nodes = 4 each):\n"
+            "  python job_scheduler.py --input vit.yaml --num-nodes 7 \\\n"
+            "      --scheduling round-robin\n"
             "\n"
             "Output filenames are derived from the input basename:\n"
             "  --input vit.yaml  →  vit_node_0_jobs.yaml, vit_node_1_jobs.yaml, ...\n"
@@ -1417,6 +1472,15 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--scheduling",
+        choices=("class-balanced", "round-robin"),
+        default="class-balanced",
+        help="How to distribute jobs across nodes: 'class-balanced' restarts "
+             "the node cursor for every model/VRAM class (default); "
+             "'round-robin' uses one global cursor and balances total job "
+             "counts (for example, 28 jobs across 7 nodes gives 4 each).",
+    )
+    parser.add_argument(
         "--skip-profile",
         action="store_true",
         help="Skip profiling even if no cache exists "
@@ -1443,6 +1507,7 @@ def main() -> None:
         profile_gpu=args.profile_gpu,
         working_dir=args.working_dir,
         skip_profile=args.skip_profile,
+        scheduling=args.scheduling,
     )
 
 
