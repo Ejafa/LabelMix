@@ -548,7 +548,7 @@ def get_model_configs(dataset_id: Optional[str] = None) -> Dict[str, str]:
 # Keeping it declarative makes it trivial to add a new loss variant later.
 LABELMIX_LOSS_SPECS: Dict[str, Dict[str, Any]] = {
     "mixed": {"tag": "labelmix-mixed", "loss": "mixed",   "mix_k": 4},
-    "pl":    {"tag": "labelmix-pl",    "loss": "pl_loss", "mix_k": 6},
+    "pl":    {"tag": "labelmix-pl",    "loss": "pl_loss", "mix_k": 6, "clip_grad": 3.0},
     "sce":   {"tag": "labelmix-sce",   "loss": "soft_ce", "mix_k": 4},
 }
 
@@ -602,7 +602,7 @@ def build_labelmix_trial(
         if alpha_end is not None
         else float(defaults.get("alpha_end", 0.5))
     )
-    return {
+    trial = {
         "labelmix_schedule": "cosine",
         "labelmix_k_schedule": "fixed",
         "labelmix_k_warmup_epochs": 0,
@@ -615,6 +615,9 @@ def build_labelmix_trial(
         # Private bookkeeping key (stripped before CLI emission).
         "_tags": [spec["tag"]],
     }
+    if "clip_grad" in spec:
+        trial["clip_grad"] = float(spec["clip_grad"])
+    return trial
 
 
 # ---------------------------------------------------------------------------
@@ -848,6 +851,7 @@ def generate(
     gpus_per_job: int = 2,
     output_path: str = "jobs.yaml",
     output_root: str = "./output_runs/daemon",
+    working_dir: str = _PROJECT_ROOT,
     max_retries: int = 3,
     model_filter: List[str] | None = None,
     baseline: bool = False,
@@ -886,6 +890,9 @@ def generate(
         Path for the generated YAML file.
     output_root : str
         Root directory for training outputs (``--output`` flag).
+    working_dir : str
+        Project directory used as the job daemon's working directory. Config
+        paths inside this repository are emitted relative to this directory.
     max_retries : int
         Default max retries per job.
     model_filter : list[str] | None
@@ -1426,9 +1433,10 @@ def generate(
                             model_kwargs_args = " --model-kwargs " + " ".join(kw_parts)
 
                         # {gpus} and {port} are resolved at launch time by the daemon
+                        relative_config_path = os.path.relpath(config_path, _PROJECT_ROOT)
                         cmd = (
                             f"torchrun --nproc_per_node={{gpus}} --master_port={{port}} "
-                            f"train.py --config {config_path} {cli_args}{model_kwargs_args}"
+                            f"train.py --config {relative_config_path} {cli_args}{model_kwargs_args}"
                         )
 
                         if f"--seed {seed}" not in cmd:
@@ -1463,7 +1471,7 @@ def generate(
         "defaults": {
             "gpus": gpus_per_job,
             "max_retries": max_retries,
-            "working_dir": _PROJECT_ROOT,
+            "working_dir": working_dir,
         },
         "jobs": jobs,
     }
@@ -1543,6 +1551,11 @@ def main() -> None:
         "--output-root",
         default="./output_runs/daemon",
         help="Root directory for training outputs (default: ./output_runs/daemon)",
+    )
+    parser.add_argument(
+        "--working-dir",
+        default=_PROJECT_ROOT,
+        help="Project directory used by jobdaemon (default: current checkout root).",
     )
     parser.add_argument(
         "--max-retries",
@@ -1809,6 +1822,7 @@ def main() -> None:
         gpus_per_job=args.gpus_per_job,
         output_path=args.output,
         output_root=args.output_root,
+        working_dir=args.working_dir,
         max_retries=args.max_retries,
         model_filter=args.model_filter,
         baseline=args.baseline,

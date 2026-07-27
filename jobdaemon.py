@@ -11,6 +11,10 @@ Usage::
     tmux new -s daemon
     python jobdaemon.py -s imagenet_sweep --node-index 0 start --gpus 0,1,2,3,4,5,6,7
 
+    # Exclusive placement (never stack jobs on the same GPU group)
+    python jobdaemon.py -s imagenet_sweep --node-index 0 start \
+        --gpus 0,1,2,3,4,5,6,7 --no-overcommit
+
     # Submit jobs (must use the same -s + --node-index context as start)
     python jobdaemon.py -s imagenet_sweep --node-index 0 submit imagenet_sweep_node_0_jobs.yaml
 
@@ -132,7 +136,7 @@ class DaemonConfig:
     fixed_gpus_needed: Optional[int] = None  # enforce one GPUs-per-job shape per daemon
     master_port_range: List[int] = field(default_factory=lambda: list(DEFAULT_PORT_RANGE))
     paused: bool = False
-    overcommit: bool = True  # greedy GPU memory sharing mode (default)
+    overcommit: bool = True  # allow multiple jobs to share a GPU group
     saturated: bool = False  # True when machine is at capacity (OOM detected)
     saturation_time: Optional[str] = None  # when saturation was detected
     burst_phase: bool = True  # True = burst launching, False = FIFO timed VRAM polling
@@ -1644,6 +1648,51 @@ def can_fit_another_job_on_gpu(
         )
 
 
+def can_place_job_on_gpu_group(
+    gpu_ids: List[int],
+    state: "State",
+    safety_margin: float,
+    gpus_needed: int,
+    job: Optional[Job],
+) -> Tuple[bool, List[str]]:
+    """Return whether a job may launch on a GPU group.
+
+    With overcommit disabled, any overlap with a running job makes the group
+    unavailable regardless of reported free VRAM. Otherwise, use the normal
+    per-GPU profiled-memory admission checks.
+    """
+    if not state.daemon.overcommit:
+        requested = set(gpu_ids)
+        conflicts = [
+            running.name
+            for running in state.jobs
+            if running.status == "running"
+            and running.gpu_ids
+            and requested.intersection(running.gpu_ids)
+        ]
+        if conflicts:
+            return False, [
+                f"GPU group {gpu_ids}: exclusive placement blocked by "
+                f"running job(s): {', '.join(conflicts)}"
+            ]
+        return True, [f"GPU group {gpu_ids}: exclusive placement available"]
+
+    reasons: List[str] = []
+    can_fit = True
+    for gpu_id in gpu_ids:
+        fits, reason = can_fit_another_job_on_gpu(
+            gpu_id,
+            state,
+            safety_margin,
+            gpus_needed=gpus_needed,
+            job=job,
+        )
+        reasons.append(f"GPU {gpu_id}: {reason}")
+        if not fits:
+            can_fit = False
+    return can_fit, reasons
+
+
 # ---------------------------------------------------------------------------
 # Inbox watcher
 # ---------------------------------------------------------------------------
@@ -1955,7 +2004,7 @@ def daemon_main(args: argparse.Namespace) -> None:
     state.daemon.pid = os.getpid()
     state.daemon.gpus = gpus
     state.daemon.max_concurrent = len(gpus)  # each job gets 1 GPU by default; overcommit shares all
-    state.daemon.overcommit = True  # overcommit is always on
+    state.daemon.overcommit = bool(getattr(args, "overcommit", True))
     state.daemon.round_robin = bool(getattr(args, "round_robin", True))
     state.daemon.saturated = False
     state.daemon.saturation_time = None
@@ -1976,6 +2025,10 @@ def daemon_main(args: argparse.Namespace) -> None:
     _log(f"  GPU backend: {'pynvml (nvidia-ml-py)' if HAS_PYNVML else 'nvidia-smi subprocess (install pynvml for better performance)'}")
     _log(f"  Process backend: {'psutil' if HAS_PSUTIL else 'os.kill + /proc (install psutil for better reliability)'}")
     _log(f"  ⚡ DYNAMIC SCHEDULING: Health-gated burst with saturation checkpoints")
+    _log(
+        "  GPU sharing: "
+        + ("overcommit enabled" if state.daemon.overcommit else "exclusive (one job per GPU group)")
+    )
     _log(f"  Saturation checkpoint: every {len(gpus)} jobs (= num GPUs), "
          f"progressive wait = N × {args.stabilization_wait}s "
          f"(1st={args.stabilization_wait}s, 2nd={2*args.stabilization_wait}s, ...)")
@@ -2375,16 +2428,13 @@ def daemon_main(args: argparse.Namespace) -> None:
                     # Check ALL GPUs in the group — the group can only fit
                     # another job if EVERY GPU has room. Use scheduler
                     # profiling for the pending job (with runtime fallback).
-                    group_can_fit = True
-                    group_reasons = []
-                    for gid in target_group:
-                        fit, reason = can_fit_another_job_on_gpu(
-                            gid, state, safety_margin,
-                            gpus_needed=gpj,
-                            job=next_job)
-                        group_reasons.append(f"GPU {gid}: {reason}")
-                        if not fit:
-                            group_can_fit = False
+                    group_can_fit, group_reasons = can_place_job_on_gpu_group(
+                        target_group,
+                        state,
+                        safety_margin,
+                        gpus_needed=gpj,
+                        job=next_job,
+                    )
                     if group_can_fit:
                         _log_scheduler_event(
                             f"burst_capacity_{'-'.join(str(g) for g in target_group)}",
@@ -2408,18 +2458,13 @@ def daemon_main(args: argparse.Namespace) -> None:
                                 for g in range(gpj)
                             ]
                             # Check all GPUs in next group
-                            next_ok = True
-                            next_reasons = []
-                            for gid in next_group:
-                                fit_n, reason_n = (
-                                    can_fit_another_job_on_gpu(
-                                        gid, state, safety_margin,
-                                        gpus_needed=gpj,
-                                        job=next_job))
-                                next_reasons.append(
-                                    f"GPU {gid}: {reason_n}")
-                                if not fit_n:
-                                    next_ok = False
+                            next_ok, next_reasons = can_place_job_on_gpu_group(
+                                next_group,
+                                state,
+                                safety_margin,
+                                gpus_needed=gpj,
+                                job=next_job,
+                            )
                             if next_ok:
                                 state.daemon.fill_gpu_index = next_idx
                                 target_group = next_group
@@ -2665,16 +2710,13 @@ def daemon_main(args: argparse.Namespace) -> None:
                                 all_gpus[(probe_idx + g) % num_gpus]
                                 for g in range(gpj)
                             ]
-                            probe_ok = True
-                            probe_reasons = []
-                            for gid in probe_group:
-                                fit, reason = can_fit_another_job_on_gpu(
-                                    gid, state, safety_margin,
-                                    gpus_needed=gpj,
-                                    job=job)
-                                probe_reasons.append(f"GPU {gid}: {reason}")
-                                if not fit:
-                                    probe_ok = False
+                            probe_ok, probe_reasons = can_place_job_on_gpu_group(
+                                probe_group,
+                                state,
+                                safety_margin,
+                                gpus_needed=gpj,
+                                job=job,
+                            )
                             if probe_ok:
                                 selected_group = probe_group
                                 state.daemon.fill_gpu_index = (
@@ -3052,6 +3094,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "--no-round-robin for the legacy fill-first behavior "
                          "(fill GPU 0 to capacity, then GPU 1, etc.). "
                          "Default: on.")
+    sp.add_argument(
+        "--overcommit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow multiple jobs to share the same GPU group when memory "
+             "permits (default: on). Use --no-overcommit for exclusive "
+             "placement: at most one running job may occupy a GPU group, "
+             "regardless of free VRAM.",
+    )
 
 
     # -- submit --
