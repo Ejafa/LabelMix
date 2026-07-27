@@ -72,7 +72,7 @@ DEFAULT_FIFO_LAUNCH_COOLDOWN = 240  # seconds between FIFO VRAM polls / launch a
 DEFAULT_GPU_CHECK_DELAY = 30 # seconds grace period before checking GPU presence
 DEFAULT_BURST_GPU_WAIT = 300 # seconds to wait for a burst-launched job to appear on GPU before launching next
 DEFAULT_STABILIZATION_WAIT = 300 # base seconds (5 min) for saturation checkpoint; actual wait = checkpoint_number × this value
-DEFAULT_MEMORY_SAFETY_MARGIN = 0.15  # 15% safety margin — predict OOM if free memory < avg_per_job × (1 + margin)
+DEFAULT_MEMORY_SAFETY_MARGIN = 0.0  # 15% safety margin — predict OOM if free memory < avg_per_job × (1 + margin)
 DEFAULT_OOM_WAIT_TIMEOUT = 600  # 10 minutes — max time to wait for memory headroom before queueing
 DEFAULT_SENTINEL_TIMEOUT = 600  # 10 minutes — max time to wait for .training_started sentinel before fallback
 
