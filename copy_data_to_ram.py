@@ -26,6 +26,7 @@ Usage::
     python copy_data_to_ram.py                          # copy imagenet-1k (default)
     python copy_data_to_ram.py --dataset places365      # copy places365
     python copy_data_to_ram.py --dataset cifar100       # copy cifar100
+    python copy_data_to_ram.py --dataset imagenet-lt    # build long-tail ImageNet in RAM
     python copy_data_to_ram.py --dataset coco           # copy coco (full: ~20 GB)
     python copy_data_to_ram.py --dataset coco --splits val  # coco val2017 + anns only
     python copy_data_to_ram.py --dry-run                # show what would be copied
@@ -37,6 +38,11 @@ Supported datasets and their default paths:
     imagenet-1k:
       src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k
       dst: /dev/shm/imagenet-1k
+
+    imagenet-lt:
+      src: ImageNet-1K Hugging Face cache (same default as imagenet-1k)
+      dst: /dev/shm/imagenet-lt
+      adapter: bundled official Pareto-alpha=6 ImageNet-LT manifest subset
 
     places365:
       src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/places365/arrow
@@ -75,6 +81,23 @@ DATASETS: dict[str, dict] = {
     "imagenet-1k": {
         "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k",
         "dst": "/dev/shm/imagenet-1k",
+    },
+    "imagenet-lt": {
+        "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k",
+        "dst": "/dev/shm/imagenet-lt",
+        "adapter": "imagenet-lt",
+        "splits": {
+            "train": ["train"],
+            "val": ["validation"],
+            "validation": ["validation"],
+            "full": ["train", "validation"],
+        },
+        "post_copy_hint": (
+            "ImageNet-LT is stored as Arrow datasets under "
+            "<DATA DIR>/arrow. Set IMAGENET_LT_DATA_DIR to the same DATA DIR "
+            "when generating jobs, then use --dataset imagenet-lt in "
+            "experiments/generate_jobs.py."
+        ),
     },
     "places365": {
         # Pre-converted Arrow datasets (run convert_places365_to_arrow.py first).
@@ -493,6 +516,7 @@ def main() -> None:
             "  python copy_data_to_ram.py                              # copy imagenet-1k to /dev/shm\n"
             "  python copy_data_to_ram.py --dataset places365          # copy places365 to /dev/shm\n"
             "  python copy_data_to_ram.py --dataset cifar100           # copy cifar100 to /dev/shm\n"
+            "  python copy_data_to_ram.py --dataset imagenet-lt        # build ImageNet-LT in RAM\n"
             "  python copy_data_to_ram.py --dataset coco               # copy full coco (~20 GB)\n"
             "  python copy_data_to_ram.py --dataset coco --splits val  # only annotations+val2017 (~1.6 GB)\n"
             "  python copy_data_to_ram.py --dataset coco --splits annotations,val\n"
@@ -553,6 +577,41 @@ def main() -> None:
         action="store_true",
         help="Show current copy status and /dev/shm usage",
     )
+    parser.add_argument(
+        "--lt-profile",
+        choices=("official", "synthetic-exponential"),
+        default="official",
+        help=(
+            "ImageNet-LT profile. 'official' uses the bundled published manifest; "
+            "the synthetic exponential profile is non-canonical (default: official)."
+        ),
+    )
+    parser.add_argument(
+        "--lt-train-list",
+        default=None,
+        help=(
+            "Optional override for the bundled official ImageNet_LT_train.txt "
+            "manifest. It can also be supplied via IMAGENET_LT_TRAIN_LIST."
+        ),
+    )
+    parser.add_argument(
+        "--lt-seed",
+        type=int,
+        default=42,
+        help="ImageNet-LT subset seed (default: 42)",
+    )
+    parser.add_argument(
+        "--lt-max-samples",
+        type=int,
+        default=1280,
+        help="ImageNet-LT head-class sample count (default: 1280)",
+    )
+    parser.add_argument(
+        "--lt-min-samples",
+        type=int,
+        default=5,
+        help="ImageNet-LT tail-class sample count (default: 5)",
+    )
     args = parser.parse_args()
 
     # Resolve src/dst: explicit overrides take priority, then dataset registry
@@ -561,6 +620,37 @@ def main() -> None:
     dst = args.dst or dataset_defaults["dst"]
     post_copy_hint = dataset_defaults.get("post_copy_hint")
     subdirs = resolve_split_subdirs(dataset_defaults, args.splits)
+
+    if dataset_defaults.get("adapter") == "imagenet-lt":
+        from imagenet_lt_adapter import (
+            prepare_imagenet_lt,
+            print_imagenet_lt_status,
+            verify_imagenet_lt,
+        )
+
+        selected_splits = subdirs or ["train", "validation"]
+        if args.cleanup:
+            cmd_cleanup(dst)
+        elif args.verify:
+            verify_imagenet_lt(dst)
+            _print_data_dir_banner(dst, post_copy_hint)
+        elif args.status:
+            print_imagenet_lt_status(dst)
+        else:
+            prepare_imagenet_lt(
+                src=src,
+                dst=dst,
+                splits=selected_splits,
+                seed=args.lt_seed,
+                max_samples=args.lt_max_samples,
+                min_samples=args.lt_min_samples,
+                profile=args.lt_profile,
+                train_list=args.lt_train_list,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+            _print_data_dir_banner(dst, post_copy_hint)
+        return
 
     if args.cleanup:
         # Cleanup always nukes the whole destination — RAM is precious and

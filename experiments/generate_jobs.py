@@ -1,13 +1,14 @@
     #!/usr/bin/env python3
 """Generate jobs.yaml for LabelMix experiments with configurable datasets.
 
-This script supports multiple datasets (ImageNet-1K, Places365, CIFAR-100) and
+This script supports multiple datasets (ImageNet-1K, ImageNet-LT, Places365, CIFAR-100) and
 allows for easy swapping between them via the --dataset argument.
 
 Usage Examples:
 
 # Basic runs (100 epochs, 10 warmup, batch 1024)
     python experiments/generate_jobs.py --dataset in1k
+    python experiments/generate_jobs.py --dataset imagenet-lt
     python experiments/generate_jobs.py --dataset places365
     python experiments/generate_jobs.py --dataset cifar100
 
@@ -31,9 +32,10 @@ Usage Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -43,6 +45,7 @@ import yaml
 # ---------------------------------------------------------------------------
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
+_IMAGENET_LT_DATA_DIR = os.environ.get("IMAGENET_LT_DATA_DIR", "/dev/shm/imagenet-lt")
 
 # Per-dataset directory that holds the per-model YAML training configs.
 # Each entry must map a ``DATASET_CONFIGS`` key to a directory containing
@@ -51,6 +54,7 @@ _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 # configs (see ``_resolve_configs_dir`` below).
 _DATASET_CONFIG_DIRS: Dict[str, str] = {
     "in1k": os.path.join(_THIS_DIR, "labelmix_imagenet1k", "configs"),
+    "inlt": os.path.join(_THIS_DIR, "labelmix_imagenet1k", "configs"),
     "places365": os.path.join(_THIS_DIR, "labelmix_imagenet1k", "configs"),
     "cifar100": os.path.join(_THIS_DIR, "labelmix_cifar100", "configs"),
 }
@@ -168,7 +172,9 @@ class DatasetConfig:
     input_key: str
     target_key: str
     num_classes: int
-    balanced_mode: int                     # samples/class per balanced epoch (dataset-intrinsic)
+    balanced_mode: int | str               # balanced sampler mode, or "natural"
+    train_samples: Optional[int] = None     # exact natural-prior epoch size when applicable
+    natural_prior: bool = False             # select per-augmentation natural loader handling
     extra: Dict[str, Any] = field(default_factory=dict)  # any additional overrides
 
     def to_overrides(self, num_steps: int, warmup_steps: int) -> Dict[str, Any]:
@@ -209,6 +215,20 @@ DATASET_CONFIGS: Dict[str, DatasetConfig] = {
         target_key="label",
         num_classes=1000,
         balanced_mode=1280,
+    ),
+    "imagenet-lt": DatasetConfig(
+        dataset_id="inlt",
+        dataset=f"hfds/{_IMAGENET_LT_DATA_DIR}",
+        data_dir=_IMAGENET_LT_DATA_DIR,
+        train_split="train",
+        val_split="validation",
+        input_key="image",
+        target_key="label",
+        num_classes=1000,
+        balanced_mode="natural",
+        # Canonical ImageNet-LT manifest size (Pareto alpha=6).
+        train_samples=115_846,
+        natural_prior=True,
     ),
     "places365": DatasetConfig(
         dataset_id="places365",
@@ -320,7 +340,15 @@ def compute_schedule(
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
 
-    samples_per_epoch = dataset_cfg.balanced_mode * dataset_cfg.num_classes
+    if dataset_cfg.train_samples is not None:
+        samples_per_epoch = int(dataset_cfg.train_samples)
+    elif isinstance(dataset_cfg.balanced_mode, int):
+        samples_per_epoch = dataset_cfg.balanced_mode * dataset_cfg.num_classes
+    else:
+        raise ValueError(
+            f"Dataset {dataset_cfg.dataset_id!r} uses balanced_mode="
+            f"{dataset_cfg.balanced_mode!r} and must define train_samples"
+        )
     
     # Calculate total samples for training and warmup
     total_samples = samples_per_epoch * epochs
@@ -332,6 +360,26 @@ def compute_schedule(
     steps_per_epoch = (samples_per_epoch + batch_size - 1) // batch_size
     
     return num_steps, warmup_steps, steps_per_epoch
+
+
+def _with_runtime_dataset_metadata(dataset_cfg: DatasetConfig) -> DatasetConfig:
+    """Use prepared RAM metadata when available without requiring it locally."""
+    if not dataset_cfg.natural_prior:
+        return dataset_cfg
+    metadata_path = os.path.join(dataset_cfg.data_dir, "imagenet_lt_metadata.json")
+    if not os.path.isfile(metadata_path):
+        return dataset_cfg
+    with open(metadata_path, "r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    metadata_classes = int(metadata.get("num_classes", dataset_cfg.num_classes))
+    if metadata_classes != dataset_cfg.num_classes:
+        raise ValueError(
+            f"Prepared dataset metadata has {metadata_classes} classes, "
+            f"expected {dataset_cfg.num_classes}: {metadata_path}"
+        )
+    train_samples = int(metadata["train_samples"])
+    print(f"Using prepared dataset size from {metadata_path}: {train_samples}")
+    return replace(dataset_cfg, train_samples=train_samples)
 
 # ---------------------------------------------------------------------------
 # Model configs: active model variants for this sweep.
@@ -966,7 +1014,7 @@ def generate(
         print(f"Prefixing output_root with 'output_runs/': {output_root}")
 
     # Load experiment config
-    dataset_cfg = DATASET_CONFIGS[dataset]
+    dataset_cfg = _with_runtime_dataset_metadata(DATASET_CONFIGS[dataset])
     num_steps, warmup_steps, steps_per_epoch = compute_schedule(
         dataset_cfg=dataset_cfg,
         epochs=epochs,
@@ -1342,6 +1390,29 @@ def generate(
                             for _k in list(all_overrides.keys()):
                                 if _k.startswith("labelmix"):
                                     all_overrides.pop(_k, None)
+
+                        # Long-tailed datasets preserve their empirical prior
+                        # for every augmentation. Baselines use the standard
+                        # map-style loader, while LabelMix and Mosaic use the
+                        # natural-row iterable loader required by their
+                        # multi-image grouping paths.
+                        if dataset_cfg.natural_prior:
+                            if labelmix_enabled:
+                                all_overrides["balanced_mode"] = "natural"
+                                if gpus_per_job > 1:
+                                    all_overrides["labelmix_producer_rank"] = 0
+                                    all_overrides["labelmix_producer_workers"] = workers
+                            elif mosaic_enabled:
+                                if gpus_per_job > 1:
+                                    raise ValueError(
+                                        "Distributed Mosaic on a natural-prior dataset is not "
+                                        "supported; generate these jobs with --gpus-per-job 1"
+                                    )
+                                all_overrides["balanced_mode"] = "natural"
+                            else:
+                                # Ordinary natural-prior baselines should use
+                                # the standard dataset loader directly.
+                                all_overrides["balanced_mode"] = None
 
                         # Strip private marker keys (e.g. "_baseline_variant")
                         # that are used purely for internal bookkeeping and

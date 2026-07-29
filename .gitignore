@@ -135,6 +135,8 @@ schedules/
 logs
 output*
 data/*
+!data/ImageNet_LT/
+!data/ImageNet_LT/ImageNet_LT_train.txt
 
 
 HF_HOME

@@ -811,23 +811,28 @@ def validate_args(args) -> None:
             raise ValueError('--balanced-mode int value must be >= 1')
 
     if mode == 'natural':
-        if not getattr(args, 'labelmix', False):
-            raise ValueError('--balanced-mode natural requires --labelmix')
-        mix_k = getattr(args, 'labelmix_mix_k', 1)
-        if mix_k < 2:
-            raise ValueError('natural TreemapMix requires K >= 2')
-        k_min = getattr(args, 'labelmix_k_min', None)
-        k_max = getattr(args, 'labelmix_k_max', None)
-        if (k_min if k_min is not None else mix_k) != mix_k:
-            raise ValueError('natural mode requires k_min == mix_k')
-        if (k_max if k_max is not None else mix_k) != mix_k:
-            raise ValueError('natural mode requires k_max == mix_k')
-        if getattr(args, 'labelmix_k_schedule', None) != 'fixed':
-            raise ValueError('natural mode requires --labelmix-k-schedule fixed')
-        if (getattr(args, 'labelmix_k_cooldown_epochs', 0) or 0) > 0:
-            raise ValueError('natural mode does not support K cooldown')
-        if getattr(args, 'distributed', False) and getattr(args, 'labelmix_producer_rank', -1) < 0:
-            raise ValueError('distributed natural mode requires --labelmix-producer-rank 0')
+        labelmix_enabled = getattr(args, 'labelmix', False)
+        mosaic_enabled = getattr(args, 'mosaic', False)
+        if not labelmix_enabled and not mosaic_enabled:
+            raise ValueError('--balanced-mode natural requires --labelmix or --mosaic')
+        if labelmix_enabled:
+            mix_k = getattr(args, 'labelmix_mix_k', 1)
+            if mix_k < 2:
+                raise ValueError('natural TreemapMix requires K >= 2')
+            k_min = getattr(args, 'labelmix_k_min', None)
+            k_max = getattr(args, 'labelmix_k_max', None)
+            if (k_min if k_min is not None else mix_k) != mix_k:
+                raise ValueError('natural mode requires k_min == mix_k')
+            if (k_max if k_max is not None else mix_k) != mix_k:
+                raise ValueError('natural mode requires k_max == mix_k')
+            if getattr(args, 'labelmix_k_schedule', None) != 'fixed':
+                raise ValueError('natural mode requires --labelmix-k-schedule fixed')
+            if (getattr(args, 'labelmix_k_cooldown_epochs', 0) or 0) > 0:
+                raise ValueError('natural mode does not support K cooldown')
+            if getattr(args, 'distributed', False) and getattr(args, 'labelmix_producer_rank', -1) < 0:
+                raise ValueError('distributed natural mode requires --labelmix-producer-rank 0')
+        elif getattr(args, 'distributed', False):
+            raise ValueError('distributed natural-mode Mosaic is not supported')
 
     if getattr(args, 'puzzlemix', False):
         raise ValueError(
@@ -1556,25 +1561,28 @@ def run_training(args=None, args_text=None):
     central_labelmix = args.labelmix and args.labelmix_producer_rank >= 0
     natural_mode = args.balanced_mode == 'natural'
     if natural_mode:
-        if not args.labelmix:
+        if not args.labelmix and not args.mosaic:
             parser.error(
-                '--balanced-mode natural requires --labelmix. For an ordinary '
+                '--balanced-mode natural requires --labelmix or --mosaic. For an ordinary '
                 'natural-prior baseline, use the standard dataset loader without --balanced-mode.'
             )
-        if args.labelmix_mix_k < 2:
-            parser.error('natural TreemapMix requires K >= 2')
-        k_min = args.labelmix_k_min if args.labelmix_k_min is not None else args.labelmix_mix_k
-        k_max = args.labelmix_k_max if args.labelmix_k_max is not None else args.labelmix_mix_k
-        if k_min != args.labelmix_mix_k:
-            parser.error('natural mode requires k_min == mix_k')
-        if k_max != args.labelmix_mix_k:
-            parser.error('natural mode requires k_max == mix_k')
-        if args.labelmix_k_schedule != 'fixed':
-            parser.error('natural mode requires --labelmix-k-schedule fixed')
-        if (args.labelmix_k_cooldown_epochs or 0) > 0:
-            parser.error('natural mode does not support K cooldown')
-        if args.distributed and not central_labelmix:
-            parser.error('distributed natural mode requires --labelmix-producer-rank 0')
+        if args.labelmix:
+            if args.labelmix_mix_k < 2:
+                parser.error('natural TreemapMix requires K >= 2')
+            k_min = args.labelmix_k_min if args.labelmix_k_min is not None else args.labelmix_mix_k
+            k_max = args.labelmix_k_max if args.labelmix_k_max is not None else args.labelmix_mix_k
+            if k_min != args.labelmix_mix_k:
+                parser.error('natural mode requires k_min == mix_k')
+            if k_max != args.labelmix_mix_k:
+                parser.error('natural mode requires k_max == mix_k')
+            if args.labelmix_k_schedule != 'fixed':
+                parser.error('natural mode requires --labelmix-k-schedule fixed')
+            if (args.labelmix_k_cooldown_epochs or 0) > 0:
+                parser.error('natural mode does not support K cooldown')
+            if args.distributed and not central_labelmix:
+                parser.error('distributed natural mode requires --labelmix-producer-rank 0')
+        elif args.distributed:
+            parser.error('distributed natural-mode Mosaic is not supported')
 
     labelmix_cpu_group = None
     if central_labelmix:
