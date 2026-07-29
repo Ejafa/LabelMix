@@ -7,7 +7,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -25,7 +25,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -43,7 +43,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -61,7 +61,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -72,7 +72,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -84,7 +84,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/deit-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -96,7 +96,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -114,7 +114,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -132,7 +132,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -150,7 +150,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -161,7 +161,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -173,7 +173,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/swin-tiny.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -185,7 +185,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -203,7 +203,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -221,7 +221,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -239,7 +239,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -250,7 +250,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -262,7 +262,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/efficientnet-b0.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -274,7 +274,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -292,7 +292,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -310,7 +310,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -328,7 +328,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -339,7 +339,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -351,7 +351,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/convnextv2-nano.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -363,7 +363,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -381,7 +381,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -399,7 +399,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -417,7 +417,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k baseline --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -428,7 +428,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
@@ -440,7 +440,7 @@ jobs:
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/mnv4-hybrid-medium.yaml
     --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
-    labelmix --wandb-tags in1k mosaic --log-wandb --workers 4 --loader-prefetch-factor
+    labelmix --wandb-tags in1k mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds/ILSVRC/imagenet-1k --data-dir /dev/shm/imagenet-1k --train-split train --val-split
     validation --input-key image --target-key label --balanced-mode 1280 --num-classes
