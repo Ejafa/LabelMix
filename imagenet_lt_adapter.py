@@ -290,17 +290,25 @@ def _import_datasets():
 
 
 def _load_source_split(src: str, split: str):
-    datasets = _import_datasets()
     arrow_split = Path(src) / "arrow" / split
     if arrow_split.is_dir():
+        datasets = _import_datasets()
+        print(f"Loading local ImageNet-1K Arrow split: {arrow_split}")
         return datasets.load_from_disk(str(arrow_split))
+
     direct_split = Path(src) / split
     if (direct_split / "dataset_info.json").is_file():
+        datasets = _import_datasets()
+        print(f"Loading local ImageNet-1K Arrow split: {direct_split}")
         return datasets.load_from_disk(str(direct_split))
-    return datasets.load_dataset(
-        IMAGENET_HF_NAME,
-        split=split,
-        cache_dir=src,
+
+    raise FileNotFoundError(
+        f"Could not find the local ImageNet-1K {split!r} Arrow split under "
+        f"{src!r}. Expected {arrow_split} (the layout used by the normal "
+        "ImageNet reader). First prepare the regular RAM copy with "
+        "`python copy_data_to_ram.py --dataset imagenet-1k`, set "
+        "IMAGENET1K_DATA_DIR, or pass --src explicitly. The ImageNet-LT "
+        "adapter does not download ImageNet."
     )
 
 

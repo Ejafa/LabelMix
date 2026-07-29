@@ -40,7 +40,7 @@ Supported datasets and their default paths:
       dst: /dev/shm/imagenet-1k
 
     imagenet-lt:
-      src: ImageNet-1K Hugging Face cache (same default as imagenet-1k)
+      src: existing local ImageNet-1K Arrow dataset (prefers /dev/shm/imagenet-1k)
       dst: /dev/shm/imagenet-lt
       adapter: bundled official Pareto-alpha=6 ImageNet-LT manifest subset
 
@@ -84,6 +84,9 @@ DATASETS: dict[str, dict] = {
     },
     "imagenet-lt": {
         "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k",
+        # Prefer the already prepared RAM copy used by ordinary ImageNet-1K
+        # jobs. The shared source above remains a fallback when it is absent.
+        "local_src": "/dev/shm/imagenet-1k",
         "dst": "/dev/shm/imagenet-lt",
         "adapter": "imagenet-lt",
         "splits": {
@@ -209,6 +212,34 @@ def resolve_split_subdirs(
                 seen.add(sub)
                 requested.append(sub)
     return requested
+
+
+def resolve_imagenet_lt_source(
+    explicit_src: str | None,
+    dataset_cfg: dict,
+) -> str:
+    """Resolve an existing local ImageNet-1K dataset for the LT adapter.
+
+    Explicit ``--src`` wins. Otherwise an environment override or the normal
+    ImageNet-1K RAM copy is preferred over the configured shared-filesystem
+    source. No remote dataset identifier is returned from this function.
+    """
+    if explicit_src:
+        return os.path.abspath(explicit_src)
+
+    env_src = os.environ.get("IMAGENET1K_DATA_DIR")
+    if env_src:
+        print(f"Using local ImageNet-1K source from IMAGENET1K_DATA_DIR: {env_src}")
+        return os.path.abspath(env_src)
+
+    local_src = dataset_cfg.get("local_src")
+    if local_src and os.path.isdir(local_src):
+        print(f"Using existing local ImageNet-1K dataset: {local_src}")
+        return os.path.abspath(local_src)
+
+    fallback = dataset_cfg["src"]
+    print(f"Local ImageNet-1K RAM copy not found; using shared source: {fallback}")
+    return os.path.abspath(fallback)
 
 
 def walk_files(
@@ -616,7 +647,10 @@ def main() -> None:
 
     # Resolve src/dst: explicit overrides take priority, then dataset registry
     dataset_defaults = DATASETS[args.dataset]
-    src = args.src or dataset_defaults["src"]
+    if dataset_defaults.get("adapter") == "imagenet-lt":
+        src = resolve_imagenet_lt_source(args.src, dataset_defaults)
+    else:
+        src = args.src or dataset_defaults["src"]
     dst = args.dst or dataset_defaults["dst"]
     post_copy_hint = dataset_defaults.get("post_copy_hint")
     subdirs = resolve_split_subdirs(dataset_defaults, args.splits)
