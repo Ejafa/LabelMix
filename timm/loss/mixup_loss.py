@@ -86,36 +86,26 @@ class LabelMixMixupLoss(nn.Module):
         if labels.shape[0] != batch_size or weights.shape[0] != batch_size:
             raise ValueError("Batch size mismatch between logits, labels, and weights")
 
-        idx = labels.long()
+        idx = labels.to(device=x.device, dtype=torch.long)
+        sample_weights = weights.to(device=x.device, dtype=x.dtype)
         k = idx.shape[1]
 
         if k == 0:
             return x.sum() * 0.0
 
-        # 1. Single pass for log-probabilities
-        logp = F.log_softmax(x, dim=1)               # [B, C]
-        ranked_logp = logp.gather(dim=1, index=idx)  # [B, K]
-
-        # 2. Extract probabilities for the PL denominator
-        ranked_p = ranked_logp.exp()                 # [B, K]
-        
-        # Unranked mass = 1.0 - sum of all ranked probabilities
+        valid_positions = sample_weights > 0
+        safe_idx = idx.masked_fill(~valid_positions, 0)
+        logp = F.log_softmax(x, dim=1)
+        ranked_logp = logp.gather(dim=1, index=safe_idx)
+        ranked_p = ranked_logp.exp() * valid_positions.to(ranked_logp.dtype)
         unranked_mass = (1.0 - ranked_p.sum(dim=1, keepdim=True)).clamp_min(0.0)
-
-        # 3. Denominator log for PL
         denom_log = torch.log(
             (unranked_mass + torch.cumsum(ranked_p, dim=1)).clamp_min(self.eps)
         )
-
-        # 4. The Interpolated Closed Form
-        # mathematically equivalent to: alpha * CE + (1 - alpha) * PL
         combined_per_position = (1.0 - self.alpha) * denom_log - ranked_logp
-
-        # 5. Apply weights and reduce
-        sample_weights = weights.to(combined_per_position.dtype)
         per_sample_loss = (combined_per_position * sample_weights).sum(dim=1)
-
-        return per_sample_loss.mean()
+        valid_samples = valid_positions.any(dim=1)
+        return per_sample_loss.sum() / valid_samples.sum().clamp_min(1)
 
     def extra_repr(self) -> str:
         return f"alpha={self.alpha}, eps={self.eps}"

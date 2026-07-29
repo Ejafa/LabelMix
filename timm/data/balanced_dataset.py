@@ -428,13 +428,16 @@ class BalancedBucketDataset(IterableDataset):
         target_key: str = "label",
         labelmix: bool = False,
         labelmix_kwargs: Optional[Dict[str, Any]] = None,
+        seed: int = 42,
         dist_rank_override: Optional[int] = None,
         dist_world_size_override: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.base_dataset = base_dataset
         self.transform = transform
-        self.mode = str(mode)
+        self.mode = str(mode).strip().lower()
+        self.natural_mode = self.mode in {"natural", "no-resampling"}
+        self.seed = int(seed)
         self.buffer_size = int(buffer_size)
         self.cache_threshold = int(cache_small_classes_threshold)
         self.input_key = input_key
@@ -487,25 +490,33 @@ class BalancedBucketDataset(IterableDataset):
         }
 
         # cycles per epoch
-        min_len = int(torch.min(self.bucket_lengths).item())
-        max_len = int(torch.max(self.bucket_lengths).item())
-        if self.mode == "min":
+        min_len = int(self.bucket_lengths.min().item())
+        max_len = int(self.bucket_lengths.max().item())
+        if self.natural_mode:
+            self.M = max_len
+            self.total_images_global = int(self.bucket_lengths.sum().item())
+        elif self.mode == "min":
             self.M = min_len
+            self.total_images_global = self.num_classes * self.M
         elif self.mode == "max":
             self.M = max_len
+            self.total_images_global = self.num_classes * self.M
         else:
             self.M = int(self.mode)
-        self.M = max(1, self.M)
-
-        self.total_images_global = int(self.num_classes * self.M)
+            if self.M < 1:
+                raise ValueError("Integer balanced mode must be >= 1")
+            self.total_images_global = self.num_classes * self.M
 
         is_primary = True
         if dist.is_available() and dist.is_initialized():
             is_primary = dist.get_rank() == 0
         if is_primary:
             print(
-                f"[BalancedBucketDataset] mode={self.mode} min_len={min_len} max_len={max_len} "
-                f"M={self.M} total_images={self.total_images_global}"
+                f"[BalancedBucketDataset] mode={self.mode} "
+                f"classes={self.num_classes} "
+                f"min_len={min_len} max_len={max_len} "
+                f"levels={self.M} "
+                f"primary_samples={self.total_images_global}"
             )
 
         if self.labelmix:
@@ -543,12 +554,40 @@ class BalancedBucketDataset(IterableDataset):
                 total_epochs=k_total_epochs,
                 labelmix_k_cooldown_epochs=k_cooldown_epochs,
             )
-            if self.k_scheduler.k_max > self.num_classes:
+            if self.natural_mode:
+                cooldown = self.k_scheduler.labelmix_k_cooldown_epochs or 0
+                if self.k_scheduler.schedule != "fixed":
+                    raise ValueError("natural mode requires k_schedule='fixed'")
+                if self.k_scheduler.k_min != self.k_scheduler.k_max:
+                    raise ValueError("natural mode requires k_min == k_max")
+                if cooldown > 0:
+                    raise ValueError("natural mode does not support K cooldown")
+            if not self.natural_mode and self.k_scheduler.k_max > self.num_classes:
                 raise ValueError(
-                    f"LabelMix K scheduler requires k_max <= num_classes "
+                    f"LabelMix K requires k_max <= num_classes "
                     f"(got {self.k_scheduler.k_max} > {self.num_classes})"
                 )
             self._set_mix_k(self.k_scheduler.get_k(0))
+
+            if self.natural_mode:
+                self.natural_stats = self.natural_statistics(self.mix_k)
+                if is_primary:
+                    total = self.natural_stats["total_primary"]
+                    mixed = self.natural_stats["mixed_primary"]
+                    single = self.natural_stats["single_primary"]
+                    metrics = {
+                        "natural/primary_total": total,
+                        "natural/mixed_primary": mixed,
+                        "natural/single_primary": single,
+                        "natural/mixed_fraction": mixed / max(1, total),
+                        "natural/single_fraction": single / max(1, total),
+                        "natural/padded_groups": self.natural_stats["padded_groups"],
+                        "natural/remainder_outputs": self.natural_stats["remainder_outputs"],
+                    }
+                    print(
+                        "[BalancedBucketDataset] "
+                        + " ".join(f"{key}={value}" for key, value in metrics.items())
+                    )
 
             if self.sampling_enabled:
                 bins = max(1, self.sampling_bins)
@@ -640,10 +679,15 @@ class BalancedBucketDataset(IterableDataset):
         if self.labelmix and self.k_scheduler is not None:
             self._set_mix_k(self.k_scheduler.get_k(self._epoch))
 
-    def __len__(self) -> int:
+    def _effective_world_size(self) -> int:
+        if self.dist_world_size_override is not None:
+            return max(1, int(self.dist_world_size_override))
         if dist.is_available() and dist.is_initialized():
-            return self.total_images_global // dist.get_world_size()
-        return self.total_images_global
+            return max(1, dist.get_world_size())
+        return 1
+
+    def __len__(self) -> int:
+        return self.total_images_global // self._effective_world_size()
 
     # -------------------------
     # Dataset plumbing
@@ -667,7 +711,15 @@ class BalancedBucketDataset(IterableDataset):
             try:
                 with open(path, "rb") as f:
                     obj = pickle.load(f)
-                    if isinstance(obj, dict) and len(obj) > 0:
+                    if isinstance(obj, dict) and "buckets" in obj:
+                        if (
+                            obj.get("version") == 2
+                            and obj.get("dataset_size") == len(self.base_dataset)
+                            and obj.get("target_key") == self.target_key
+                        ):
+                            return obj["buckets"]
+                    elif isinstance(obj, dict) and obj:
+                        # Optional backward compatibility with legacy caches.
                         return obj
             except Exception:
                 pass
@@ -682,7 +734,7 @@ class BalancedBucketDataset(IterableDataset):
             if path:
                 try:
                     with open(path, "wb") as f:
-                        pickle.dump(dict(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
+                        pickle.dump(self._bucket_cache_object(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
                 except Exception:
                     pass
             return buckets
@@ -695,7 +747,7 @@ class BalancedBucketDataset(IterableDataset):
             if path:
                 try:
                     with open(path, "wb") as f:
-                        pickle.dump(dict(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
+                        pickle.dump(self._bucket_cache_object(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
                 except Exception:
                     pass
             return buckets
@@ -723,7 +775,7 @@ class BalancedBucketDataset(IterableDataset):
             if path:
                 try:
                     with open(path, "wb") as f:
-                        pickle.dump(dict(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
+                        pickle.dump(self._bucket_cache_object(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
                 except Exception:
                     pass
             return buckets
@@ -741,7 +793,7 @@ class BalancedBucketDataset(IterableDataset):
             if path:
                 try:
                     with open(path, "wb") as f:
-                        pickle.dump(dict(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
+                        pickle.dump(self._bucket_cache_object(buckets), f, protocol=pickle.HIGHEST_PROTOCOL)
                 except Exception:
                     pass
             return buckets
@@ -750,6 +802,14 @@ class BalancedBucketDataset(IterableDataset):
             "Could not infer targets. Provide a dataset with .samples, .parser.samples, .targets, "
             "or a Hugging Face dataset with a target column."
         )
+
+    def _bucket_cache_object(self, buckets) -> Dict[str, Any]:
+        return {
+            "version": 2,
+            "dataset_size": len(self.base_dataset),
+            "target_key": self.target_key,
+            "buckets": dict(buckets),
+        }
 
     def _load_item(self, idx: int) -> Tuple[Any, int]:
         if idx in self.local_byte_cache:
@@ -860,7 +920,7 @@ class BalancedBucketDataset(IterableDataset):
     # Schedule generation
     # -------------------------
 
-    def _build_schedule(self, rng: torch.Generator, worker_cycles: torch.Tensor) -> torch.Tensor:
+    def _build_resampled_schedule(self, rng: torch.Generator, worker_cycles: torch.Tensor) -> torch.Tensor:
         """
         Build schedule rows for this worker: (num_rows, num_classes).
         Each row has one index per class, then shuffled within-row.
@@ -882,6 +942,74 @@ class BalancedBucketDataset(IterableDataset):
         noise = torch.rand(schedule.shape, generator=rng)
         order = torch.argsort(noise, dim=1)
         return schedule.gather(1, order)
+
+    def _build_natural_schedule(
+        self,
+        worker_levels: torch.Tensor,
+    ) -> List[torch.Tensor]:
+        """Construct horizontal rows containing at most one sample per class."""
+        max_seed = 2**63 - 1
+        epoch_seed = (self.seed + 1_000_003 * int(self._epoch)) % max_seed
+        shuffled_buckets: List[torch.Tensor] = []
+
+        for class_position, indices in enumerate(self.bucket_arrays):
+            generator = torch.Generator()
+            class_seed = (epoch_seed + 104_729 * (class_position + 1)) % max_seed
+            generator.manual_seed(class_seed)
+            permutation = torch.randperm(int(indices.numel()), generator=generator)
+            shuffled_buckets.append(indices[permutation])
+
+        rows: List[torch.Tensor] = []
+        for level_tensor in worker_levels:
+            level = int(level_tensor.item())
+            row_indices = [
+                int(bucket[level].item())
+                for bucket in shuffled_buckets
+                if level < int(bucket.numel())
+            ]
+            if not row_indices:
+                continue
+            row = torch.tensor(row_indices, dtype=torch.int64)
+            row_generator = torch.Generator()
+            row_seed = (epoch_seed + 15_485_863 * (level + 1)) % max_seed
+            row_generator.manual_seed(row_seed)
+            row = row[torch.randperm(int(row.numel()), generator=row_generator)]
+            rows.append(row)
+        return rows
+
+    def natural_statistics(self, k: int) -> Dict[str, int]:
+        mixed_primary = single_primary = mixed_rows = single_rows = 0
+        remainder_outputs = padded_groups = 0
+        max_len = int(self.bucket_lengths.max().item())
+        for level in range(max_len):
+            active = int((self.bucket_lengths > level).sum().item())
+            if active >= k:
+                mixed_rows += 1
+                mixed_primary += active
+                remainder = active % k
+                if remainder:
+                    padded_groups += 1
+                    remainder_outputs += remainder
+            else:
+                single_rows += 1
+                single_primary += active
+        return {
+            "mixed_primary": mixed_primary,
+            "single_primary": single_primary,
+            "mixed_rows": mixed_rows,
+            "single_rows": single_rows,
+            "padded_groups": padded_groups,
+            "remainder_outputs": remainder_outputs,
+            "total_primary": mixed_primary + single_primary,
+        }
+
+    def _make_single_target(self, target: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Represent one real target in the final (most important) fixed-K slot."""
+        labels = torch.zeros(self.mix_k, dtype=torch.int64)
+        weights = torch.zeros(self.mix_k, dtype=torch.float32)
+        labels[-1] = int(target)
+        weights[-1] = 1.0
+        return labels, weights
 
     # -------------------------
     # LabelMix core (your mixing semantics)
@@ -998,7 +1126,11 @@ class BalancedBucketDataset(IterableDataset):
                     out.append((out_batch[s], (labels_mat[s], weights_asc)))
             return out
 
-    def _iter_labelmix(self, schedule: torch.Tensor, worker_cycles: torch.Tensor):
+    def _iter_labelmix(
+        self,
+        schedule: Sequence[torch.Tensor],
+        worker_cycles: torch.Tensor,
+    ):
         """
         LabelMix iteration:
           - one Dirichlet draw per cycle row
@@ -1013,7 +1145,31 @@ class BalancedBucketDataset(IterableDataset):
         emitted = 0
         last_exc: Optional[Exception] = None
 
-        for row_i in range(schedule.shape[0]):
+        for row_i, row_indices in enumerate(schedule):
+            row_n = int(row_indices.numel())
+            if row_n < K:
+                try:
+                    items = self._load_items_batch(row_indices.tolist())
+                    for image_object, target in items:
+                        image = self._process_image(image_object)
+                        labels, weights = self._make_single_target(int(target))
+                        if self.debug_sym:
+                            buffer.append((image, (labels, weights, -1)))
+                        else:
+                            buffer.append((image, (labels, weights)))
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to process natural-mode single row "
+                        f"{row_i} with {row_n} samples"
+                    ) from exc
+
+                while len(buffer) >= self.buffer_size:
+                    index = random.randint(0, len(buffer) - 1)
+                    buffer[index], buffer[-1] = buffer[-1], buffer[index]
+                    emitted += 1
+                    yield buffer.pop()
+                continue
+
             cycle_idx_in_epoch = int(worker_cycles[row_i].item())
             alpha = float(self.alpha_scheduler.get_alpha(self._epoch, cycle_idx_in_epoch))
 
@@ -1028,8 +1184,6 @@ class BalancedBucketDataset(IterableDataset):
             # Within the row, group into chunks of K.
             # If there is a remainder, pad one tail group from this row and
             # keep only `remainder` mixed outputs so row output count stays exact.
-            row_indices = schedule[row_i]
-            row_n = int(row_indices.numel())
             usable = (row_n // K) * K
             remainder = row_n - usable
 
@@ -1090,6 +1244,11 @@ class BalancedBucketDataset(IterableDataset):
                     )
                     buffer.extend(mixed_items)
                 except Exception as exc:
+                    if self.natural_mode:
+                        raise RuntimeError(
+                            f"Natural-mode TreemapMix failure "
+                            f"at row={row_i}, group_start={g0}"
+                        ) from exc
                     last_exc = exc
                     continue
 
@@ -1170,6 +1329,10 @@ class BalancedBucketDataset(IterableDataset):
                     )
                     buffer.extend(mixed_items[:remainder])
                 except Exception as exc:
+                    if self.natural_mode:
+                        raise RuntimeError(
+                            f"Natural-mode remainder failure at row={row_i}"
+                        ) from exc
                     last_exc = exc
 
                 while len(buffer) >= self.buffer_size:
@@ -1211,7 +1374,7 @@ class BalancedBucketDataset(IterableDataset):
         total_workers = world_size * num_workers
         global_worker_id = rank * num_workers + worker_id
 
-        if self.labelmix and self.num_classes < self.mix_k:
+        if self.labelmix and not self.natural_mode and self.num_classes < self.mix_k:
             raise ValueError(f"LabelMix requires num_classes >= mix_k (got {self.num_classes} < {self.mix_k})")
 
         worker_cycles = torch.arange(global_worker_id, self.M, total_workers, dtype=torch.int64)
@@ -1225,14 +1388,17 @@ class BalancedBucketDataset(IterableDataset):
         rng = torch.Generator()
         rng.manual_seed(seed)
 
-        schedule = self._build_schedule(rng=rng, worker_cycles=worker_cycles)
+        if self.natural_mode:
+            schedule = self._build_natural_schedule(worker_levels=worker_cycles)
+        else:
+            schedule = self._build_resampled_schedule(rng=rng, worker_cycles=worker_cycles)
 
         if self.labelmix:
             yield from self._iter_labelmix(schedule=schedule, worker_cycles=worker_cycles)
         else:
             # Non-labelmix path: batch-fetch in chunks if possible (HF speedup)
             buffer: List[Tuple[torch.Tensor, int]] = []
-            flat = schedule.flatten()
+            flat = torch.cat(list(schedule)) if self.natural_mode else schedule.flatten()
 
             chunk_size = max(64, min(1024, self.buffer_size))
             for i0 in range(0, int(flat.numel()), chunk_size):

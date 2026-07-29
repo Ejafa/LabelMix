@@ -51,9 +51,10 @@ class LabelMixSoftTargetCrossEntropy(nn.Module):
         if weights.ndim == 1:
             weights = weights.unsqueeze(0)
 
-        labels = labels.to(dtype=torch.long)
+        labels = labels.to(device=x.device, dtype=torch.long)
+        weights = weights.to(device=x.device, dtype=x.dtype)
         logprobs = F.log_softmax(x, dim=-1)
         nll = -logprobs.gather(dim=-1, index=labels)
-        weights = weights.to(dtype=nll.dtype)
-        loss = (nll * weights).sum(dim=-1)
-        return loss.mean()
+        per_sample_loss = (nll * weights).sum(dim=-1)
+        valid_samples = weights.sum(dim=-1) > 0
+        return per_sample_loss.sum() / valid_samples.sum().clamp_min(1)

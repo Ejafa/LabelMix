@@ -17,8 +17,11 @@ a single per-run backup directory:
 * ``summary.csv``
 * ``model_best.pth.tar``
 
-Only runs whose W&B ``metadata.json`` reports ``state == "finished"``
-are copied.
+By default, only runs whose W&B ``metadata.json`` reports
+``state == "finished"`` are copied. Pass ``--include-crashed`` to also
+consider runs reported as ``crashed``; the normal checkpoint requirement
+still applies, so these runs are copied only when ``model_best.pth.tar``
+exists in the resolved training-run directory.
 
 Layout::
 
@@ -70,6 +73,9 @@ Typical invocations::
 
     # Only the legacy W&B pipeline.
     python -m evaluation.scripts.backup_runs --only wandb
+
+    # Also back up W&B runs marked crashed when their best checkpoint exists.
+    python -m evaluation.scripts.backup_runs --only wandb --include-crashed
 
     # Only the vitdet / detectron2 pipeline.
     python -m evaluation.scripts.backup_runs --only vitdet
@@ -591,6 +597,7 @@ def backup_runs(
     dry_run: bool = False,
     require_best_checkpoint: bool = True,
     apply_overtrain_substitution: bool = True,
+    include_crashed: bool = False,
 ) -> BackupStats:
     """Walk ``wandb_root`` and back up every finished run into ``backup_root``.
 
@@ -618,6 +625,10 @@ def backup_runs(
             count is closest to 110 epochs. Set to False to disable and
             copy the on-disk best verbatim; see
             :func:`_detect_overtrained_substitute` for the full guard.
+        include_crashed: If True, also consider W&B runs whose metadata state
+            is ``crashed``. The ``require_best_checkpoint`` guard remains in
+            effect, so with the defaults a crashed run is backed up only when
+            its resolved source directory contains ``model_best.pth.tar``.
     """
     wandb_root = wandb_root.resolve()
     backup_root = backup_root.resolve()
@@ -646,8 +657,12 @@ def backup_runs(
         state = str(metadata.get("state") or "").lower()
         group = metadata.get("group") or run_dir.parent.name
 
-        if state not in FINISHED_STATES:
-            _logger.debug("[%s] skip: state=%r not in %s", run_id, state, sorted(FINISHED_STATES))
+        eligible_states = FINISHED_STATES | ({"crashed"} if include_crashed else set())
+        if state not in eligible_states:
+            _logger.debug(
+                "[%s] skip: state=%r not in %s",
+                run_id, state, sorted(eligible_states),
+            )
             stats.skipped_not_finished += 1
             continue
 
@@ -1020,6 +1035,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--dry-run", action="store_true",
         help="Log what would be copied without touching the destination.",
     )
+    p.add_argument(
+        "--include-crashed", action="store_true",
+        help="(W&B pipeline only) Also consider runs whose W&B state is "
+             "'crashed'. The default checkpoint requirement still applies, "
+             "so a crashed run is backed up only if model_best.pth.tar exists.",
+    )
     ckpt_group = p.add_mutually_exclusive_group()
     ckpt_group.add_argument(
         "--require-best-checkpoint", dest="require_best_checkpoint",
@@ -1066,6 +1087,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             dry_run=args.dry_run,
             require_best_checkpoint=args.require_best_checkpoint,
             apply_overtrain_substitution=args.apply_overtrain_substitution,
+            include_crashed=args.include_crashed,
         )
 
     if args.only in ("both", "vitdet"):

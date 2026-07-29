@@ -70,34 +70,26 @@ def labelmix_plackett_luce_loss(
     if labels.shape[1] != weights.shape[1]:
         raise ValueError("labels and weights must have the same K")
 
-    idx = labels.long()
+    idx = labels.to(device=logits.device, dtype=torch.long)
+    sample_weights = weights.to(device=logits.device, dtype=logits.dtype)
     k = idx.shape[1]
 
     if k == 0:
         return logits.sum() * 0.0
 
-    # Full log-probabilities over all classes
-    logp = F.log_softmax(logits, dim=1)          # [B, C]
-
-    # Ranked log-probabilities only
-    ranked_logp = logp.gather(dim=1, index=idx)  # [B, K]
-    ranked_p = ranked_logp.exp()                 # [B, K]
-
-    # Unranked probability mass
-    unranked_mass = (1.0 - ranked_p.sum(dim=1, keepdim=True)).clamp_min(0.0)  # [B, 1]
-
-    # D_i = unranked_mass + sum_{j<=i} p_j
+    valid_positions = sample_weights > 0
+    safe_idx = idx.masked_fill(~valid_positions, 0)
+    logp = F.log_softmax(logits, dim=1)
+    ranked_logp = logp.gather(dim=1, index=safe_idx)
+    ranked_p = ranked_logp.exp() * valid_positions.to(ranked_logp.dtype)
+    unranked_mass = (1.0 - ranked_p.sum(dim=1, keepdim=True)).clamp_min(0.0)
     denom_log = torch.log(
         (unranked_mass + torch.cumsum(ranked_p, dim=1)).clamp_min(eps)
-    )  # [B, K]
-
-    # Per-position loss
-    per_position_loss = denom_log - ranked_logp  # [B, K]
-
-    sample_weights = weights.to(per_position_loss.dtype)
+    )
+    per_position_loss = denom_log - ranked_logp
     per_sample_loss = (per_position_loss * sample_weights).sum(dim=1)
-
-    return per_sample_loss.mean()
+    valid_samples = valid_positions.any(dim=1)
+    return per_sample_loss.sum() / valid_samples.sum().clamp_min(1)
 
 class LabelMixPlackettLuceLoss(nn.Module):
     """LabelMix top-K Plackett-Luce/ListMLE loss (ASC rank order: worst -> best)."""

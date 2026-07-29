@@ -161,7 +161,9 @@ group.add_argument('--target-key', default=None, type=str,
 group.add_argument('--dataset-trust-remote-code', action='store_true', default=False,
                    help='Allow huggingface dataset import to execute code downloaded from the dataset\'s repo.')
 group.add_argument('--balanced-mode', default='', type=str,
-                   help='Enable balanced loading: "min", "max", or int (samples per class). Default: disabled.')
+                   help=('Loading mode: "min", "max", a positive integer, or "natural". '
+                         'Natural mode uses every original sample once in the primary schedule '
+                         'and lets the active-class count decrease across rows.'))
 group.add_argument('--balanced-buffer', default=4096, type=int,
                    help='Buffer size for balanced loading (default: 4096)')
 group.add_argument('--balanced-buffer-steps', default='0', type=str,
@@ -188,7 +190,7 @@ group.add_argument('--labelmix-loss', default='soft_ce', type=str,
                         '(convex combination of the two, controlled by --labelmix-mixed-alpha).')
 group.add_argument('--labelmix-mixed-alpha', default=0.5, type=float,
                    help='Mixing coefficient alpha in [0, 1] for --labelmix-loss=mixed: '
-                        'loss = (1 - alpha) * soft_ce + alpha * pl_loss.')
+                        'loss = alpha * soft_ce + (1 - alpha) * pl_loss.')
 group.add_argument('--labelmix-mix-k', default=5, type=int,
                    help='LabelMix K (number of source images per output, >= 1).')
 group.add_argument('--labelmix-k-min', default=None, type=int,
@@ -791,19 +793,41 @@ def validate_args(args) -> None:
             raise ValueError('--labelmix-k-cooldown-epochs must be >= 0')
 
     bm = getattr(args, 'balanced_mode', '')
+    mode = bm
     if bm:
         if isinstance(bm, str):
             mode = bm.strip().lower()
             if mode.isdigit():
                 mode = int(mode)
-            elif mode not in ('min', 'max'):
-                raise ValueError('--balanced-mode must be "min", "max", or a positive int')
+            elif mode not in ('min', 'max', 'natural', 'no-resampling'):
+                raise ValueError('--balanced-mode must be "min", "max", "natural", or a positive int')
+            if mode == 'no-resampling':
+                mode = 'natural'
         elif isinstance(bm, int):
             mode = bm
         else:
-            raise ValueError('--balanced-mode must be "min", "max", or a positive int')
+            raise ValueError('--balanced-mode must be "min", "max", "natural", or a positive int')
         if isinstance(mode, int) and mode < 1:
             raise ValueError('--balanced-mode int value must be >= 1')
+
+    if mode == 'natural':
+        if not getattr(args, 'labelmix', False):
+            raise ValueError('--balanced-mode natural requires --labelmix')
+        mix_k = getattr(args, 'labelmix_mix_k', 1)
+        if mix_k < 2:
+            raise ValueError('natural TreemapMix requires K >= 2')
+        k_min = getattr(args, 'labelmix_k_min', None)
+        k_max = getattr(args, 'labelmix_k_max', None)
+        if (k_min if k_min is not None else mix_k) != mix_k:
+            raise ValueError('natural mode requires k_min == mix_k')
+        if (k_max if k_max is not None else mix_k) != mix_k:
+            raise ValueError('natural mode requires k_max == mix_k')
+        if getattr(args, 'labelmix_k_schedule', None) != 'fixed':
+            raise ValueError('natural mode requires --labelmix-k-schedule fixed')
+        if (getattr(args, 'labelmix_k_cooldown_epochs', 0) or 0) > 0:
+            raise ValueError('natural mode does not support K cooldown')
+        if getattr(args, 'distributed', False) and getattr(args, 'labelmix_producer_rank', -1) < 0:
+            raise ValueError('distributed natural mode requires --labelmix-producer-rank 0')
 
     if getattr(args, 'puzzlemix', False):
         raise ValueError(
@@ -1290,6 +1314,38 @@ class LabelMixBroadcastLoader:
             raise ValueError("LabelMix producer expected target as (labels, weights).")
         return target[0], target[1]
 
+    def _pad_global_batch(
+        self,
+        input_tensor: torch.Tensor,
+        labels: torch.Tensor,
+        weights: torch.Tensor,
+    ):
+        target_size = self.batch_size * self.world_size
+        current_size = int(input_tensor.shape[0])
+        if current_size == target_size:
+            return input_tensor, labels, weights
+        if current_size <= 0 or current_size > target_size:
+            raise ValueError(f"Invalid global batch size: {current_size}")
+
+        padding = target_size - current_size
+        source_indices = torch.arange(padding, device=input_tensor.device) % current_size
+        padded_inputs = input_tensor.index_select(0, source_indices)
+        padded_labels = torch.zeros(
+            (padding,) + tuple(labels.shape[1:]),
+            dtype=labels.dtype,
+            device=labels.device,
+        )
+        padded_weights = torch.zeros(
+            (padding,) + tuple(weights.shape[1:]),
+            dtype=weights.dtype,
+            device=weights.device,
+        )
+        return (
+            torch.cat([input_tensor, padded_inputs], dim=0),
+            torch.cat([labels, padded_labels], dim=0),
+            torch.cat([weights, padded_weights], dim=0),
+        )
+
     def _scatter(self, input_tensor, labels, weights) -> None:
         if self.rank == self.producer_rank:
             input_chunks = list(input_tensor.chunk(self.world_size, dim=0))
@@ -1322,6 +1378,9 @@ class LabelMixBroadcastLoader:
                 raise StopIteration
             input_tensor, target = batch
             labels, weights = self._split_target(target)
+            input_tensor, labels, weights = self._pad_global_batch(
+                input_tensor, labels, weights
+            )
             if not self._meta_ready:
                 self._broadcast_meta(input_tensor, labels, weights)
             self._scatter(input_tensor, labels, weights)
@@ -1409,12 +1468,14 @@ def run_training(args=None, args_text=None):
             mode = args.balanced_mode.strip().lower()
             if mode.isdigit():
                 mode = int(mode)
-            elif mode not in ('min', 'max'):
-                parser.error('--balanced-mode must be "min", "max", or a positive int')
+            elif mode not in ('min', 'max', 'natural', 'no-resampling'):
+                parser.error('--balanced-mode must be "min", "max", "natural", or a positive int')
+            if mode == 'no-resampling':
+                mode = 'natural'
         elif isinstance(args.balanced_mode, int):
             mode = args.balanced_mode
         else:
-            parser.error('--balanced-mode must be "min", "max", or a positive int')
+            parser.error('--balanced-mode has an unsupported type')
         if isinstance(mode, int) and mode < 1:
             parser.error('--balanced-mode int value must be >= 1')
         args.balanced_mode = mode
@@ -1493,6 +1554,28 @@ def run_training(args=None, args_text=None):
     assert args.rank >= 0
 
     central_labelmix = args.labelmix and args.labelmix_producer_rank >= 0
+    natural_mode = args.balanced_mode == 'natural'
+    if natural_mode:
+        if not args.labelmix:
+            parser.error(
+                '--balanced-mode natural requires --labelmix. For an ordinary '
+                'natural-prior baseline, use the standard dataset loader without --balanced-mode.'
+            )
+        if args.labelmix_mix_k < 2:
+            parser.error('natural TreemapMix requires K >= 2')
+        k_min = args.labelmix_k_min if args.labelmix_k_min is not None else args.labelmix_mix_k
+        k_max = args.labelmix_k_max if args.labelmix_k_max is not None else args.labelmix_mix_k
+        if k_min != args.labelmix_mix_k:
+            parser.error('natural mode requires k_min == mix_k')
+        if k_max != args.labelmix_mix_k:
+            parser.error('natural mode requires k_max == mix_k')
+        if args.labelmix_k_schedule != 'fixed':
+            parser.error('natural mode requires --labelmix-k-schedule fixed')
+        if (args.labelmix_k_cooldown_epochs or 0) > 0:
+            parser.error('natural mode does not support K cooldown')
+        if args.distributed and not central_labelmix:
+            parser.error('distributed natural mode requires --labelmix-producer-rank 0')
+
     labelmix_cpu_group = None
     if central_labelmix:
         if not args.distributed:
@@ -2072,6 +2155,7 @@ def run_training(args=None, args_text=None):
                 target_key=balanced_target_key,
                 labelmix=args.labelmix,
                 labelmix_kwargs=labelmix_kwargs,
+                seed=args.seed,
                 dist_rank_override=0 if central_labelmix else None,
                 dist_world_size_override=1 if central_labelmix else None,
             )
@@ -2109,6 +2193,7 @@ def run_training(args=None, args_text=None):
                     else args.workers
                 )
                 producer_loader = None
+                producer_persistent_workers = producer_workers > 0 and not natural_mode
                 if args.rank == args.labelmix_producer_rank:
                     producer_prefetch = (
                         str(loader_prefetch_factor)
@@ -2126,9 +2211,9 @@ def run_training(args=None, args_text=None):
                         num_workers=producer_workers,
                         collate_fn=collate_fn,
                         pin_memory=args.pin_mem,
-                        drop_last=True,
+                        drop_last=not natural_mode,
                         worker_init_fn=partial(_worker_init, worker_seeding=args.worker_seeding),
-                        persistent_workers=producer_workers > 0,
+                        persistent_workers=producer_persistent_workers,
                     )
                     if producer_workers > 0 and loader_prefetch_factor is not None:
                         producer_loader_kwargs['prefetch_factor'] = loader_prefetch_factor
@@ -2143,15 +2228,16 @@ def run_training(args=None, args_text=None):
                     log_fn=_logger.info if args.rank == args.labelmix_producer_rank else None,
                 )
             else:
+                balanced_persistent_workers = args.workers > 0 and not natural_mode
                 loader_train_kwargs = dict(
                     dataset=dataset_train,
                     batch_size=args.batch_size,
                     num_workers=args.workers,
                     collate_fn=collate_fn,
                     pin_memory=args.pin_mem,
-                    drop_last=True,
+                    drop_last=not natural_mode,
                     worker_init_fn=partial(_worker_init, worker_seeding=args.worker_seeding),
-                    persistent_workers=args.workers > 0,
+                    persistent_workers=balanced_persistent_workers,
                 )
                 if args.workers > 0 and loader_prefetch_factor is not None:
                     loader_train_kwargs['prefetch_factor'] = loader_prefetch_factor
@@ -2640,6 +2726,19 @@ def run_training(args=None, args_text=None):
                     best_metric, best_step = saver.save_checkpoint(global_step, metric=latest_metric)
 
             if do_log:
+                if natural_mode and labelmix_train_dataset is not None:
+                    stats = getattr(labelmix_train_dataset, 'natural_stats', None)
+                    if stats:
+                        total_primary = stats['total_primary']
+                        train_metrics.update({
+                            'natural/primary_total': total_primary,
+                            'natural/mixed_primary': stats['mixed_primary'],
+                            'natural/single_primary': stats['single_primary'],
+                            'natural/mixed_fraction': stats['mixed_primary'] / max(1, total_primary),
+                            'natural/single_fraction': stats['single_primary'] / max(1, total_primary),
+                            'natural/padded_groups': stats['padded_groups'],
+                            'natural/remainder_outputs': stats['remainder_outputs'],
+                        })
                 if output_dir is not None:
                     lrs = [param_group['lr'] for param_group in optimizer.param_groups]
                     utils.update_summary(
