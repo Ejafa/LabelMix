@@ -241,10 +241,10 @@ group.add_argument('--labelmix-sampling-low-watermark', default=32, type=int,
 group.add_argument('--labelmix-sampling-max-attempts', default=200, type=int,
                    help='Max attempts per sampled weight.')
 group.add_argument('--labelmix-producer-rank', default=-1, type=int,
-                   help='Centralize LabelMix on a single rank and scatter batches. '
+                   help='Centralize LabelMix or Mosaic on one rank and scatter batches. '
                         'Set to rank id (e.g. 0) to enable, -1 disables.')
 group.add_argument('--labelmix-producer-workers', default=0, type=int,
-                   help='Num DataLoader workers for centralized LabelMix producer. '
+                   help='Num DataLoader workers for the centralized LabelMix/Mosaic producer. '
                         'If <=0, falls back to --workers.')
 
 # ---------------- Mosaic augmentation ----------------
@@ -1316,7 +1316,7 @@ class LabelMixBroadcastLoader:
     @staticmethod
     def _split_target(target):
         if not isinstance(target, (tuple, list)) or len(target) != 2:
-            raise ValueError("LabelMix producer expected target as (labels, weights).")
+            raise ValueError("Central producer expected target as (labels, weights).")
         return target[0], target[1]
 
     def _pad_global_batch(
@@ -1368,7 +1368,7 @@ class LabelMixBroadcastLoader:
         eof_t = torch.zeros(1, dtype=torch.uint8)
         if self.rank == self.producer_rank:
             if self.loader is None:
-                raise RuntimeError("LabelMix producer rank has no loader.")
+                raise RuntimeError("Central producer rank has no loader.")
             try:
                 if self._iter is None:
                     self._iter = iter(self.loader)
@@ -1558,7 +1558,10 @@ def run_training(args=None, args_text=None):
         _logger.info(f'Training with a single process on 1 device ({args.device}).')
     assert args.rank >= 0
 
-    central_labelmix = args.labelmix and args.labelmix_producer_rank >= 0
+    central_producer = (
+        (args.labelmix or args.mosaic)
+        and args.labelmix_producer_rank >= 0
+    )
     natural_mode = args.balanced_mode == 'natural'
     if natural_mode:
         if not args.labelmix and not args.mosaic:
@@ -1579,13 +1582,13 @@ def run_training(args=None, args_text=None):
                 parser.error('natural mode requires --labelmix-k-schedule fixed')
             if (args.labelmix_k_cooldown_epochs or 0) > 0:
                 parser.error('natural mode does not support K cooldown')
-            if args.distributed and not central_labelmix:
+            if args.distributed and not central_producer:
                 parser.error('distributed natural mode requires --labelmix-producer-rank 0')
-        elif args.distributed:
-            parser.error('distributed natural-mode Mosaic is not supported')
+        elif args.distributed and not central_producer:
+            parser.error('distributed natural-mode Mosaic requires --labelmix-producer-rank 0')
 
     labelmix_cpu_group = None
-    if central_labelmix:
+    if central_producer:
         if not args.distributed:
             parser.error('--labelmix-producer-rank requires distributed training')
         if args.labelmix_producer_rank >= args.world_size or args.labelmix_producer_rank < 0:
@@ -1593,14 +1596,14 @@ def run_training(args=None, args_text=None):
         try:
             labelmix_cpu_group = dist.new_group(backend='gloo')
         except Exception as exc:
-            raise RuntimeError('Failed to create gloo process group for LabelMix producer.') from exc
+            raise RuntimeError('Failed to create gloo process group for centralized producer.') from exc
         if utils.is_primary(args):
             _logger.info(
-                f'LabelMix centralized producer enabled on rank {args.labelmix_producer_rank} '
+                f'Central multi-image producer enabled on rank {args.labelmix_producer_rank} '
                 f'(world_size={args.world_size}).'
             )
 
-    buffer_batch = args.batch_size * args.world_size if central_labelmix else args.batch_size
+    buffer_batch = args.batch_size * args.world_size if central_producer else args.batch_size
     balanced_buffer = args.balanced_buffer
     if balanced_buffer_steps_auto:
         balanced_buffer_steps = int(math.ceil(float(balanced_buffer) / float(buffer_batch)))
@@ -2104,7 +2107,7 @@ def run_training(args=None, args_text=None):
             if balanced_cache_dir:
                 os.makedirs(balanced_cache_dir, exist_ok=True)
 
-            labelmix_batch_size = args.batch_size * args.world_size if central_labelmix else args.batch_size
+            labelmix_batch_size = args.batch_size * args.world_size if central_producer else args.batch_size
             # Some step-based configs do not define --epochs; keep K scheduling robust.
             default_train_epochs = getattr(args, 'epochs', None)
             if default_train_epochs is None:
@@ -2164,8 +2167,8 @@ def run_training(args=None, args_text=None):
                 labelmix=args.labelmix,
                 labelmix_kwargs=labelmix_kwargs,
                 seed=args.seed,
-                dist_rank_override=0 if central_labelmix else None,
-                dist_world_size_override=1 if central_labelmix else None,
+                dist_rank_override=0 if central_producer else None,
+                dist_world_size_override=1 if central_producer else None,
             )
             labelmix_train_dataset = dataset_train if args.labelmix else None
 
@@ -2194,7 +2197,7 @@ def run_training(args=None, args_text=None):
             if collate_fn is None:
                 collate_fn = fast_collate if args.prefetcher else torch.utils.data.dataloader.default_collate
 
-            if central_labelmix:
+            if central_producer:
                 producer_workers = (
                     args.labelmix_producer_workers
                     if args.labelmix_producer_workers > 0
@@ -2209,7 +2212,7 @@ def run_training(args=None, args_text=None):
                         else "default"
                     )
                     _logger.info(
-                        "LabelMix producer DataLoader prefetch_factor=%s (workers=%s)",
+                        "Central producer DataLoader prefetch_factor=%s (workers=%s)",
                         producer_prefetch,
                         producer_workers,
                     )
@@ -2229,7 +2232,7 @@ def run_training(args=None, args_text=None):
                 loader_train = LabelMixBroadcastLoader(
                     producer_loader,
                     batch_size=args.batch_size,
-                    mix_k=args.labelmix_mix_k,
+                    mix_k=4 if args.mosaic else args.labelmix_mix_k,
                     producer_rank=args.labelmix_producer_rank,
                     pin_memory=args.pin_mem,
                     group=labelmix_cpu_group,

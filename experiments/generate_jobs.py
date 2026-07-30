@@ -1403,12 +1403,10 @@ def generate(
                                     all_overrides["labelmix_producer_rank"] = 0
                                     all_overrides["labelmix_producer_workers"] = workers
                             elif mosaic_enabled:
-                                if gpus_per_job > 1:
-                                    raise ValueError(
-                                        "Distributed Mosaic on a natural-prior dataset is not "
-                                        "supported; generate these jobs with --gpus-per-job 1"
-                                    )
                                 all_overrides["balanced_mode"] = "natural"
+                                if gpus_per_job > 1:
+                                    all_overrides["labelmix_producer_rank"] = 0
+                                    all_overrides["labelmix_producer_workers"] = workers
                             else:
                                 # Ordinary natural-prior baselines should use
                                 # the standard dataset loader directly.

@@ -1,485 +1,485 @@
 defaults:
-  gpus: 1
+  gpus: 2
   max_retries: 3
-  working_dir: .
+  working_dir: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/ggez/LabelMix
 jobs:
-- name: vit-medium__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
+- name: vit-medium__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-medium.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 6 --labelmix-k-min 6 --labelmix-k-max 6 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss pl_loss --clip-grad 3.0 --mixup 0
-    --cutmix 0 --mixup-prob 0.0 --seed 42 --experiment vit-medium__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
+    --cutmix 0 --mixup-prob 0.0 --seed 42 --experiment vit-medium__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-medium__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
+- name: vit-medium__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-medium.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 6 --labelmix-k-min 6 --labelmix-k-max 6 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss pl_loss --clip-grad 3.0 --mixup 0
-    --cutmix 0 --mixup-prob 0.0 --seed 43 --experiment vit-medium__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
+    --cutmix 0 --mixup-prob 0.0 --seed 43 --experiment vit-medium__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-medium__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+- name: vit-medium__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-medium.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 42 --experiment vit-medium__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+    0.0 --seed 42 --experiment vit-medium__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-medium__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
+- name: vit-medium__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-medium.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 43 --experiment vit-medium__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
+    0.0 --seed 43 --experiment vit-medium__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-medium__inlt__img256__baseline__seed=42
+- name: vit-medium__inlt__img256__bs=1024__baseline__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-medium.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --num-classes 1000
-    --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval 5000
-    --seed 42 --experiment vit-medium__inlt__img256__baseline__seed=42 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-medium__inlt__img256__baseline__seed=43
+    --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval 5000
+    --seed 42 --experiment vit-medium__inlt__img256__bs=1024__baseline__seed=42 --output
+    output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-medium__inlt__img256__bs=1024__baseline__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-medium.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --num-classes 1000
-    --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval 5000
-    --seed 43 --experiment vit-medium__inlt__img256__baseline__seed=43 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-medium__inlt__img256__mosaic__seed=42
+    --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval 5000
+    --seed 43 --experiment vit-medium__inlt__img256__bs=1024__baseline__seed=43 --output
+    output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-medium__inlt__img256__bs=1024__mosaic__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-medium.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval
     5000 --mosaic --mosaic-prob 0.5 --mosaic-center-ratio 0.5 1.5 --mosaic-scale-range
-    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --seed
-    42 --experiment vit-medium__inlt__img256__mosaic__seed=42 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-medium__inlt__img256__mosaic__seed=43
+    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --labelmix-producer-rank
+    0 --labelmix-producer-workers 8 --seed 42 --experiment vit-medium__inlt__img256__bs=1024__mosaic__seed=42
+    --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-medium__inlt__img256__bs=1024__mosaic__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-medium.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval
     5000 --mosaic --mosaic-prob 0.5 --mosaic-center-ratio 0.5 1.5 --mosaic-scale-range
-    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --seed
-    43 --experiment vit-medium__inlt__img256__mosaic__seed=43 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-wee__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
+    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --labelmix-producer-rank
+    0 --labelmix-producer-workers 8 --seed 43 --experiment vit-medium__inlt__img256__bs=1024__mosaic__seed=43
+    --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-wee__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-wee.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 6 --labelmix-k-min 6 --labelmix-k-max 6 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss pl_loss --clip-grad 3.0 --mixup 0
-    --cutmix 0 --mixup-prob 0.0 --seed 42 --experiment vit-wee__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
+    --cutmix 0 --mixup-prob 0.0 --seed 42 --experiment vit-wee__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-wee__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
+- name: vit-wee__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-wee.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 6 --labelmix-k-min 6 --labelmix-k-max 6 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss pl_loss --clip-grad 3.0 --mixup 0
-    --cutmix 0 --mixup-prob 0.0 --seed 43 --experiment vit-wee__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
+    --cutmix 0 --mixup-prob 0.0 --seed 43 --experiment vit-wee__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-wee__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+- name: vit-wee__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-wee.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 42 --experiment vit-wee__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+    0.0 --seed 42 --experiment vit-wee__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-wee__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
+- name: vit-wee__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-wee.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 43 --experiment vit-wee__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
+    0.0 --seed 43 --experiment vit-wee__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-wee__inlt__img256__baseline__seed=42
+- name: vit-wee__inlt__img256__bs=1024__baseline__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-wee.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --num-classes 1000
-    --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval 5000
-    --seed 42 --experiment vit-wee__inlt__img256__baseline__seed=42 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-wee__inlt__img256__baseline__seed=43
+    --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval 5000
+    --seed 42 --experiment vit-wee__inlt__img256__bs=1024__baseline__seed=42 --output
+    output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-wee__inlt__img256__bs=1024__baseline__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-wee.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --num-classes 1000
-    --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval 5000
-    --seed 43 --experiment vit-wee__inlt__img256__baseline__seed=43 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-wee__inlt__img256__mosaic__seed=42
+    --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval 5000
+    --seed 43 --experiment vit-wee__inlt__img256__bs=1024__baseline__seed=43 --output
+    output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-wee__inlt__img256__bs=1024__mosaic__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-wee.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval
     5000 --mosaic --mosaic-prob 0.5 --mosaic-center-ratio 0.5 1.5 --mosaic-scale-range
-    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --seed
-    42 --experiment vit-wee__inlt__img256__mosaic__seed=42 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-wee__inlt__img256__mosaic__seed=43
+    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --labelmix-producer-rank
+    0 --labelmix-producer-workers 8 --seed 42 --experiment vit-wee__inlt__img256__bs=1024__mosaic__seed=42
+    --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-wee__inlt__img256__bs=1024__mosaic__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-wee.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval
     5000 --mosaic --mosaic-prob 0.5 --mosaic-center-ratio 0.5 1.5 --mosaic-scale-range
-    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --seed
-    43 --experiment vit-wee__inlt__img256__mosaic__seed=43 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-little__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
+    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --labelmix-producer-rank
+    0 --labelmix-producer-workers 8 --seed 43 --experiment vit-wee__inlt__img256__bs=1024__mosaic__seed=43
+    --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-little__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-little.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 6 --labelmix-k-min 6 --labelmix-k-max 6 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss pl_loss --clip-grad 3.0 --mixup 0
-    --cutmix 0 --mixup-prob 0.0 --seed 42 --experiment vit-little__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
+    --cutmix 0 --mixup-prob 0.0 --seed 42 --experiment vit-little__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-little__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
+- name: vit-little__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-little.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 6 --labelmix-k-min 6 --labelmix-k-max 6 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss pl_loss --clip-grad 3.0 --mixup 0
-    --cutmix 0 --mixup-prob 0.0 --seed 43 --experiment vit-little__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
+    --cutmix 0 --mixup-prob 0.0 --seed 43 --experiment vit-little__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-little__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+- name: vit-little__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-little.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 42 --experiment vit-little__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+    0.0 --seed 42 --experiment vit-little__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-little__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
+- name: vit-little__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-little.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 43 --experiment vit-little__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
+    0.0 --seed 43 --experiment vit-little__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-little__inlt__img256__baseline__seed=42
+- name: vit-little__inlt__img256__bs=1024__baseline__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-little.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --num-classes 1000
-    --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval 5000
-    --seed 42 --experiment vit-little__inlt__img256__baseline__seed=42 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-little__inlt__img256__baseline__seed=43
+    --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval 5000
+    --seed 42 --experiment vit-little__inlt__img256__bs=1024__baseline__seed=42 --output
+    output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-little__inlt__img256__bs=1024__baseline__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-little.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --num-classes 1000
-    --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval 5000
-    --seed 43 --experiment vit-little__inlt__img256__baseline__seed=43 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-little__inlt__img256__mosaic__seed=42
+    --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval 5000
+    --seed 43 --experiment vit-little__inlt__img256__bs=1024__baseline__seed=43 --output
+    output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-little__inlt__img256__bs=1024__mosaic__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-little.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval
     5000 --mosaic --mosaic-prob 0.5 --mosaic-center-ratio 0.5 1.5 --mosaic-scale-range
-    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --seed
-    42 --experiment vit-little__inlt__img256__mosaic__seed=42 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-little__inlt__img256__mosaic__seed=43
+    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --labelmix-producer-rank
+    0 --labelmix-producer-workers 8 --seed 42 --experiment vit-little__inlt__img256__bs=1024__mosaic__seed=42
+    --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-little__inlt__img256__bs=1024__mosaic__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-little.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval
     5000 --mosaic --mosaic-prob 0.5 --mosaic-center-ratio 0.5 1.5 --mosaic-scale-range
-    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --seed
-    43 --experiment vit-little__inlt__img256__mosaic__seed=43 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-betwixt__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
+    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --labelmix-producer-rank
+    0 --labelmix-producer-workers 8 --seed 43 --experiment vit-little__inlt__img256__bs=1024__mosaic__seed=43
+    --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-betwixt__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-betwixt.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 6 --labelmix-k-min 6 --labelmix-k-max 6 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss pl_loss --clip-grad 3.0 --mixup 0
-    --cutmix 0 --mixup-prob 0.0 --seed 42 --experiment vit-betwixt__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
+    --cutmix 0 --mixup-prob 0.0 --seed 42 --experiment vit-betwixt__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=42
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-betwixt__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
+- name: vit-betwixt__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-betwixt.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-pl --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 6 --labelmix-k-min 6 --labelmix-k-max 6 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss pl_loss --clip-grad 3.0 --mixup 0
-    --cutmix 0 --mixup-prob 0.0 --seed 43 --experiment vit-betwixt__inlt__img256__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
+    --cutmix 0 --mixup-prob 0.0 --seed 43 --experiment vit-betwixt__inlt__img256__bs=1024__k6-6_a0.1-0.5_pl-loss_as-cosine_scheduling_clip_grad=3.0__seed=43
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-betwixt__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+- name: vit-betwixt__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-betwixt.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 42 --experiment vit-betwixt__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
+    0.0 --seed 42 --experiment vit-betwixt__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=42
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-betwixt__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
+- name: vit-betwixt__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-betwixt.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt labelmix-sce --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --labelmix --labelmix-schedule
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --labelmix --labelmix-schedule
     cosine --labelmix-k-schedule fixed --labelmix-step-mode total --labelmix-k-warmup-epochs
     0 --labelmix-warmup-steps 0 --labelmix-sampling --labelmix-sampling-min-side-px
     0 --labelmix-sampling-max-aspect 20.0 --labelmix-sampling-bins 16 --labelmix-sampling-pool-size
     128 --labelmix-sampling-low-watermark 32 --labelmix-sampling-max-attempts 200
-    --labelmix-producer-rank -1 --labelmix-producer-workers 0 --check-resume --recovery-interval
+    --labelmix-producer-rank 0 --labelmix-producer-workers 8 --check-resume --recovery-interval
     5000 --labelmix-mix-k 4 --labelmix-k-min 4 --labelmix-k-max 4 --labelmix-alpha-min
     0.1 --labelmix-alpha-max 0.5 --labelmix-loss soft_ce --mixup 0 --cutmix 0 --mixup-prob
-    0.0 --seed 43 --experiment vit-betwixt__inlt__img256__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
+    0.0 --seed 43 --experiment vit-betwixt__inlt__img256__bs=1024__k4-4_a0.1-0.5_soft-ce_as-cosine_scheduling__seed=43
     --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
-- name: vit-betwixt__inlt__img256__baseline__seed=42
+- name: vit-betwixt__inlt__img256__bs=1024__baseline__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-betwixt.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --num-classes 1000
-    --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval 5000
-    --seed 42 --experiment vit-betwixt__inlt__img256__baseline__seed=42 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-betwixt__inlt__img256__baseline__seed=43
+    --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval 5000
+    --seed 42 --experiment vit-betwixt__inlt__img256__bs=1024__baseline__seed=42 --output
+    output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-betwixt__inlt__img256__bs=1024__baseline__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-betwixt.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt baseline --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --num-classes 1000
-    --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval 5000
-    --seed 43 --experiment vit-betwixt__inlt__img256__baseline__seed=43 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-betwixt__inlt__img256__mosaic__seed=42
+    --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval 5000
+    --seed 43 --experiment vit-betwixt__inlt__img256__bs=1024__baseline__seed=43 --output
+    output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-betwixt__inlt__img256__bs=1024__mosaic__seed=42
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-betwixt.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval
     5000 --mosaic --mosaic-prob 0.5 --mosaic-center-ratio 0.5 1.5 --mosaic-scale-range
-    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --seed
-    42 --experiment vit-betwixt__inlt__img256__mosaic__seed=42 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
-- name: vit-betwixt__inlt__img256__mosaic__seed=43
+    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --labelmix-producer-rank
+    0 --labelmix-producer-workers 8 --seed 42 --experiment vit-betwixt__inlt__img256__bs=1024__mosaic__seed=42
+    --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
+- name: vit-betwixt__inlt__img256__bs=1024__mosaic__seed=43
   cmd: torchrun --nproc_per_node={gpus} --master_port={port} train.py --config experiments/labelmix_imagenet1k/configs/vit-betwixt.yaml
-    --amp-dtype bfloat16 --batch-size 1024 --warmup-prefix --aug-repeats 0 --img-size
+    --amp-dtype bfloat16 --batch-size 512 --warmup-prefix --aug-repeats 0 --img-size
     256 --sched-on-updates --num-logs 1000 --num-evals 100 --num-saves 20 --wandb-project
     labelmix --wandb-tags inlt mosaic --log-wandb --workers 8 --loader-prefetch-factor
     2 --balanced-buffer-steps 4 --balanced-cache-threshold-steps 3 --pin-mem --dataset
     hfds//dev/shm/imagenet-lt --data-dir /dev/shm/imagenet-lt --train-split train
     --val-split validation --input-key image --target-key label --balanced-mode natural
-    --num-classes 1000 --num-steps 11314 --warmup-steps 1132 --check-resume --recovery-interval
+    --num-classes 1000 --num-steps 33940 --warmup-steps 2263 --check-resume --recovery-interval
     5000 --mosaic --mosaic-prob 0.5 --mosaic-center-ratio 0.5 1.5 --mosaic-scale-range
-    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --seed
-    43 --experiment vit-betwixt__inlt__img256__mosaic__seed=43 --output output_runs/imagenet-lt
-    --model-kwargs fix_init=True img_size=256
+    0.8 1.2 --mosaic-close-epochs 10 --mixup 0 --cutmix 0 --mixup-prob 0.0 --labelmix-producer-rank
+    0 --labelmix-producer-workers 8 --seed 43 --experiment vit-betwixt__inlt__img256__bs=1024__mosaic__seed=43
+    --output output_runs/imagenet-lt --model-kwargs fix_init=True img_size=256
