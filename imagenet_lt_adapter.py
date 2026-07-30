@@ -1,9 +1,11 @@
 """Create the official long-tailed ImageNet Arrow dataset in RAM.
 
-The adapter starts from a locally cached Hugging Face ImageNet-1K dataset,
-selects the published ImageNet-LT training subset using the manifest bundled
-with this repository, and saves it plus the unchanged validation split in the
-``arrow/<split>`` layout consumed by :mod:`timm.data.readers.reader_hfds`.
+The adapter starts from a locally cached Hugging Face ImageNet-1K dataset. It
+selects the published ImageNet-LT identities when original JPEG names remain
+available; builder caches that replaced those names use a deterministic subset
+with the manifest's exact per-class counts. The selected training data and the
+unchanged validation split are saved in the ``arrow/<split>`` layout consumed
+by :mod:`timm.data.readers.reader_hfds`.
 """
 from __future__ import annotations
 
@@ -34,6 +36,8 @@ BUNDLED_OFFICIAL_MANIFEST = (
     / "ImageNet_LT"
     / "ImageNet_LT_train.txt"
 )
+DEFAULT_SELECTION_CACHE_DIR = BUNDLED_OFFICIAL_MANIFEST.parent
+SELECTION_CACHE_VERSION = 1
 
 _BUILDER_ARROW_SHARD_RE = re.compile(
     r"^(?P<prefix>.+)-(?P<split>train|validation)-"
@@ -183,6 +187,128 @@ def _selection_sha256(filenames: Sequence[str], labels: Sequence[int]) -> str:
     return digest.hexdigest()
 
 
+def _labels_sha256(labels: Sequence[int]) -> str:
+    digest = hashlib.sha256()
+    for label in labels:
+        digest.update(int(label).to_bytes(2, byteorder="big", signed=False))
+    return digest.hexdigest()
+
+
+def _default_selection_cache_path(profile: str, seed: int) -> Path:
+    return DEFAULT_SELECTION_CACHE_DIR / (
+        f"ImageNet_LT_selection_{profile}_seed{int(seed)}.json"
+    )
+
+
+def _resolve_selection_cache_path(
+    profile: str,
+    seed: int,
+    explicit_path: str | None,
+) -> Path:
+    configured = explicit_path or os.environ.get("IMAGENET_LT_SELECTION_CACHE")
+    return Path(configured).expanduser().resolve() if configured else _default_selection_cache_path(profile, seed)
+
+
+def _load_selection_cache(
+    path: Path,
+    *,
+    profile: str,
+    seed: int,
+    manifest_sha256: str | None,
+    source_rows: int,
+    source_fingerprint: str,
+    source_label_sha256: str,
+    expected_counts: Sequence[int],
+    source_labels: Sequence[int],
+) -> tuple[list[int], str] | None:
+    if not path.is_file():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        cache = json.load(handle)
+
+    expected_fields = {
+        "version": SELECTION_CACHE_VERSION,
+        "profile": profile,
+        "seed": int(seed),
+        "manifest_sha256": manifest_sha256,
+        "source_rows": int(source_rows),
+        "source_fingerprint": source_fingerprint,
+        "source_label_sha256": source_label_sha256,
+        "class_counts": [int(value) for value in expected_counts],
+    }
+    mismatches = [
+        key for key, expected in expected_fields.items()
+        if cache.get(key) != expected
+    ]
+    if mismatches:
+        raise ValueError(
+            f"ImageNet-LT selection cache does not match this source/configuration: "
+            f"{path} (mismatched: {', '.join(mismatches)}). Remove that cache or "
+            "choose a different --lt-selection-cache path."
+        )
+
+    selected = [int(index) for index in cache.get("selected_indices", [])]
+    if len(selected) != sum(expected_counts) or len(selected) != len(set(selected)):
+        raise ValueError(f"Invalid ImageNet-LT selection indices in cache: {path}")
+    if selected and (min(selected) < 0 or max(selected) >= source_rows):
+        raise ValueError(f"Out-of-range ImageNet-LT selection index in cache: {path}")
+    observed = Counter(int(source_labels[index]) for index in selected)
+    if [observed[label] for label in range(len(expected_counts))] != list(expected_counts):
+        raise ValueError(f"ImageNet-LT cache class counts do not match: {path}")
+    selected_labels = [int(source_labels[index]) for index in selected]
+    observed_selection_sha256 = _selection_sha256(
+        [str(index) for index in selected],
+        selected_labels,
+    )
+    if cache.get("selection_sha256") != observed_selection_sha256:
+        raise ValueError(f"ImageNet-LT cache selection hash does not match: {path}")
+
+    strategy = str(cache.get("selection_strategy", "cached-selection"))
+    return selected, strategy
+
+
+def _write_selection_cache(
+    path: Path,
+    *,
+    profile: str,
+    seed: int,
+    manifest_sha256: str | None,
+    source_rows: int,
+    source_fingerprint: str,
+    source_label_sha256: str,
+    class_counts: Sequence[int],
+    selected: Sequence[int],
+    selection_strategy: str,
+    selected_labels: Sequence[int],
+) -> None:
+    cache = {
+        "version": SELECTION_CACHE_VERSION,
+        "profile": profile,
+        "seed": int(seed),
+        "manifest_sha256": manifest_sha256,
+        "source_rows": int(source_rows),
+        "source_fingerprint": source_fingerprint,
+        "source_label_sha256": source_label_sha256,
+        "class_counts": [int(value) for value in class_counts],
+        "selection_strategy": selection_strategy,
+        "selection_sha256": _selection_sha256(
+            [str(index) for index in selected],
+            selected_labels,
+        ),
+        "selected_indices": [int(index) for index in selected],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(cache, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _download_official_manifest(cache_dir: str) -> str:
     manifest_dir = Path(cache_dir) / "manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -255,23 +381,45 @@ def resolve_official_manifest(
     )
 
 
-def select_manifest_indices(dataset, filenames: Sequence[str], labels: Sequence[int]) -> list[int]:
-    """Map official manifest filenames to rows in a Hugging Face split."""
+def resolve_manifest_indices(
+    dataset,
+    filenames: Sequence[str],
+    labels: Sequence[int],
+    seed: int = 42,
+) -> tuple[list[int], str]:
+    """Resolve the manifest exactly, or deterministically match its counts.
+
+    Some Hugging Face ImageNet builder caches retain image bytes and labels but
+    replace the original JPEG path. Exact manifest identity matching is then
+    impossible. In that case, select a seeded subset with the manifest's exact
+    per-class counts. This preserves the published long-tail distribution while
+    recording that the image identities are a deterministic local equivalent.
+    """
     datasets = _import_datasets()
     encoded = dataset.cast_column("image", datasets.Image(decode=False))
     source_labels = dataset["label"]
+    desired_basenames = {os.path.basename(filename) for filename in filenames}
     source_by_basename: dict[str, int] = {}
     for index, image in enumerate(encoded["image"]):
         path = image.get("path") if isinstance(image, dict) else None
         if not path:
-            raise ValueError(
-                "Source ImageNet rows do not expose image filenames, so they "
-                "cannot be matched to the official ImageNet-LT manifest."
-            )
+            continue
         basename = os.path.basename(path)
+        if basename not in desired_basenames:
+            continue
         if basename in source_by_basename:
             raise ValueError(f"Duplicate source image basename: {basename}")
         source_by_basename[basename] = index
+
+    if not source_by_basename:
+        manifest_counts = Counter(int(label) for label in labels)
+        requested_counts = [manifest_counts[label] for label in range(1000)]
+        selected, _ = select_long_tail_indices(
+            source_labels,
+            requested_counts,
+            seed=seed,
+        )
+        return selected, "deterministic-manifest-counts"
 
     selected: list[int] = []
     missing: list[str] = []
@@ -295,6 +443,17 @@ def select_manifest_indices(dataset, filenames: Sequence[str], labels: Sequence[
         )
     if len(selected) != len(set(selected)):
         raise ValueError("Official ImageNet-LT manifest contains duplicate source images")
+    return selected, "exact-official-manifest-identities"
+
+
+def select_manifest_indices(
+    dataset,
+    filenames: Sequence[str],
+    labels: Sequence[int],
+    seed: int = 42,
+) -> list[int]:
+    """Return deterministic source indices for the official manifest."""
+    selected, _ = resolve_manifest_indices(dataset, filenames, labels, seed=seed)
     return selected
 
 
@@ -360,18 +519,52 @@ def _find_builder_arrow_shards(src: str, split: str) -> list[Path]:
     return []
 
 
+def _arrow_shard_fingerprint(paths: Sequence[Path]) -> str:
+    """Fingerprint ordered shards without depending on their absolute paths."""
+    digest = hashlib.sha256()
+    sample_bytes = 4096
+    for path in paths:
+        size = path.stat().st_size
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(size).encode("ascii"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            digest.update(handle.read(sample_bytes))
+            if size > sample_bytes:
+                handle.seek(-sample_bytes, os.SEEK_END)
+                digest.update(handle.read(sample_bytes))
+    return digest.hexdigest()
+
+
+def _set_source_fingerprint(dataset, fingerprint: str):
+    try:
+        dataset._labelmix_source_fingerprint = str(fingerprint)
+    except Exception:
+        pass
+    return dataset
+
+
 def _load_source_split(src: str, split: str):
     arrow_split = Path(src) / "arrow" / split
     if arrow_split.is_dir():
         datasets = _import_datasets()
         print(f"Loading local ImageNet-1K Arrow split: {arrow_split}")
-        return datasets.load_from_disk(str(arrow_split))
+        dataset = datasets.load_from_disk(str(arrow_split))
+        return _set_source_fingerprint(
+            dataset,
+            str(getattr(dataset, "_fingerprint", "")),
+        )
 
     direct_split = Path(src) / split
     if (direct_split / "dataset_info.json").is_file():
         datasets = _import_datasets()
         print(f"Loading local ImageNet-1K Arrow split: {direct_split}")
-        return datasets.load_from_disk(str(direct_split))
+        dataset = datasets.load_from_disk(str(direct_split))
+        return _set_source_fingerprint(
+            dataset,
+            str(getattr(dataset, "_fingerprint", "")),
+        )
 
     builder_shards = _find_builder_arrow_shards(src, split)
     if builder_shards:
@@ -385,8 +578,13 @@ def _load_source_split(src: str, split: str):
             for path in builder_shards
         ]
         if len(shard_datasets) == 1:
-            return shard_datasets[0]
-        return datasets.concatenate_datasets(shard_datasets)
+            dataset = shard_datasets[0]
+        else:
+            dataset = datasets.concatenate_datasets(shard_datasets)
+        return _set_source_fingerprint(
+            dataset,
+            _arrow_shard_fingerprint(builder_shards),
+        )
 
     raise FileNotFoundError(
         f"Could not find the local ImageNet-1K {split!r} Arrow split under "
@@ -461,6 +659,7 @@ def prepare_imagenet_lt(
     min_samples: int = 5,
     profile: str = "official",
     train_list: str | None = None,
+    selection_cache: str | None = None,
     force: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -502,6 +701,11 @@ def prepare_imagenet_lt(
             min_samples=min_samples,
         )
         class_counts = []
+    selection_cache_path = (
+        _resolve_selection_cache_path(profile, seed, selection_cache)
+        if profile == "official"
+        else None
+    )
     metadata_path = Path(dst) / METADATA_FILENAME
     previous_metadata: dict[str, Any] = {}
     if metadata_path.is_file():
@@ -525,6 +729,8 @@ def prepare_imagenet_lt(
         "train_samples": int(sum(rank_counts)),
         "splits": sorted(set(previous_metadata.get("splits", [])) | set(requested_splits)),
     }
+    if selection_cache_path is not None:
+        metadata["selection_cache"] = str(selection_cache_path)
     if official_manifest is not None:
         metadata["manifest"] = official_manifest
         metadata["manifest_sha256"] = _sha256(official_manifest)
@@ -583,7 +789,70 @@ def prepare_imagenet_lt(
             raise ValueError(f"Source train split has no 'label' column: {train.column_names}")
         if profile == "official":
             assert manifest_filenames is not None and manifest_labels is not None
-            selected = select_manifest_indices(train, manifest_filenames, manifest_labels)
+            assert selection_cache_path is not None
+            train_labels = train["label"]
+            source_fingerprint = str(
+                getattr(
+                    train,
+                    "_labelmix_source_fingerprint",
+                    getattr(train, "_fingerprint", ""),
+                )
+            )
+            source_label_sha256 = _labels_sha256(train_labels)
+            manifest_sha256 = str(metadata["manifest_sha256"])
+            cached_selection = _load_selection_cache(
+                selection_cache_path,
+                profile=profile,
+                seed=seed,
+                manifest_sha256=manifest_sha256,
+                source_rows=len(train),
+                source_fingerprint=source_fingerprint,
+                source_label_sha256=source_label_sha256,
+                expected_counts=class_counts,
+                source_labels=train_labels,
+            )
+            if cached_selection is None:
+                selected, selection_strategy = resolve_manifest_indices(
+                    train,
+                    manifest_filenames,
+                    manifest_labels,
+                    seed=seed,
+                )
+                selected_source_labels = [int(train_labels[index]) for index in selected]
+                _write_selection_cache(
+                    selection_cache_path,
+                    profile=profile,
+                    seed=seed,
+                    manifest_sha256=manifest_sha256,
+                    source_rows=len(train),
+                    source_fingerprint=source_fingerprint,
+                    source_label_sha256=source_label_sha256,
+                    class_counts=class_counts,
+                    selected=selected,
+                    selection_strategy=selection_strategy,
+                    selected_labels=selected_source_labels,
+                )
+                metadata["selection_cache_hit"] = False
+                print(f"Created permanent ImageNet-LT selection cache: {selection_cache_path}")
+            else:
+                selected, selection_strategy = cached_selection
+                metadata["selection_cache_hit"] = True
+                print(f"Using permanent ImageNet-LT selection cache: {selection_cache_path}")
+            metadata["selection_order"] = selection_strategy
+            metadata["exact_official_identities"] = (
+                selection_strategy == "exact-official-manifest-identities"
+            )
+            if not metadata["exact_official_identities"]:
+                selected_source_labels = [int(train_labels[index]) for index in selected]
+                metadata["selection_sha256"] = _selection_sha256(
+                    [str(index) for index in selected],
+                    selected_source_labels,
+                )
+                print(
+                    "WARNING: source Arrow rows do not retain the original JPEG "
+                    "basenames. Using a deterministic seeded subset with the "
+                    "official ImageNet-LT per-class counts."
+                )
             actual_counts = class_counts
         else:
             class_counts, class_rank_order = assign_rank_counts_to_classes(

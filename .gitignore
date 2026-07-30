@@ -137,6 +137,7 @@ output*
 data/*
 !data/ImageNet_LT/
 !data/ImageNet_LT/ImageNet_LT_train.txt
+data/ImageNet_LT/ImageNet_LT_selection_*.json
 
 
 HF_HOME

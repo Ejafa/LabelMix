@@ -44,7 +44,8 @@ Supported datasets and their default paths:
            Supports both arrow/<split> saved datasets and nested Hugging Face
            builder caches containing numbered split Arrow shards.
       dst: /dev/shm/imagenet-lt
-      adapter: bundled official Pareto-alpha=6 ImageNet-LT manifest subset
+      adapter: official Pareto-alpha=6 counts; exact manifest identities when
+               the source Arrow rows retain original JPEG names
 
     places365:
       src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/places365/arrow
@@ -628,6 +629,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--lt-selection-cache",
+        default=None,
+        help=(
+            "Permanent shared ImageNet-LT selection cache. By default this is "
+            "stored under data/ImageNet_LT in the repository. It can also be "
+            "set with IMAGENET_LT_SELECTION_CACHE."
+        ),
+    )
+    parser.add_argument(
         "--lt-seed",
         type=int,
         default=42,
@@ -682,6 +692,7 @@ def main() -> None:
                 min_samples=args.lt_min_samples,
                 profile=args.lt_profile,
                 train_list=args.lt_train_list,
+                selection_cache=args.lt_selection_cache,
                 force=args.force,
                 dry_run=args.dry_run,
             )
