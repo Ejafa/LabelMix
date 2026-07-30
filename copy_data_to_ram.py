@@ -41,6 +41,8 @@ Supported datasets and their default paths:
 
     imagenet-lt:
       src: existing local ImageNet-1K Arrow dataset (prefers /dev/shm/imagenet-1k)
+           Supports both arrow/<split> saved datasets and nested Hugging Face
+           builder caches containing numbered split Arrow shards.
       dst: /dev/shm/imagenet-lt
       adapter: bundled official Pareto-alpha=6 ImageNet-LT manifest subset
 

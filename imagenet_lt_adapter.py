@@ -11,6 +11,7 @@ import json
 import hashlib
 import os
 import random
+import re
 import shutil
 import urllib.request
 from collections import Counter, defaultdict
@@ -32,6 +33,11 @@ BUNDLED_OFFICIAL_MANIFEST = (
     / "data"
     / "ImageNet_LT"
     / "ImageNet_LT_train.txt"
+)
+
+_BUILDER_ARROW_SHARD_RE = re.compile(
+    r"^(?P<prefix>.+)-(?P<split>train|validation)-"
+    r"(?P<index>\d+)-of-(?P<total>\d+)\.arrow$"
 )
 
 
@@ -163,6 +169,20 @@ def _sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+def _selection_sha256(filenames: Sequence[str], labels: Sequence[int]) -> str:
+    """Hash an ordered filename/label selection without platform dependence."""
+    if len(filenames) != len(labels):
+        raise ValueError("Selection filenames and labels must have equal length")
+    digest = hashlib.sha256()
+    for filename, label in zip(filenames, labels):
+        normalized = str(filename).replace("\\", "/")
+        digest.update(normalized.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(int(label)).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def _download_official_manifest(cache_dir: str) -> str:
     manifest_dir = Path(cache_dir) / "manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -289,6 +309,57 @@ def _import_datasets():
     return datasets
 
 
+def _find_builder_arrow_shards(src: str, split: str) -> list[Path]:
+    """Find one complete HF builder-cache shard set in deterministic order."""
+    root = Path(src)
+    groups: dict[tuple[Path, str, int], dict[int, Path]] = defaultdict(dict)
+    for path in sorted(root.rglob("*.arrow"), key=lambda value: str(value)):
+        match = _BUILDER_ARROW_SHARD_RE.match(path.name)
+        if match is None or match.group("split") != split:
+            continue
+        index = int(match.group("index"))
+        total = int(match.group("total"))
+        if total < 1 or index < 0 or index >= total:
+            raise ValueError(f"Invalid Arrow shard name: {path}")
+        key = (path.parent, match.group("prefix"), total)
+        if index in groups[key]:
+            raise ValueError(
+                f"Duplicate Arrow shard index {index} for {split!r} under {path.parent}"
+            )
+        groups[key][index] = path
+
+    complete: list[list[Path]] = []
+    incomplete: list[str] = []
+    for (parent, prefix, total), indexed in sorted(
+        groups.items(),
+        key=lambda item: (str(item[0][0]), item[0][1], item[0][2]),
+    ):
+        missing = sorted(set(range(total)) - set(indexed))
+        if missing:
+            preview = ", ".join(str(index) for index in missing[:10])
+            suffix = "..." if len(missing) > 10 else ""
+            incomplete.append(
+                f"{parent} ({prefix}, {len(indexed)}/{total}; missing {preview}{suffix})"
+            )
+            continue
+        complete.append([indexed[index] for index in range(total)])
+
+    if len(complete) > 1:
+        locations = ", ".join(str(paths[0].parent) for paths in complete)
+        raise ValueError(
+            f"Found multiple complete ImageNet-1K {split!r} Arrow caches under "
+            f"{src!r}: {locations}. Pass --src pointing at one fingerprint directory."
+        )
+    if complete:
+        return complete[0]
+    if incomplete:
+        raise FileNotFoundError(
+            f"Found ImageNet-1K {split!r} Arrow shards, but no complete shard set: "
+            + "; ".join(incomplete)
+        )
+    return []
+
+
 def _load_source_split(src: str, split: str):
     arrow_split = Path(src) / "arrow" / split
     if arrow_split.is_dir():
@@ -302,10 +373,26 @@ def _load_source_split(src: str, split: str):
         print(f"Loading local ImageNet-1K Arrow split: {direct_split}")
         return datasets.load_from_disk(str(direct_split))
 
+    builder_shards = _find_builder_arrow_shards(src, split)
+    if builder_shards:
+        datasets = _import_datasets()
+        print(
+            f"Loading local ImageNet-1K builder cache: split={split} "
+            f"shards={len(builder_shards)} directory={builder_shards[0].parent}"
+        )
+        shard_datasets = [
+            datasets.Dataset.from_file(str(path))
+            for path in builder_shards
+        ]
+        if len(shard_datasets) == 1:
+            return shard_datasets[0]
+        return datasets.concatenate_datasets(shard_datasets)
+
     raise FileNotFoundError(
         f"Could not find the local ImageNet-1K {split!r} Arrow split under "
-        f"{src!r}. Expected {arrow_split} (the layout used by the normal "
-        "ImageNet reader). First prepare the regular RAM copy with "
+        f"{src!r}. Expected {arrow_split}, a saved split at {direct_split}, "
+        "or a nested Hugging Face builder cache containing numbered Arrow "
+        "shards. First prepare the regular RAM copy with "
         "`python copy_data_to_ram.py --dataset imagenet-1k`, set "
         "IMAGENET1K_DATA_DIR, or pass --src explicitly. The ImageNet-LT "
         "adapter does not download ImageNet."
@@ -422,13 +509,14 @@ def prepare_imagenet_lt(
             previous_metadata = json.load(handle)
 
     metadata: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "source": IMAGENET_HF_NAME,
         "source_cache": os.path.abspath(src),
         "profile": profile,
         "distribution": "pareto" if profile == "official" else "exponential",
         "pareto_power": OFFICIAL_PARETO_POWER if profile == "official" else None,
         "seed": int(seed),
+        "deterministic_selection": True,
         "num_classes": 1000,
         "max_samples": int(max_samples),
         "min_samples": int(min_samples),
@@ -439,10 +527,30 @@ def prepare_imagenet_lt(
     }
     if official_manifest is not None:
         metadata["manifest"] = official_manifest
+        metadata["manifest_sha256"] = _sha256(official_manifest)
+        metadata["selection_order"] = "official-manifest"
+        metadata["selection_sha256"] = _selection_sha256(
+            manifest_filenames or [],
+            manifest_labels or [],
+        )
         metadata["class_counts"] = class_counts
-    for retained_key in ("class_counts", "class_rank_order", "validation_samples"):
-        if retained_key in previous_metadata:
-            metadata[retained_key] = previous_metadata[retained_key]
+    same_previous_selection = (
+        previous_metadata.get("profile") == profile
+        and int(previous_metadata.get("seed", seed)) == int(seed)
+        and int(previous_metadata.get("max_samples", max_samples)) == int(max_samples)
+        and int(previous_metadata.get("min_samples", min_samples)) == int(min_samples)
+    )
+    if "train" not in requested_splits and same_previous_selection:
+        for retained_key in (
+            "class_counts",
+            "class_rank_order",
+            "selection_order",
+            "selection_sha256",
+        ):
+            if retained_key in previous_metadata:
+                metadata[retained_key] = previous_metadata[retained_key]
+    if "validation" not in requested_splits and "validation_samples" in previous_metadata:
+        metadata["validation_samples"] = previous_metadata["validation_samples"]
 
     print(
         "ImageNet-LT profile: "
@@ -485,6 +593,13 @@ def prepare_imagenet_lt(
             metadata["class_rank_order"] = class_rank_order
             selected, actual_counts = select_long_tail_indices(
                 train["label"], class_counts, seed=seed
+            )
+            source_labels = train["label"]
+            selected_labels = [int(source_labels[index]) for index in selected]
+            metadata["selection_order"] = "seeded-class-selection-and-global-shuffle"
+            metadata["selection_sha256"] = _selection_sha256(
+                [str(index) for index in selected],
+                selected_labels,
             )
         subset = train.select(selected)
         observed = Counter(int(label) for label in subset["label"])
