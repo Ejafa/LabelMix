@@ -15,6 +15,7 @@ import os
 import random
 import re
 import shutil
+import time
 import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -43,6 +44,68 @@ _BUILDER_ARROW_SHARD_RE = re.compile(
     r"^(?P<prefix>.+)-(?P<split>train|validation)-"
     r"(?P<index>\d+)-of-(?P<total>\d+)\.arrow$"
 )
+
+
+def _log(message: str) -> None:
+    """Print a timestamped ImageNet-LT diagnostic message."""
+    print(f"[ImageNet-LT {time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
+
+def _fmt_bytes(nbytes: int) -> str:
+    value = float(nbytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(value) < 1024:
+            return f"{value:.2f} {unit}"
+        value /= 1024
+    return f"{value:.2f} PB"
+
+
+def _path_size_and_files(path: Path) -> tuple[int, int]:
+    if not path.exists():
+        return 0, 0
+    if path.is_file():
+        return path.stat().st_size, 1
+    total_size = 0
+    total_files = 0
+    for child in path.rglob("*"):
+        if child.is_file():
+            total_files += 1
+            total_size += child.stat().st_size
+    return total_size, total_files
+
+
+def _log_path_status(label: str, path: Path) -> None:
+    exists = path.exists()
+    kind = "directory" if path.is_dir() else "file" if path.is_file() else "missing"
+    size, files = _path_size_and_files(path)
+    _log(
+        f"{label}: path={path} exists={exists} kind={kind} "
+        f"files={files} size={_fmt_bytes(size)}"
+    )
+
+
+def _log_dataset_summary(label: str, dataset) -> None:
+    fingerprint = str(
+        getattr(
+            dataset,
+            "_labelmix_source_fingerprint",
+            getattr(dataset, "_fingerprint", ""),
+        )
+    )
+    _log(
+        f"{label}: rows={len(dataset)} columns={list(dataset.column_names)} "
+        f"fingerprint={fingerprint}"
+    )
+    try:
+        features = getattr(dataset, "features", None)
+        if features is not None:
+            feature_summary = {
+                name: feature.__class__.__name__
+                for name, feature in features.items()
+            }
+            _log(f"{label}: feature_types={feature_summary}")
+    except Exception as exc:
+        _log(f"{label}: could not print features: {exc}")
 
 
 def build_exponential_class_counts(
@@ -222,9 +285,12 @@ def _load_selection_cache(
     source_labels: Sequence[int],
 ) -> tuple[list[int], str] | None:
     if not path.is_file():
+        _log(f"Selection cache not found: {path}")
         return None
+    _log(f"Loading ImageNet-LT selection cache: {path}")
     with path.open("r", encoding="utf-8") as handle:
         cache = json.load(handle)
+    _log("Selection cache JSON loaded; validating metadata fields")
 
     expected_fields = {
         "version": SELECTION_CACHE_VERSION,
@@ -246,16 +312,32 @@ def _load_selection_cache(
             f"{path} (mismatched: {', '.join(mismatches)}). Remove that cache or "
             "choose a different --lt-selection-cache path."
         )
+    _log("Selection cache metadata fields validated")
 
     selected = [int(index) for index in cache.get("selected_indices", [])]
+    _log(f"Selection cache contains {len(selected)} selected indices")
     if len(selected) != sum(expected_counts) or len(selected) != len(set(selected)):
         raise ValueError(f"Invalid ImageNet-LT selection indices in cache: {path}")
     if selected and (min(selected) < 0 or max(selected) >= source_rows):
         raise ValueError(f"Out-of-range ImageNet-LT selection index in cache: {path}")
-    observed = Counter(int(source_labels[index]) for index in selected)
+    _log("Selection cache index bounds validated; checking per-class counts")
+    observed = Counter()
+    selected_labels: list[int] = []
+    last_log = time.time()
+    for offset, index in enumerate(selected, start=1):
+        selected_label = int(source_labels[index])
+        selected_labels.append(selected_label)
+        observed[selected_label] += 1
+        now = time.time()
+        if offset == 1 or offset == len(selected) or now - last_log >= 5:
+            _log(
+                f"Selection cache label validation progress: "
+                f"{offset}/{len(selected)} indices checked"
+            )
+            last_log = now
     if [observed[label] for label in range(len(expected_counts))] != list(expected_counts):
         raise ValueError(f"ImageNet-LT cache class counts do not match: {path}")
-    selected_labels = [int(source_labels[index]) for index in selected]
+    _log("Selection cache per-class counts validated; checking selection hash")
     observed_selection_sha256 = _selection_sha256(
         [str(index) for index in selected],
         selected_labels,
@@ -264,6 +346,7 @@ def _load_selection_cache(
         raise ValueError(f"ImageNet-LT cache selection hash does not match: {path}")
 
     strategy = str(cache.get("selection_strategy", "cached-selection"))
+    _log(f"Selection cache fully validated: strategy={strategy}")
     return selected, strategy
 
 
@@ -397,7 +480,9 @@ def resolve_manifest_indices(
     """
     datasets = _import_datasets()
     encoded = dataset.cast_column("image", datasets.Image(decode=False))
-    source_labels = dataset["label"]
+    _log("Materializing source labels for manifest resolution")
+    source_labels = [int(label) for label in dataset["label"]]
+    _log(f"Materialized {len(source_labels)} source labels for manifest resolution")
     desired_basenames = {os.path.basename(filename) for filename in filenames}
     source_by_basename: dict[str, int] = {}
     for index, image in enumerate(encoded["image"]):
@@ -471,11 +556,24 @@ def _import_datasets():
 def _find_builder_arrow_shards(src: str, split: str) -> list[Path]:
     """Find one complete HF builder-cache shard set in deterministic order."""
     root = Path(src)
+    _log(f"Scanning for ImageNet-1K builder-cache Arrow shards: root={root} split={split}")
     groups: dict[tuple[Path, str, int], dict[int, Path]] = defaultdict(dict)
-    for path in sorted(root.rglob("*.arrow"), key=lambda value: str(value)):
+    scanned = 0
+    matched = 0
+    last_log = time.time()
+    for path in root.rglob("*.arrow"):
+        scanned += 1
+        now = time.time()
+        if scanned == 1 or now - last_log >= 5:
+            _log(
+                f"Shard scan progress for split={split}: "
+                f"scanned_arrow_files={scanned} matched_split_shards={matched}"
+            )
+            last_log = now
         match = _BUILDER_ARROW_SHARD_RE.match(path.name)
         if match is None or match.group("split") != split:
             continue
+        matched += 1
         index = int(match.group("index"))
         total = int(match.group("total"))
         if total < 1 or index < 0 or index >= total:
@@ -486,6 +584,10 @@ def _find_builder_arrow_shards(src: str, split: str) -> list[Path]:
                 f"Duplicate Arrow shard index {index} for {split!r} under {path.parent}"
             )
         groups[key][index] = path
+    _log(
+        f"Shard scan complete for split={split}: "
+        f"scanned_arrow_files={scanned} matched_split_shards={matched} groups={len(groups)}"
+    )
 
     complete: list[list[Path]] = []
     incomplete: list[str] = []
@@ -510,12 +612,17 @@ def _find_builder_arrow_shards(src: str, split: str) -> list[Path]:
             f"{src!r}: {locations}. Pass --src pointing at one fingerprint directory."
         )
     if complete:
+        _log(
+            f"Found complete builder-cache shard set for split={split}: "
+            f"shards={len(complete[0])} directory={complete[0][0].parent}"
+        )
         return complete[0]
     if incomplete:
         raise FileNotFoundError(
             f"Found ImageNet-1K {split!r} Arrow shards, but no complete shard set: "
             + "; ".join(incomplete)
         )
+    _log(f"No builder-cache Arrow shards found for split={split} under {src}")
     return []
 
 
@@ -546,33 +653,46 @@ def _set_source_fingerprint(dataset, fingerprint: str):
 
 
 def _load_source_split(src: str, split: str):
+    _log(f"Resolving source split: src={src} split={split}")
+    _log_path_status("Source root", Path(src))
     arrow_split = Path(src) / "arrow" / split
     if arrow_split.is_dir():
         datasets = _import_datasets()
-        print(f"Loading local ImageNet-1K Arrow split: {arrow_split}")
+        _log_path_status(f"Saved Arrow split candidate ({split})", arrow_split)
+        _log(f"Loading local ImageNet-1K Arrow split with load_from_disk: {arrow_split}")
         dataset = datasets.load_from_disk(str(arrow_split))
-        return _set_source_fingerprint(
+        dataset = _set_source_fingerprint(
             dataset,
             str(getattr(dataset, "_fingerprint", "")),
         )
+        _log_dataset_summary(f"Loaded saved Arrow split ({split})", dataset)
+        return dataset
 
     direct_split = Path(src) / split
     if (direct_split / "dataset_info.json").is_file():
         datasets = _import_datasets()
-        print(f"Loading local ImageNet-1K Arrow split: {direct_split}")
+        _log_path_status(f"Direct saved split candidate ({split})", direct_split)
+        _log(f"Loading local ImageNet-1K Arrow split with load_from_disk: {direct_split}")
         dataset = datasets.load_from_disk(str(direct_split))
-        return _set_source_fingerprint(
+        dataset = _set_source_fingerprint(
             dataset,
             str(getattr(dataset, "_fingerprint", "")),
         )
+        _log_dataset_summary(f"Loaded direct saved split ({split})", dataset)
+        return dataset
 
+    _log(f"No saved split directory found for {split}; scanning nested builder-cache Arrow shards...")
     builder_shards = _find_builder_arrow_shards(src, split)
     if builder_shards:
         datasets = _import_datasets()
-        print(
+        total_bytes = sum(path.stat().st_size for path in builder_shards)
+        _log(
             f"Loading local ImageNet-1K builder cache: split={split} "
-            f"shards={len(builder_shards)} directory={builder_shards[0].parent}"
+            f"shards={len(builder_shards)} size={_fmt_bytes(total_bytes)} "
+            f"directory={builder_shards[0].parent}"
         )
+        _log(f"First shard: {builder_shards[0]}")
+        _log(f"Last shard: {builder_shards[-1]}")
         shard_datasets = [
             datasets.Dataset.from_file(str(path))
             for path in builder_shards
@@ -581,10 +701,12 @@ def _load_source_split(src: str, split: str):
             dataset = shard_datasets[0]
         else:
             dataset = datasets.concatenate_datasets(shard_datasets)
-        return _set_source_fingerprint(
+        dataset = _set_source_fingerprint(
             dataset,
             _arrow_shard_fingerprint(builder_shards),
         )
+        _log_dataset_summary(f"Loaded builder-cache split ({split})", dataset)
+        return dataset
 
     raise FileNotFoundError(
         f"Could not find the local ImageNet-1K {split!r} Arrow split under "
@@ -601,13 +723,16 @@ def _ensure_embedded_images(dataset, image_key: str = "image"):
     """Ensure saved Arrow rows contain image bytes instead of source paths."""
     datasets = _import_datasets()
     encoded = dataset.cast_column(image_key, datasets.Image(decode=False))
+    _log_dataset_summary("Image embedding input", encoded)
     if not len(encoded):
+        _log("Image embedding skipped because dataset is empty")
         return encoded
     probe = encoded[0][image_key]
     if isinstance(probe, dict) and probe.get("bytes"):
+        _log("Image embedding skipped because rows already contain image bytes")
         return encoded
 
-    print("Embedding source image bytes so the RAM dataset is self-contained...")
+    _log("Embedding source image bytes so the RAM dataset is self-contained...")
 
     def embed_batch(batch):
         embedded = []
@@ -622,29 +747,40 @@ def _ensure_embedded_images(dataset, image_key: str = "image"):
                 embedded.append({"bytes": handle.read(), "path": os.path.basename(path)})
         return {image_key: embedded}
 
-    return encoded.map(
+    embedded = encoded.map(
         embed_batch,
         batched=True,
         batch_size=64,
         load_from_cache_file=False,
         desc="Embedding images",
     )
+    _log_dataset_summary("Image embedding output", embedded)
+    return embedded
 
 
 def _replace_saved_split(dataset, destination: Path, force: bool) -> None:
+    _log(f"Preparing to save split: destination={destination} rows={len(dataset)} force={force}")
     if destination.exists():
+        _log_path_status("Existing destination split", destination)
         if not force:
             raise FileExistsError(
                 f"{destination} already exists; use --force to replace it"
             )
+        _log(f"Removing existing destination split: {destination}")
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
     if temporary.exists():
+        _log(f"Removing stale temporary split directory: {temporary}")
         shutil.rmtree(temporary)
     try:
+        t0 = time.time()
         dataset.save_to_disk(str(temporary))
+        elapsed = time.time() - t0
+        _log_path_status("Temporary saved split", temporary)
+        _log(f"Finished save_to_disk for {destination.name} in {elapsed:.1f}s")
         os.replace(temporary, destination)
+        _log_path_status("Final saved split", destination)
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
@@ -664,6 +800,12 @@ def prepare_imagenet_lt(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Create ImageNet-LT train/validation Arrow splits under ``dst``."""
+    _log(
+        f"prepare_imagenet_lt start: src={src} dst={dst} splits={list(splits)} "
+        f"seed={seed} profile={profile} force={force} dry_run={dry_run}"
+    )
+    _log_path_status("Initial source root", Path(src))
+    _log_path_status("Initial destination root", Path(dst))
     requested_splits = list(dict.fromkeys(splits))
     invalid = sorted(set(requested_splits) - {"train", "validation"})
     if invalid:
@@ -677,8 +819,13 @@ def prepare_imagenet_lt(
     official_manifest: str | None = None
     if profile == "official":
         official_manifest = resolve_official_manifest(src, train_list, cache_dir=dst)
+        _log(f"Using official ImageNet-LT manifest: {official_manifest}")
         manifest_filenames, manifest_labels, class_counts = parse_imagenet_lt_manifest(
             official_manifest
+        )
+        _log(
+            f"Parsed official manifest: rows={len(manifest_filenames)} "
+            f"classes={len(class_counts)} head={max(class_counts)} tail={min(class_counts)}"
         )
         if len(manifest_filenames) != OFFICIAL_TRAIN_SAMPLES:
             raise ValueError(
@@ -731,6 +878,7 @@ def prepare_imagenet_lt(
     }
     if selection_cache_path is not None:
         metadata["selection_cache"] = str(selection_cache_path)
+        _log(f"Resolved selection cache path: {selection_cache_path}")
     if official_manifest is not None:
         metadata["manifest"] = official_manifest
         metadata["manifest_sha256"] = _sha256(official_manifest)
@@ -765,6 +913,7 @@ def prepare_imagenet_lt(
         f"head={rank_counts[0]} tail={rank_counts[-1]} "
         f"imbalance_factor={max_samples / min_samples:g} seed={seed}"
     )
+    _log(f"Requested splits after validation: {requested_splits}")
     if dry_run:
         print(f"DRY RUN: would create {requested_splits} under {dst}/arrow")
         return metadata
@@ -775,6 +924,8 @@ def prepare_imagenet_lt(
         if (Path(dst) / "arrow" / split).exists()
     ]
     if existing and not force:
+        for path in existing:
+            _log_path_status("Existing requested destination split", path)
         raise FileExistsError(
             "ImageNet-LT destination split(s) already exist: "
             + ", ".join(str(path) for path in existing)
@@ -783,14 +934,17 @@ def prepare_imagenet_lt(
 
     arrow_root = Path(dst) / "arrow"
     if "train" in requested_splits:
+        _log("Starting train split build")
         print("Loading source ImageNet-1K train split...")
         train = _load_source_split(src, "train")
         if "label" not in train.column_names:
             raise ValueError(f"Source train split has no 'label' column: {train.column_names}")
+        _log("Materializing train labels for fast selection and cache validation")
+        train_labels = [int(label) for label in train["label"]]
+        _log(f"Materialized {len(train_labels)} train labels")
         if profile == "official":
             assert manifest_filenames is not None and manifest_labels is not None
             assert selection_cache_path is not None
-            train_labels = train["label"]
             source_fingerprint = str(
                 getattr(
                     train,
@@ -800,6 +954,10 @@ def prepare_imagenet_lt(
             )
             source_label_sha256 = _labels_sha256(train_labels)
             manifest_sha256 = str(metadata["manifest_sha256"])
+            _log(
+                f"Train source summary before selection: rows={len(train)} "
+                f"fingerprint={source_fingerprint} label_sha256={source_label_sha256}"
+            )
             cached_selection = _load_selection_cache(
                 selection_cache_path,
                 profile=profile,
@@ -812,6 +970,7 @@ def prepare_imagenet_lt(
                 source_labels=train_labels,
             )
             if cached_selection is None:
+                _log("No valid selection cache found; resolving manifest indices from source")
                 selected, selection_strategy = resolve_manifest_indices(
                     train,
                     manifest_filenames,
@@ -838,6 +997,10 @@ def prepare_imagenet_lt(
                 selected, selection_strategy = cached_selection
                 metadata["selection_cache_hit"] = True
                 print(f"Using permanent ImageNet-LT selection cache: {selection_cache_path}")
+            _log(
+                f"Selection resolved: count={len(selected)} strategy={selection_strategy} "
+                f"cache_hit={metadata.get('selection_cache_hit')}"
+            )
             metadata["selection_order"] = selection_strategy
             metadata["exact_official_identities"] = (
                 selection_strategy == "exact-official-manifest-identities"
@@ -856,41 +1019,49 @@ def prepare_imagenet_lt(
             actual_counts = class_counts
         else:
             class_counts, class_rank_order = assign_rank_counts_to_classes(
-                train["label"], rank_counts, seed=seed
+                train_labels, rank_counts, seed=seed
             )
             metadata["class_counts"] = class_counts
             metadata["class_rank_order"] = class_rank_order
             selected, actual_counts = select_long_tail_indices(
-                train["label"], class_counts, seed=seed
+                train_labels, class_counts, seed=seed
             )
-            source_labels = train["label"]
-            selected_labels = [int(source_labels[index]) for index in selected]
+            selected_labels = [train_labels[index] for index in selected]
             metadata["selection_order"] = "seeded-class-selection-and-global-shuffle"
             metadata["selection_sha256"] = _selection_sha256(
                 [str(index) for index in selected],
                 selected_labels,
             )
         subset = train.select(selected)
+        _log_dataset_summary("Selected train subset", subset)
         observed = Counter(int(label) for label in subset["label"])
         if [observed[label] for label in range(1000)] != actual_counts:
             raise RuntimeError("ImageNet-LT class-count verification failed before save")
+        _log(
+            f"Class-count verification before save passed: classes={len(actual_counts)} "
+            f"samples={sum(actual_counts)}"
+        )
         subset = _ensure_embedded_images(subset)
         print(f"Saving {len(subset)} long-tail train samples to RAM...")
         _replace_saved_split(subset, arrow_root / "train", force=force)
 
     if "validation" in requested_splits:
+        _log("Starting validation split build")
         print("Loading unchanged ImageNet-1K validation split...")
         validation = _load_source_split(src, "validation")
         metadata["validation_samples"] = len(validation)
+        _log_dataset_summary("Validation source split", validation)
         validation = _ensure_embedded_images(validation)
         print(f"Saving {len(validation)} validation samples to RAM...")
         _replace_saved_split(validation, arrow_root / "validation", force=force)
 
     Path(dst).mkdir(parents=True, exist_ok=True)
+    _log(f"Writing ImageNet-LT metadata: {metadata_path}")
     with metadata_path.open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
+    _log_path_status("Final ImageNet-LT destination", Path(dst))
     print(f"ImageNet-LT ready at {dst}")
     print(f"Metadata: {metadata_path}")
     return metadata
@@ -898,6 +1069,7 @@ def prepare_imagenet_lt(
 
 def verify_imagenet_lt(dst: str) -> dict[str, Any]:
     """Verify saved split sizes and train class counts against metadata."""
+    _log(f"verify_imagenet_lt start: dst={dst}")
     metadata_path = Path(dst) / METADATA_FILENAME
     if not metadata_path.is_file():
         raise FileNotFoundError(f"Missing ImageNet-LT metadata: {metadata_path}")
@@ -907,7 +1079,9 @@ def verify_imagenet_lt(dst: str) -> dict[str, Any]:
     datasets = _import_datasets()
     train_path = Path(dst) / "arrow" / "train"
     if train_path.is_dir():
+        _log_path_status("Verification train split", train_path)
         train = datasets.load_from_disk(str(train_path))
+        _log_dataset_summary("Verification loaded train split", train)
         observed = Counter(int(label) for label in train["label"])
         expected = [int(value) for value in metadata["class_counts"]]
         if len(train) != sum(expected):
@@ -920,7 +1094,9 @@ def verify_imagenet_lt(dst: str) -> dict[str, Any]:
 
     validation_path = Path(dst) / "arrow" / "validation"
     if validation_path.is_dir() and "validation_samples" in metadata:
+        _log_path_status("Verification validation split", validation_path)
         validation = datasets.load_from_disk(str(validation_path))
+        _log_dataset_summary("Verification loaded validation split", validation)
         if len(validation) != int(metadata["validation_samples"]):
             raise RuntimeError("Validation size does not match metadata")
         encoded_validation = validation.cast_column("image", datasets.Image(decode=False))
@@ -936,6 +1112,7 @@ def verify_imagenet_lt(dst: str) -> dict[str, Any]:
 
 def print_imagenet_lt_status(dst: str) -> None:
     """Print adapter metadata and the presence of each saved Arrow split."""
+    _log(f"print_imagenet_lt_status start: dst={dst}")
     metadata_path = Path(dst) / METADATA_FILENAME
     print(f"ImageNet-LT destination: {dst}")
     print(f"Metadata: {'present' if metadata_path.is_file() else 'missing'}")
@@ -951,3 +1128,4 @@ def print_imagenet_lt_status(dst: str) -> None:
     for split in ("train", "validation"):
         path = Path(dst) / "arrow" / split
         print(f"{split}: {'present' if path.is_dir() else 'missing'} ({path})")
+        _log_path_status(f"Status split {split}", path)

@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import sys
 import time
@@ -169,6 +170,11 @@ def fmt_size(nbytes: int) -> str:
     return f"{nbytes:.2f} PB"
 
 
+def log_imagenet_lt_route(message: str) -> None:
+    """Print a top-level ImageNet-LT copy routing diagnostic."""
+    print(f"[copy_data_to_ram ImageNet-LT] {message}", flush=True)
+
+
 def shm_capacity() -> tuple[int, int, int]:
     """Return (total, used, free) bytes for /dev/shm."""
     return shutil.disk_usage("/dev/shm")
@@ -217,6 +223,38 @@ def resolve_split_subdirs(
     return requested
 
 
+def _has_imagenet_arrow_split(src: str, split: str) -> bool:
+    """Return True when *src* contains a loadable local ImageNet Arrow split."""
+    root = Path(src)
+    if (root / "arrow" / split / "dataset_info.json").is_file():
+        return True
+    if (root / split / "dataset_info.json").is_file():
+        return True
+
+    shard_pattern = re.compile(
+        rf"^.+-{re.escape(split)}-(?P<index>\d+)-of-(?P<total>\d+)\.arrow$"
+    )
+    groups: dict[tuple[Path, int], set[int]] = {}
+    for path in root.rglob("*.arrow"):
+        match = shard_pattern.match(path.name)
+        if match is None:
+            continue
+        index = int(match.group("index"))
+        total = int(match.group("total"))
+        groups.setdefault((path.parent, total), set()).add(index)
+    return any(indices == set(range(total)) for (_parent, total), indices in groups.items())
+
+
+def _is_usable_imagenet_lt_source(src: str) -> bool:
+    """Check whether *src* can provide the splits needed by ImageNet-LT."""
+    if not os.path.isdir(src):
+        return False
+    return all(
+        _has_imagenet_arrow_split(src, split)
+        for split in ("train", "validation")
+    )
+
+
 def resolve_imagenet_lt_source(
     explicit_src: str | None,
     dataset_cfg: dict,
@@ -236,9 +274,15 @@ def resolve_imagenet_lt_source(
         return os.path.abspath(env_src)
 
     local_src = dataset_cfg.get("local_src")
-    if local_src and os.path.isdir(local_src):
-        print(f"Using existing local ImageNet-1K dataset: {local_src}")
-        return os.path.abspath(local_src)
+    if local_src:
+        if _is_usable_imagenet_lt_source(local_src):
+            print(f"Using existing local ImageNet-1K dataset: {local_src}")
+            return os.path.abspath(local_src)
+        if os.path.exists(local_src):
+            print(
+                f"Existing local ImageNet-1K path is incomplete or not an Arrow cache; "
+                f"ignoring it for ImageNet-LT: {local_src}"
+            )
 
     fallback = dataset_cfg["src"]
     print(f"Local ImageNet-1K RAM copy not found; using shared source: {fallback}")
@@ -660,6 +704,12 @@ def main() -> None:
     # Resolve src/dst: explicit overrides take priority, then dataset registry
     dataset_defaults = DATASETS[args.dataset]
     if dataset_defaults.get("adapter") == "imagenet-lt":
+        log_imagenet_lt_route(
+            f"CLI options: dataset={args.dataset} src_override={args.src} "
+            f"dst_override={args.dst} splits={args.splits} force={args.force} "
+            f"dry_run={args.dry_run} verify={args.verify} status={args.status} "
+            f"cleanup={args.cleanup} profile={args.lt_profile} seed={args.lt_seed}"
+        )
         src = resolve_imagenet_lt_source(args.src, dataset_defaults)
     else:
         src = args.src or dataset_defaults["src"]
@@ -668,13 +718,21 @@ def main() -> None:
     subdirs = resolve_split_subdirs(dataset_defaults, args.splits)
 
     if dataset_defaults.get("adapter") == "imagenet-lt":
+        selected_splits = subdirs or ["train", "validation"]
+        shm_total, shm_used, shm_free = shm_capacity()
+        log_imagenet_lt_route(f"Resolved source: {src}")
+        log_imagenet_lt_route(f"Resolved destination: {dst}")
+        log_imagenet_lt_route(f"Selected splits: {selected_splits}")
+        log_imagenet_lt_route(
+            f"/dev/shm capacity: total={fmt_size(shm_total)} "
+            f"used={fmt_size(shm_used)} free={fmt_size(shm_free)}"
+        )
         from imagenet_lt_adapter import (
             prepare_imagenet_lt,
             print_imagenet_lt_status,
             verify_imagenet_lt,
         )
 
-        selected_splits = subdirs or ["train", "validation"]
         if args.cleanup:
             cmd_cleanup(dst)
         elif args.verify:
