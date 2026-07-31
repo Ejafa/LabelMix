@@ -37,8 +37,10 @@ BUNDLED_OFFICIAL_MANIFEST = (
     / "ImageNet_LT"
     / "ImageNet_LT_train.txt"
 )
-DEFAULT_SELECTION_CACHE_DIR = BUNDLED_OFFICIAL_MANIFEST.parent
-SELECTION_CACHE_VERSION = 1
+DEFAULT_SELECTION_CACHE_DIR = Path(
+    "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/ImageNet_LT"
+)
+SELECTION_CACHE_VERSION = 2
 
 _BUILDER_ARROW_SHARD_RE = re.compile(
     r"^(?P<prefix>.+)-(?P<split>train|validation)-"
@@ -263,6 +265,13 @@ def _default_selection_cache_path(profile: str, seed: int) -> Path:
     )
 
 
+def _shuffle_selection_order(selected: Sequence[int], seed: int) -> list[int]:
+    """Return the selected source indices in a deterministic global order."""
+    shuffled = [int(index) for index in selected]
+    random.Random(int(seed) + 15_485_863).shuffle(shuffled)
+    return shuffled
+
+
 def _resolve_selection_cache_path(
     profile: str,
     seed: int,
@@ -307,11 +316,11 @@ def _load_selection_cache(
         if cache.get(key) != expected
     ]
     if mismatches:
-        raise ValueError(
-            f"ImageNet-LT selection cache does not match this source/configuration: "
-            f"{path} (mismatched: {', '.join(mismatches)}). Remove that cache or "
-            "choose a different --lt-selection-cache path."
+        _log(
+            f"Selection cache metadata mismatch; ignoring stale cache {path} "
+            f"(mismatched: {', '.join(mismatches)})"
         )
+        return None
     _log("Selection cache metadata fields validated")
 
     selected = [int(index) for index in cache.get("selected_indices", [])]
@@ -528,7 +537,7 @@ def resolve_manifest_indices(
         )
     if len(selected) != len(set(selected)):
         raise ValueError("Official ImageNet-LT manifest contains duplicate source images")
-    return selected, "exact-official-manifest-identities"
+    return _shuffle_selection_order(selected, seed), "exact-official-manifest-identities"
 
 
 def select_manifest_indices(
@@ -882,7 +891,7 @@ def prepare_imagenet_lt(
     if official_manifest is not None:
         metadata["manifest"] = official_manifest
         metadata["manifest_sha256"] = _sha256(official_manifest)
-        metadata["selection_order"] = "official-manifest"
+        metadata["selection_order"] = "deterministic-global-shuffle"
         metadata["selection_sha256"] = _selection_sha256(
             manifest_filenames or [],
             manifest_labels or [],
@@ -1001,7 +1010,8 @@ def prepare_imagenet_lt(
                 f"Selection resolved: count={len(selected)} strategy={selection_strategy} "
                 f"cache_hit={metadata.get('selection_cache_hit')}"
             )
-            metadata["selection_order"] = selection_strategy
+            metadata["selection_identity_strategy"] = selection_strategy
+            metadata["selection_order"] = "deterministic-global-shuffle"
             metadata["exact_official_identities"] = (
                 selection_strategy == "exact-official-manifest-identities"
             )
@@ -1033,7 +1043,7 @@ def prepare_imagenet_lt(
                 selected_labels,
             )
         subset = train.select(selected)
-        _log_dataset_summary("Selected train subset", subset)
+        _log_dataset_summary("Selected globally shuffled train subset", subset)
         observed = Counter(int(label) for label in subset["label"])
         if [observed[label] for label in range(1000)] != actual_counts:
             raise RuntimeError("ImageNet-LT class-count verification failed before save")
@@ -1042,7 +1052,7 @@ def prepare_imagenet_lt(
             f"samples={sum(actual_counts)}"
         )
         subset = _ensure_embedded_images(subset)
-        print(f"Saving {len(subset)} long-tail train samples to RAM...")
+        print(f"Saving {len(subset)} globally shuffled long-tail train samples...")
         _replace_saved_split(subset, arrow_root / "train", force=force)
 
     if "validation" in requested_splits:

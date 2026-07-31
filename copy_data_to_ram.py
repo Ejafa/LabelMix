@@ -26,12 +26,12 @@ Usage::
     python copy_data_to_ram.py                          # copy imagenet-1k (default)
     python copy_data_to_ram.py --dataset places365      # copy places365
     python copy_data_to_ram.py --dataset cifar100       # copy cifar100
-    python copy_data_to_ram.py --dataset imagenet-lt    # build long-tail ImageNet in RAM
+    python copy_data_to_ram.py --dataset imagenet-lt    # build/copy persistent long-tail ImageNet
     python copy_data_to_ram.py --dataset coco           # copy coco (full: ~20 GB)
     python copy_data_to_ram.py --dataset coco --splits val  # coco val2017 + anns only
     python copy_data_to_ram.py --dry-run                # show what would be copied
     python copy_data_to_ram.py --verify                 # verify existing copy
-    python copy_data_to_ram.py --cleanup                # remove the RAM copy
+    python copy_data_to_ram.py --dataset imagenet-lt --cleanup                # remove the RAM copy
 
 Supported datasets and their default paths:
 
@@ -40,12 +40,14 @@ Supported datasets and their default paths:
       dst: /dev/shm/imagenet-1k
 
     imagenet-lt:
-      src: existing local ImageNet-1K Arrow dataset (prefers /dev/shm/imagenet-1k)
+      src: existing local ImageNet-1K Arrow dataset (default below)
            Supports both arrow/<split> saved datasets and nested Hugging Face
            builder caches containing numbered split Arrow shards.
+      persistent: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/ImageNet_LT
       dst: /dev/shm/imagenet-lt
       adapter: official Pareto-alpha=6 counts; exact manifest identities when
-               the source Arrow rows retain original JPEG names
+               the source Arrow rows retain original JPEG names. The persistent
+               training Arrow split is saved in deterministic globally shuffled order.
 
     places365:
       src: /apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/places365/arrow
@@ -64,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -88,9 +91,7 @@ DATASETS: dict[str, dict] = {
     },
     "imagenet-lt": {
         "src": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/imagenet-1k",
-        # Prefer the already prepared RAM copy used by ordinary ImageNet-1K
-        # jobs. The shared source above remains a fallback when it is absent.
-        "local_src": "/dev/shm/imagenet-1k",
+        "persistent_dst": "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/ImageNet_LT",
         "dst": "/dev/shm/imagenet-lt",
         "adapter": "imagenet-lt",
         "splits": {
@@ -100,10 +101,11 @@ DATASETS: dict[str, dict] = {
             "full": ["train", "validation"],
         },
         "post_copy_hint": (
-            "ImageNet-LT is stored as Arrow datasets under "
-            "<DATA DIR>/arrow. Set IMAGENET_LT_DATA_DIR to the same DATA DIR "
-            "when generating jobs, then use --dataset imagenet-lt in "
-            "experiments/generate_jobs.py."
+            "ImageNet-LT is stored persistently as Arrow datasets under "
+            "/apdcephfs_fsgm/share_303853033/ethangeng/konstantin-garbers/data/ImageNet_LT/arrow "
+            "and copied to <DATA DIR>/arrow for RAM-speed training. Set "
+            "IMAGENET_LT_DATA_DIR to the DATA DIR when generating jobs, then "
+            "use --dataset imagenet-lt in experiments/generate_jobs.py."
         ),
     },
     "places365": {
@@ -255,15 +257,42 @@ def _is_usable_imagenet_lt_source(src: str) -> bool:
     )
 
 
+def _has_imagenet_lt_split(root: str, split: str) -> bool:
+    """Return True when a prepared ImageNet-LT Arrow split exists."""
+    return (Path(root) / "arrow" / split / "dataset_info.json").is_file()
+
+
+def _missing_imagenet_lt_splits(root: str, splits: list[str]) -> list[str]:
+    """Return requested prepared ImageNet-LT splits missing from *root*."""
+    return [split for split in splits if not _has_imagenet_lt_split(root, split)]
+
+
+def _imagenet_lt_metadata_matches(src: str, dst: str) -> bool:
+    """Return True when prepared and RAM ImageNet-LT metadata are identical."""
+    metadata_name = "imagenet_lt_metadata.json"
+    src_metadata = Path(src) / metadata_name
+    dst_metadata = Path(dst) / metadata_name
+    if not src_metadata.is_file() or not dst_metadata.is_file():
+        return False
+    try:
+        with src_metadata.open("r", encoding="utf-8") as handle:
+            src_data = json.load(handle)
+        with dst_metadata.open("r", encoding="utf-8") as handle:
+            dst_data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return src_data == dst_data
+
+
 def resolve_imagenet_lt_source(
     explicit_src: str | None,
     dataset_cfg: dict,
 ) -> str:
     """Resolve an existing local ImageNet-1K dataset for the LT adapter.
 
-    Explicit ``--src`` wins. Otherwise an environment override or the normal
-    ImageNet-1K RAM copy is preferred over the configured shared-filesystem
-    source. No remote dataset identifier is returned from this function.
+    Explicit ``--src`` wins. Otherwise an environment override or the configured
+    filesystem ImageNet-1K source is used. No remote dataset identifier is
+    returned from this function.
     """
     if explicit_src:
         return os.path.abspath(explicit_src)
@@ -273,19 +302,8 @@ def resolve_imagenet_lt_source(
         print(f"Using local ImageNet-1K source from IMAGENET1K_DATA_DIR: {env_src}")
         return os.path.abspath(env_src)
 
-    local_src = dataset_cfg.get("local_src")
-    if local_src:
-        if _is_usable_imagenet_lt_source(local_src):
-            print(f"Using existing local ImageNet-1K dataset: {local_src}")
-            return os.path.abspath(local_src)
-        if os.path.exists(local_src):
-            print(
-                f"Existing local ImageNet-1K path is incomplete or not an Arrow cache; "
-                f"ignoring it for ImageNet-LT: {local_src}"
-            )
-
     fallback = dataset_cfg["src"]
-    print(f"Local ImageNet-1K RAM copy not found; using shared source: {fallback}")
+    print(f"Using configured local ImageNet-1K source: {fallback}")
     return os.path.abspath(fallback)
 
 
@@ -594,7 +612,7 @@ def main() -> None:
             "  python copy_data_to_ram.py                              # copy imagenet-1k to /dev/shm\n"
             "  python copy_data_to_ram.py --dataset places365          # copy places365 to /dev/shm\n"
             "  python copy_data_to_ram.py --dataset cifar100           # copy cifar100 to /dev/shm\n"
-            "  python copy_data_to_ram.py --dataset imagenet-lt        # build ImageNet-LT in RAM\n"
+            "  python copy_data_to_ram.py --dataset imagenet-lt        # build persistent ImageNet-LT, then copy to /dev/shm\n"
             "  python copy_data_to_ram.py --dataset coco               # copy full coco (~20 GB)\n"
             "  python copy_data_to_ram.py --dataset coco --splits val  # only annotations+val2017 (~1.6 GB)\n"
             "  python copy_data_to_ram.py --dataset coco --splits annotations,val\n"
@@ -682,6 +700,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--lt-persistent-dir",
+        default=None,
+        help=(
+            "Persistent prepared ImageNet-LT Arrow directory. By default this is "
+            "<repo>/data/ImageNet_LT; copy_data_to_ram copies this prepared "
+            "dataset to /dev/shm/imagenet-lt."
+        ),
+    )
+    parser.add_argument(
         "--lt-seed",
         type=int,
         default=42,
@@ -719,9 +746,13 @@ def main() -> None:
 
     if dataset_defaults.get("adapter") == "imagenet-lt":
         selected_splits = subdirs or ["train", "validation"]
+        persistent_dst = os.path.abspath(
+            args.lt_persistent_dir or dataset_defaults["persistent_dst"]
+        )
         shm_total, shm_used, shm_free = shm_capacity()
-        log_imagenet_lt_route(f"Resolved source: {src}")
-        log_imagenet_lt_route(f"Resolved destination: {dst}")
+        log_imagenet_lt_route(f"Resolved ImageNet-1K source: {src}")
+        log_imagenet_lt_route(f"Resolved persistent ImageNet-LT dataset: {persistent_dst}")
+        log_imagenet_lt_route(f"Resolved RAM destination: {dst}")
         log_imagenet_lt_route(f"Selected splits: {selected_splits}")
         log_imagenet_lt_route(
             f"/dev/shm capacity: total={fmt_size(shm_total)} "
@@ -739,22 +770,69 @@ def main() -> None:
             verify_imagenet_lt(dst)
             _print_data_dir_banner(dst, post_copy_hint)
         elif args.status:
+            print("Persistent ImageNet-LT dataset:")
+            print_imagenet_lt_status(persistent_dst)
+            print()
+            print("RAM ImageNet-LT dataset:")
             print_imagenet_lt_status(dst)
         else:
-            prepare_imagenet_lt(
-                src=src,
-                dst=dst,
-                splits=selected_splits,
-                seed=args.lt_seed,
-                max_samples=args.lt_max_samples,
-                min_samples=args.lt_min_samples,
-                profile=args.lt_profile,
-                train_list=args.lt_train_list,
-                selection_cache=args.lt_selection_cache,
-                force=args.force,
+            missing_persistent = _missing_imagenet_lt_splits(persistent_dst, selected_splits)
+            if missing_persistent or args.force:
+                if missing_persistent:
+                    log_imagenet_lt_route(
+                        "Persistent prepared split(s) missing: "
+                        + ", ".join(missing_persistent)
+                    )
+                else:
+                    log_imagenet_lt_route(
+                        "--force requested; rebuilding persistent prepared ImageNet-LT dataset"
+                    )
+                selection_cache = args.lt_selection_cache
+                if selection_cache is None and args.lt_profile == "official":
+                    selection_cache = str(
+                        Path(persistent_dst)
+                        / f"ImageNet_LT_selection_official_seed{int(args.lt_seed)}.json"
+                    )
+                prepare_imagenet_lt(
+                    src=src,
+                    dst=persistent_dst,
+                    splits=selected_splits,
+                    seed=args.lt_seed,
+                    max_samples=args.lt_max_samples,
+                    min_samples=args.lt_min_samples,
+                    profile=args.lt_profile,
+                    train_list=args.lt_train_list,
+                    selection_cache=selection_cache,
+                    force=args.force,
+                    dry_run=args.dry_run,
+                )
+            else:
+                log_imagenet_lt_route(
+                    f"Using existing persistent prepared ImageNet-LT dataset: {persistent_dst}"
+                )
+
+            if not args.dry_run:
+                verify_imagenet_lt(persistent_dst)
+            if args.dry_run and missing_persistent:
+                _print_data_dir_banner(dst, post_copy_hint)
+                return
+            copy_force = args.force
+            if os.path.exists(dst) and not _imagenet_lt_metadata_matches(persistent_dst, dst):
+                log_imagenet_lt_route(
+                    "Existing RAM ImageNet-LT metadata is missing or stale; replacing RAM copy"
+                )
+                cmd_cleanup(dst)
+                copy_force = True
+            copied = cmd_copy(
+                persistent_dst,
+                dst,
                 dry_run=args.dry_run,
+                force=copy_force,
+                subdirs=None,
+                post_copy_hint=post_copy_hint,
             )
-            _print_data_dir_banner(dst, post_copy_hint)
+            if not args.dry_run and copied:
+                verify_imagenet_lt(dst)
         return
 
     if args.cleanup:
