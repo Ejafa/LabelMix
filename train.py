@@ -831,8 +831,8 @@ def validate_args(args) -> None:
                 raise ValueError('natural mode does not support K cooldown')
             if getattr(args, 'distributed', False) and getattr(args, 'labelmix_producer_rank', -1) < 0:
                 raise ValueError('distributed natural mode requires --labelmix-producer-rank 0')
-        elif getattr(args, 'distributed', False):
-            raise ValueError('distributed natural-mode Mosaic is not supported')
+        elif getattr(args, 'distributed', False) and getattr(args, 'labelmix_producer_rank', -1) < 0:
+            raise ValueError('distributed natural-mode Mosaic requires --labelmix-producer-rank 0')
 
     if getattr(args, 'puzzlemix', False):
         raise ValueError(
@@ -1521,8 +1521,8 @@ def run_training(args=None, args_text=None):
             parser.error('--labelmix-k-cooldown-epochs must be >= 0')
         if args.labelmix_step_mode == 'total' and not (args.labelmix_total_epochs or args.labelmix_total_steps):
             parser.error('--labelmix-step-mode=total requires --labelmix-total-epochs or --labelmix-total-steps')
-    elif args.labelmix_producer_rank >= 0:
-        parser.error('--labelmix-producer-rank requires --labelmix')
+    elif args.labelmix_producer_rank >= 0 and not args.mosaic:
+        parser.error('--labelmix-producer-rank requires --labelmix or --mosaic')
 
     # ---------------- Mosaic validation ----------------
     if args.mosaic:
