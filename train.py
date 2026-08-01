@@ -794,27 +794,26 @@ def validate_args(args) -> None:
 
     bm = getattr(args, 'balanced_mode', '')
     mode = bm
+    natural_modes = ('natural', 'natural-mixed')
     if bm:
         if isinstance(bm, str):
-            mode = bm.strip().lower()
+            mode = bm.strip().lower().replace('_', '-')
             if mode.isdigit():
                 mode = int(mode)
-            elif mode not in ('min', 'max', 'natural', 'no-resampling'):
-                raise ValueError('--balanced-mode must be "min", "max", "natural", or a positive int')
+            elif mode not in ('min', 'max', 'natural', 'natural-mixed', 'no-resampling'):
+                raise ValueError('--balanced-mode must be "min", "max", "natural", "natural-mixed", or a positive int')
             if mode == 'no-resampling':
                 mode = 'natural'
         elif isinstance(bm, int):
             mode = bm
         else:
-            raise ValueError('--balanced-mode must be "min", "max", "natural", or a positive int')
+            raise ValueError('--balanced-mode must be "min", "max", "natural", "natural-mixed", or a positive int')
         if isinstance(mode, int) and mode < 1:
             raise ValueError('--balanced-mode int value must be >= 1')
 
-    if mode == 'natural':
+    if mode in natural_modes:
         labelmix_enabled = getattr(args, 'labelmix', False)
         mosaic_enabled = getattr(args, 'mosaic', False)
-        if not labelmix_enabled and not mosaic_enabled:
-            raise ValueError('--balanced-mode natural requires --labelmix or --mosaic')
         if labelmix_enabled:
             mix_k = getattr(args, 'labelmix_mix_k', 1)
             if mix_k < 2:
@@ -1470,11 +1469,11 @@ def run_training(args=None, args_text=None):
 
     if args.balanced_mode:
         if isinstance(args.balanced_mode, str):
-            mode = args.balanced_mode.strip().lower()
+            mode = args.balanced_mode.strip().lower().replace('_', '-')
             if mode.isdigit():
                 mode = int(mode)
-            elif mode not in ('min', 'max', 'natural', 'no-resampling'):
-                parser.error('--balanced-mode must be "min", "max", "natural", or a positive int')
+            elif mode not in ('min', 'max', 'natural', 'natural-mixed', 'no-resampling'):
+                parser.error('--balanced-mode must be "min", "max", "natural", "natural-mixed", or a positive int')
             if mode == 'no-resampling':
                 mode = 'natural'
         elif isinstance(args.balanced_mode, int):
@@ -1562,30 +1561,26 @@ def run_training(args=None, args_text=None):
         (args.labelmix or args.mosaic)
         and args.labelmix_producer_rank >= 0
     )
-    natural_mode = args.balanced_mode == 'natural'
+    natural_mode = args.balanced_mode in ('natural', 'natural-mixed')
     if natural_mode:
-        if not args.labelmix and not args.mosaic:
-            parser.error(
-                '--balanced-mode natural requires --labelmix or --mosaic. For an ordinary '
-                'natural-prior baseline, use the standard dataset loader without --balanced-mode.'
-            )
+        natural_label = str(args.balanced_mode)
         if args.labelmix:
             if args.labelmix_mix_k < 2:
-                parser.error('natural TreemapMix requires K >= 2')
+                parser.error(f'{natural_label} TreemapMix requires K >= 2')
             k_min = args.labelmix_k_min if args.labelmix_k_min is not None else args.labelmix_mix_k
             k_max = args.labelmix_k_max if args.labelmix_k_max is not None else args.labelmix_mix_k
             if k_min != args.labelmix_mix_k:
-                parser.error('natural mode requires k_min == mix_k')
+                parser.error(f'{natural_label} mode requires k_min == mix_k')
             if k_max != args.labelmix_mix_k:
-                parser.error('natural mode requires k_max == mix_k')
+                parser.error(f'{natural_label} mode requires k_max == mix_k')
             if args.labelmix_k_schedule != 'fixed':
-                parser.error('natural mode requires --labelmix-k-schedule fixed')
+                parser.error(f'{natural_label} mode requires --labelmix-k-schedule fixed')
             if (args.labelmix_k_cooldown_epochs or 0) > 0:
-                parser.error('natural mode does not support K cooldown')
+                parser.error(f'{natural_label} mode does not support K cooldown')
             if args.distributed and not central_producer:
-                parser.error('distributed natural mode requires --labelmix-producer-rank 0')
-        elif args.distributed and not central_producer:
-            parser.error('distributed natural-mode Mosaic requires --labelmix-producer-rank 0')
+                parser.error(f'distributed {natural_label} mode requires --labelmix-producer-rank 0')
+        elif args.mosaic and args.distributed and not central_producer:
+            parser.error(f'distributed {natural_label} Mosaic requires --labelmix-producer-rank 0')
 
     labelmix_cpu_group = None
     if central_producer:

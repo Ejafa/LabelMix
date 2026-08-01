@@ -102,12 +102,14 @@ class BenchmarkResult:
     description: str
     loss: str
     mix_k: Optional[int]
+    seed: int
     balanced_mode: int
     batch_size: int
     workers: int
     warmup_batches: int
     measured_batches: int
     first_batch_seconds: float
+    total_batch_processing_seconds: float
     throughput_images_per_second: float
     latency_p50_ms: float
     latency_p95_ms: float
@@ -333,9 +335,10 @@ def benchmark_configuration(args, configuration: str) -> BenchmarkResult:
 
     try:
         iterator = iter(loader)
-        start = time.perf_counter()
+        all_batches_start = time.perf_counter()
+        first_batch_start = time.perf_counter()
         consume_one()
-        first_batch_seconds = time.perf_counter() - start
+        first_batch_seconds = time.perf_counter() - first_batch_start
 
         for _ in range(args.warmup_batches):
             consume_one()
@@ -348,6 +351,7 @@ def benchmark_configuration(args, configuration: str) -> BenchmarkResult:
             total_images += consume_one()
             latencies.append(time.perf_counter() - batch_start)
         measured_seconds = time.perf_counter() - measured_start
+        total_batch_processing_seconds = time.perf_counter() - all_batches_start
     finally:
         sampler.stop()
         del iterator, loader, dataset
@@ -359,12 +363,14 @@ def benchmark_configuration(args, configuration: str) -> BenchmarkResult:
         description=str(spec["description"]),
         loss=str(spec["loss"]),
         mix_k=int(spec["mix_k"]) if "mix_k" in spec else None,
+        seed=args.seed,
         balanced_mode=args.balanced_mode,
         batch_size=args.batch_size,
         workers=args.workers,
         warmup_batches=args.warmup_batches,
         measured_batches=args.measured_batches,
         first_batch_seconds=first_batch_seconds,
+        total_batch_processing_seconds=total_batch_processing_seconds,
         throughput_images_per_second=total_images / measured_seconds,
         latency_p50_ms=1000.0 * statistics.median(latencies),
         latency_p95_ms=1000.0 * percentile(latencies, 0.95),
@@ -389,12 +395,14 @@ def benchmark_configuration_isolated(args, configuration: str) -> BenchmarkResul
         args=(args, configuration, result_queue),
     )
     process.start()
-    process.join()
+    try:
+        ok, payload = result_queue.get()
+    finally:
+        process.join()
     if process.exitcode != 0:
         raise RuntimeError(
             f"Benchmark {configuration!r} exited with status {process.exitcode}"
         )
-    ok, payload = result_queue.get(timeout=5)
     if not ok:
         raise RuntimeError(f"Benchmark {configuration!r} failed:\n{payload}")
     return payload
@@ -454,6 +462,12 @@ def parse_args(argv: Optional[list[str]] = None):
     parser.add_argument("--memory-sample-interval", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        help="Seeds to benchmark in one run. Overrides --seed when provided.",
+    )
+    parser.add_argument(
         "--configuration",
         action="append",
         choices=tuple(CONFIGURATIONS),
@@ -503,11 +517,14 @@ def parse_args(argv: Optional[list[str]] = None):
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
     selected = args.configuration or list(CONFIGURATIONS)
+    seeds = args.seeds or [args.seed]
     results = []
-    for configuration in selected:
-        print(f"Benchmarking {configuration} ...", flush=True)
-        benchmark_fn = benchmark_configuration if args.no_isolate else benchmark_configuration_isolated
-        results.append(benchmark_fn(args, configuration))
+    benchmark_fn = benchmark_configuration if args.no_isolate else benchmark_configuration_isolated
+    for seed in seeds:
+        args.seed = seed
+        for configuration in selected:
+            print(f"Benchmarking {configuration} with seed {seed} ...", flush=True)
+            results.append(benchmark_fn(args, configuration))
     _write_results(results, Path(args.output))
     _print_results(results)
     print(f"Wrote {args.output} and {Path(args.output).with_suffix('.csv')}")
@@ -516,3 +533,4 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -436,7 +436,8 @@ class BalancedBucketDataset(IterableDataset):
         self.base_dataset = base_dataset
         self.transform = transform
         self.mode = str(mode).strip().lower()
-        self.natural_mode = self.mode in {"natural", "no-resampling"}
+        self.natural_mixed_mode = self.mode in {"natural-mixed", "natural_mixed"}
+        self.natural_mode = self.mode in {"natural", "no-resampling"} or self.natural_mixed_mode
         self.seed = int(seed)
         self.buffer_size = int(buffer_size)
         self.cache_threshold = int(cache_small_classes_threshold)
@@ -977,6 +978,73 @@ class BalancedBucketDataset(IterableDataset):
             rows.append(row)
         return rows
 
+    def _build_natural_mixed_schedule(
+        self,
+        rng: torch.Generator,
+        global_worker_id: int,
+        total_workers: int,
+    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
+        """Construct a natural-count schedule with each class spread across the epoch."""
+        max_seed = 2**63 - 1
+        epoch_seed = (self.seed + 1_000_003 * int(self._epoch)) % max_seed
+        total = int(self.total_images_global)
+        if total <= 0:
+            return [], torch.empty(0, dtype=torch.int64)
+
+        records: List[Tuple[float, int]] = []
+        for class_position, indices in enumerate(self.bucket_arrays):
+            n = int(indices.numel())
+            if n <= 0:
+                raise ValueError("Empty class bucket encountered.")
+
+            generator = torch.Generator()
+            class_seed = (epoch_seed + 104_729 * (class_position + 1)) % max_seed
+            generator.manual_seed(class_seed)
+            shuffled = indices[torch.randperm(n, generator=generator)]
+
+            if n == 1:
+                positions = torch.tensor([0.5 * max(1, total)], dtype=torch.float64)
+            else:
+                positions = (torch.arange(n, dtype=torch.float64) + 0.5) * (float(total) / float(n))
+
+            spacing = float(total) / float(n)
+            jitter = (torch.rand(n, generator=generator, dtype=torch.float64) - 0.5) * min(spacing, 1.0)
+            positions = torch.clamp(positions + jitter, min=0.0, max=max(0.0, float(total - 1)))
+
+            for position, sample_idx in zip(positions.tolist(), shuffled.tolist()):
+                records.append((float(position), int(sample_idx)))
+
+        if len(records) != total:
+            raise RuntimeError(
+                f"natural-mixed schedule size mismatch: built {len(records)} records for {total} samples"
+            )
+
+        records.sort(key=lambda item: item[0])
+        order = torch.tensor([sample_idx for _, sample_idx in records], dtype=torch.int64)
+        if order.numel() > 1:
+            window = max(1, min(int(self.buffer_size), int(order.numel())))
+            chunks: List[torch.Tensor] = []
+            for start in range(0, int(order.numel()), window):
+                chunk = order[start : start + window]
+                chunks.append(chunk[torch.randperm(int(chunk.numel()), generator=rng)])
+            order = torch.cat(chunks)
+
+        worker_order = order[global_worker_id::total_workers]
+        if worker_order.numel() == 0:
+            return [], torch.empty(0, dtype=torch.int64)
+
+        if self.labelmix:
+            row_size = max(1, self.mix_k)
+        else:
+            row_size = max(1, min(int(self.num_classes), int(self.buffer_size)))
+
+        rows = [worker_order[start : start + row_size] for start in range(0, int(worker_order.numel()), row_size)]
+        if rows:
+            worker_cycles = torch.linspace(0, max(0, self.M - 1), steps=len(rows), dtype=torch.float64).round().to(torch.int64)
+        else:
+            worker_cycles = torch.empty(0, dtype=torch.int64)
+        return rows, worker_cycles
+
     def natural_statistics(self, k: int) -> Dict[str, int]:
         mixed_primary = single_primary = mixed_rows = single_rows = 0
         remainder_outputs = padded_groups = 0
@@ -1378,7 +1446,7 @@ class BalancedBucketDataset(IterableDataset):
             raise ValueError(f"LabelMix requires num_classes >= mix_k (got {self.num_classes} < {self.mix_k})")
 
         worker_cycles = torch.arange(global_worker_id, self.M, total_workers, dtype=torch.int64)
-        if worker_cycles.numel() == 0:
+        if worker_cycles.numel() == 0 and not self.natural_mixed_mode:
             return iter(())
 
         # Independence across workers/ranks (not strict determinism)
@@ -1388,13 +1456,22 @@ class BalancedBucketDataset(IterableDataset):
         rng = torch.Generator()
         rng.manual_seed(seed)
 
-        if self.natural_mode:
-            schedule = self._build_natural_schedule(worker_levels=worker_cycles)
+        if self.natural_mixed_mode:
+            schedule, worker_cycles_for_schedule = self._build_natural_mixed_schedule(
+                rng=rng,
+                global_worker_id=global_worker_id,
+                total_workers=total_workers,
+            )
+        elif self.natural_mode:
+            level_order = worker_cycles[torch.randperm(int(worker_cycles.numel()), generator=rng)]
+            schedule = self._build_natural_schedule(worker_levels=level_order)
+            worker_cycles_for_schedule = level_order
         else:
             schedule = self._build_resampled_schedule(rng=rng, worker_cycles=worker_cycles)
+            worker_cycles_for_schedule = worker_cycles
 
         if self.labelmix:
-            yield from self._iter_labelmix(schedule=schedule, worker_cycles=worker_cycles)
+            yield from self._iter_labelmix(schedule=schedule, worker_cycles=worker_cycles_for_schedule)
         else:
             # Non-labelmix path: batch-fetch in chunks if possible (HF speedup)
             buffer: List[Tuple[torch.Tensor, int]] = []
