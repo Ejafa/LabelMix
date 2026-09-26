@@ -1,0 +1,26 @@
+\begin{table*}[t]
+  \caption{ImageNet-LT accuracy and calibration for four backbones. Values are mean $\pm$ one sample standard deviation over seeds 42 and 43. ECE uses 15 bins. Bold marks the best mean for each model and metric.}
+  \label{tab:long-tail-results}
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Method & ViT-Wee & ViT-Little & ViT-Medium & ViT-Betwixt \\
+    \midrule
+    \multicolumn{5}{c}{Top-1 accuracy (\%) $\uparrow$} \\
+    \midrule
+    Mixup+CutMix & $41.72 \pm 0.08$ & $41.67 \pm 0.43$ & $40.95 \pm 0.07$ & $39.78 \pm 0.21$ \\
+    RICAP & $35.70 \pm 0.15$ & $35.39 \pm 0.00$ & $34.35 \pm 0.02$ & $31.44 \pm 3.37$ \\
+    TreemapMix-SCE & $41.44 \pm 0.40$ & $41.09 \pm 0.40$ & $39.48 \pm 0.13$ & $38.67 \pm 0.27$ \\
+    TreemapMix-PL & $\mathbf{43.12 \pm 0.06}$ & $\mathbf{42.69 \pm 0.07}$ & $\mathbf{42.26 \pm 0.07}$ & $\mathbf{41.60 \pm 0.17}$ \\
+    \midrule
+    \multicolumn{5}{c}{ECE (percentage points) $\downarrow$} \\
+    \midrule
+    Mixup+CutMix & $\mathbf{0.58 \pm 0.14}$ & $\mathbf{0.83 \pm 0.09}$ & $\mathbf{2.14 \pm 0.61}$ & $\mathbf{3.31 \pm 0.96}$ \\
+    RICAP & $28.50 \pm 0.26$ & $31.86 \pm 0.21$ & $33.12 \pm 0.32$ & $30.89 \pm 2.81$ \\
+    TreemapMix-SCE & $10.65 \pm 0.04$ & $13.00 \pm 0.56$ & $11.85 \pm 0.33$ & $11.35 \pm 0.62$ \\
+    TreemapMix-PL & $17.90 \pm 0.63$ & $25.63 \pm 0.38$ & $23.62 \pm 0.74$ & $25.45 \pm 0.79$ \\
+    \bottomrule
+  \end{tabular}
+\end{table*}

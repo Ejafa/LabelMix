@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
-from ._style import apply_paper_style, bar_color, method_display, savefig
+from ._style import BASE_FONT_SIZE, DOUBLE_COL_WIDTH, apply_paper_style, bar_color, method_display, savefig
 from .architectures_comparison_table import MODEL_LABELS, TYPE_ORDER, seed_description
 
 
@@ -76,30 +76,35 @@ def _draw_metric_table(
 
     ax.axis("off")
     table = ax.table(
-        cellText=cell_text,
-        rowLabels=[model_labels.get(model, model) for model in models],
-        colLabels=[method_display(method) for method in types],
+        cellText=[[model_labels.get(model, model).replace("ConvNeXt V2 Nano", "ConvNeXt V2\nNano"), *row]
+                  for model, row in zip(models, cell_text, strict=True)],
+        colLabels=["Backbone", *[method_display(method).replace("TreemapMix-", "TreemapMix\n") for method in types]],
+        colWidths=[0.24, *[0.76 / len(types)] * len(types)],
         cellLoc="center",
         rowLoc="right",
         colLoc="center",
-        bbox=[0.21, 0.0, 0.78, 0.90],
+        bbox=[0.0, 0.0, 1.0, 0.90],
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(7.0)
+    table.set_fontsize(BASE_FONT_SIZE)
+
+    table[(0, 0)].set_edgecolor("white")
+    table[(0, 0)].set_facecolor("#F2F2F2")
+    table[(0, 0)].set_text_props(weight="bold")
 
     for column, method in enumerate(types):
-        cell = table[(0, column)]
+        cell = table[(0, column + 1)]
         cell.set_facecolor(bar_color(method))
         cell.set_text_props(weight="bold")
         cell.set_edgecolor("white")
 
     for row, best_column in enumerate(best_columns, start=1):
-        label_cell = table[(row, -1)]
+        label_cell = table[(row, 0)]
         label_cell.set_facecolor("#F2F2F2")
         label_cell.set_text_props(weight="bold")
         label_cell.set_edgecolor("white")
         for column in range(len(types)):
-            cell = table[(row, column)]
+            cell = table[(row, column + 1)]
             cell.set_edgecolor("white")
             if column == best_column:
                 cell.set_facecolor("#D9F2D9")
@@ -130,7 +135,7 @@ def plot(
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
     apply_paper_style()
-    fig, axes = plt.subplots(2, 1, figsize=(7.5, 5.25))
+    fig, axes = plt.subplots(2, 1, figsize=(DOUBLE_COL_WIDTH, 4.1))
     _draw_metric_table(
         axes[0],
         df,
@@ -152,15 +157,15 @@ def plot(
         model_labels=model_labels,
     )
     fig.suptitle(title, y=0.995, weight="bold")
-    fig.subplots_adjust(left=0.01, right=0.99, top=0.94, bottom=0.07, hspace=0.22)
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.91, bottom=0.12, hspace=0.27)
     fig.text(
         0.5,
         0.018,
-        f"Mean ± std over {seed_description(df)}; second line is change from baseline. "
-        "Green marks the best mean per model.",
+        f"Mean ± sample std over {seed_description(df)}.\n"
+        "Second line: change from Mixup+CutMix (pp); green: best mean.",
         ha="center",
         va="bottom",
-        fontsize=6.5,
+        fontsize=BASE_FONT_SIZE,
     )
     return fig
 

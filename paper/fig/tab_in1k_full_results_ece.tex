@@ -1,20 +1,18 @@
 \begin{table*}[t]
-  \centering
-  \scriptsize
-  \setlength{\tabcolsep}{4.5pt}
-  \caption{Full ImageNet-1K expected calibration error results under the
-  matched 110-epoch protocol. ECE is reported in percentage points using
-  15 bins. Values are mean $\pm$ one sample standard deviation over three
-  seeds. Bold marks the best mean within each model column.}
+  \caption{Full ImageNet-1K ECE (15 bins, percentage points) results under the matched 110-epoch protocol. Values are mean $\pm$ one sample standard deviation over seeds 42, 43, and 44. Each method uses one run per seed. Bold marks the best mean within each model column.}
   \label{tab:in1k-full-results-ece}
-  \resizebox{\textwidth}{!}{%
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
   \begin{tabular}{@{}lcccc@{}}
     \toprule
     Method & ViT-Wee $\downarrow$ & ViT-Little $\downarrow$ & ViT-Medium $\downarrow$ & ViT-Betwixt $\downarrow$ \\
     \midrule
+    No Aug & $3.62 \pm 0.13$ & $4.53 \pm 0.36$ & $4.29 \pm 0.20$ & $4.42 \pm 0.02$ \\
+    Single-Image Aug & $6.29 \pm 0.13$ & $5.19 \pm 0.12$ & $5.53 \pm 0.21$ & $5.17 \pm 0.40$ \\
     Mixup+CutMix & $9.05 \pm 0.47$ & $7.53 \pm 0.10$ & $8.28 \pm 0.51$ & $7.91 \pm 0.35$ \\
     Mixup & $8.69 \pm 0.20$ & $7.54 \pm 0.15$ & $7.92 \pm 0.20$ & $7.70 \pm 0.11$ \\
-    CutMix & $6.81 \pm 0.78$ & $5.37 \pm 0.40$ & $6.39 \pm 0.96$ & $5.40 \pm 0.38$ \\
+    CutMix & $7.32 \pm 0.84$ & $5.56 \pm 0.54$ & $7.26 \pm 0.14$ & $5.63 \pm 0.20$ \\
     RICAP & $3.11 \pm 0.02$ & $4.43 \pm 0.11$ & $5.96 \pm 0.43$ & $6.44 \pm 0.11$ \\
     FMix & $6.40 \pm 0.19$ & $5.01 \pm 0.10$ & $5.44 \pm 0.26$ & $5.12 \pm 0.26$ \\
     GridMix & $7.04 \pm 0.15$ & $5.72 \pm 0.17$ & $5.66 \pm 0.54$ & $5.48 \pm 0.32$ \\
@@ -27,6 +25,5 @@
     TreemapMix-mixed & $2.63 \pm 0.30$ & $3.54 \pm 0.05$ & $3.78 \pm 0.26$ & $4.26 \pm 0.13$ \\
     TreemapMix-PL & $5.63 \pm 0.18$ & $6.35 \pm 0.10$ & $6.45 \pm 0.05$ & $6.96 \pm 0.25$ \\
     \bottomrule
-  \end{tabular}%
-  }
+  \end{tabular}
 \end{table*}

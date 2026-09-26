@@ -43,3 +43,14 @@ inches for four-across rows, and Figure 1 tiles are approximately 1.045 inches
 for its five-across row. Width and height are reduced by the same factor. Plot
 text is 8 point, matching the NeurIPS LaTeX `\footnotesize` and remaining
 visually close to the surrounding document text at native PDF size.
+
+Result tables use native LaTeX `tabular` with `booktabs`, not table images.
+After updating processed result CSVs, regenerate the classification and
+loader result tables from the repository root:
+
+```bash
+python -m evaluation.scripts.export_paper_result_tables
+```
+
+This includes the long-horizon table, which reports only ViT-Wee and ViT-Little
+with single-image augmentation, Mixup+CutMix, TreemapMix-SCE, and TreemapMix-PL.

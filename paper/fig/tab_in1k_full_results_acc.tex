@@ -1,20 +1,18 @@
 \begin{table*}[t]
-  \centering
-  \scriptsize
-  \setlength{\tabcolsep}{4.5pt}
-  \caption{Full ImageNet-1K Top-1 accuracy results under the matched
-  110-epoch protocol. Accuracy is reported in percent. Values are mean
-  $\pm$ one sample standard deviation over three seeds. Bold marks the best
-  mean within each model column.}
+  \caption{Full ImageNet-1K Top-1 accuracy (percent) results under the matched 110-epoch protocol. Values are mean $\pm$ one sample standard deviation over seeds 42, 43, and 44. Each method uses one run per seed. Bold marks the best mean within each model column.}
   \label{tab:in1k-full-results-acc}
-  \resizebox{\textwidth}{!}{%
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
   \begin{tabular}{@{}lcccc@{}}
     \toprule
     Method & ViT-Wee $\uparrow$ & ViT-Little $\uparrow$ & ViT-Medium $\uparrow$ & ViT-Betwixt $\uparrow$ \\
     \midrule
+    No Aug & $75.10 \pm 0.24$ & $76.05 \pm 0.14$ & $76.59 \pm 0.02$ & $77.18 \pm 0.14$ \\
+    Single-Image Aug & $77.94 \pm 0.15$ & $79.43 \pm 0.22$ & $79.80 \pm 0.04$ & $80.28 \pm 0.16$ \\
     Mixup+CutMix & $76.20 \pm 0.16$ & $78.84 \pm 0.05$ & $80.04 \pm 0.20$ & $81.09 \pm 0.13$ \\
     Mixup & $76.22 \pm 0.12$ & $78.64 \pm 0.10$ & $79.80 \pm 0.11$ & $80.84 \pm 0.09$ \\
-    CutMix & $77.04 \pm 0.99$ & $79.28 \pm 0.22$ & $80.02 \pm 0.24$ & $80.76 \pm 0.54$ \\
+    CutMix & $76.13 \pm 0.07$ & $79.12 \pm 0.07$ & $80.23 \pm 0.09$ & $81.23 \pm 0.12$ \\
     RICAP & $77.05 \pm 0.15$ & $78.41 \pm 0.14$ & $78.74 \pm 0.07$ & $79.13 \pm 0.11$ \\
     FMix & $76.73 \pm 0.10$ & $79.40 \pm 0.06$ & $80.30 \pm 0.07$ & $81.12 \pm 0.10$ \\
     GridMix & $76.39 \pm 0.17$ & $78.72 \pm 0.05$ & $79.50 \pm 0.09$ & $80.33 \pm 0.18$ \\
@@ -27,6 +25,5 @@
     TreemapMix-mixed & $77.65 \pm 0.20$ & $79.68 \pm 0.17$ & $80.75 \pm 0.09$ & $81.30 \pm 0.05$ \\
     TreemapMix-PL & $\mathbf{78.01 \pm 0.13}$ & $\mathbf{80.12 \pm 0.04}$ & $\mathbf{81.05 \pm 0.14}$ & $\mathbf{81.69 \pm 0.16}$ \\
     \bottomrule
-  \end{tabular}%
-  }
+  \end{tabular}
 \end{table*}

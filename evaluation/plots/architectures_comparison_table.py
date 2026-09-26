@@ -19,14 +19,11 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 from ..common import FIGURES_DIR, PROCESSED_DIR, setup_logging
 from ._style import (
     apply_paper_style,
-    bar_color,
-    method_display,
     savefig,
 )
 
@@ -94,86 +91,22 @@ def plot(
     title: str = "ImageNet-1K Top-1 accuracy by architecture",
     model_labels: Mapping[str, str] = MODEL_LABELS,
 ) -> plt.Figure:
-    """Render the comparison table without saving it."""
-    required = {"model", "type", "top1_acc_mean", "top1_acc_std"}
-    missing = required.difference(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {sorted(missing)}")
+    """Render the Top-1 panel using the shared publication-size table layout."""
+    from ._style import BASE_FONT_SIZE, DOUBLE_COL_WIDTH
+    from .architectures_top1_ece_table import _draw_metric_table
 
     apply_paper_style()
-    types = _ordered_types(df)
-    models = _ordered_models(df, model_labels)
-    means = df.pivot(index="model", columns="type", values="top1_acc_mean")
-    stds = df.pivot(index="model", columns="type", values="top1_acc_std")
-
-    cell_text: list[list[str]] = []
-    best_columns: list[int] = []
-    for model in models:
-        baseline = float(means.loc[model, "baseline"]) if "baseline" in types else np.nan
-        values = means.loc[model, types].to_numpy(dtype=float)
-        best_columns.append(int(np.nanargmax(values)))
-        row: list[str] = []
-        for method in types:
-            mean = float(means.loc[model, method])
-            std = float(stds.loc[model, method])
-            if method == "baseline" or not np.isfinite(baseline):
-                comparison = "reference"
-            else:
-                comparison = f"{mean - baseline:+.2f} pp"
-            row.append(f"{mean:.2f} ± {std:.2f}\n{comparison}")
-        cell_text.append(row)
-
-    row_labels = [model_labels.get(model, model) for model in models]
-    col_labels = [method_display(method) for method in types]
-    # This is a standalone comparison artifact rather than a paper-column
-    # panel, so allow enough width for full architecture names.
-    fig, ax = plt.subplots(figsize=(7.5, 2.75))
-    ax.axis("off")
-
-    table = ax.table(
-        cellText=cell_text,
-        rowLabels=row_labels,
-        colLabels=col_labels,
-        cellLoc="center",
-        rowLoc="right",
-        colLoc="center",
-        bbox=[0.21, 0.15, 0.78, 0.76],
+    fig, ax = plt.subplots(figsize=(DOUBLE_COL_WIDTH, 2.25))
+    _draw_metric_table(
+        ax, df, mean_column="top1_acc_mean", std_column="top1_acc_std",
+        scale=1.0, title=title, higher_is_better=True, model_labels=model_labels,
     )
-    table.auto_set_font_size(False)
-    table.set_fontsize(7.0)
-
-    # Header colours follow the project-wide method palette.
-    for column, method in enumerate(types):
-        cell = table[(0, column)]
-        cell.set_facecolor(bar_color(method))
-        cell.set_text_props(weight="bold")
-        cell.set_edgecolor("white")
-
-    # Use quiet grid lines, a neutral model-label column, and a distinct best
-    # cell per model. Row 0 is the header, hence the +1 offset.
-    for row, best_column in enumerate(best_columns, start=1):
-        label_cell = table[(row, -1)]
-        label_cell.set_facecolor("#F2F2F2")
-        label_cell.set_text_props(weight="bold")
-        label_cell.set_edgecolor("white")
-        for column in range(len(types)):
-            cell = table[(row, column)]
-            cell.set_edgecolor("white")
-            if column == best_column:
-                cell.set_facecolor("#D9F2D9")
-                cell.set_text_props(weight="bold")
-            else:
-                cell.set_facecolor("#FAFAFA" if row % 2 else "#F3F3F3")
-
-    ax.set_title(title, pad=4, weight="bold")
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.86, bottom=0.21)
     fig.text(
-        0.5,
-        0.035,
-        f"Mean ± std over {seed_description(df)}; second line is change from baseline.\n"
-        "Green marks the highest mean per model (higher is better).",
-        ha="center",
-        va="bottom",
-        fontsize=6.5,
+        0.5, 0.025,
+        f"Mean ± sample std over {seed_description(df)}.\n"
+        "Second line: change from Mixup+CutMix (pp); green: best mean.",
+        ha="center", va="bottom", fontsize=BASE_FONT_SIZE,
     )
     return fig
 

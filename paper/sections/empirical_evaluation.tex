@@ -2,7 +2,9 @@
 
 We evaluate whether TreemapMix improves model Top-1 accuracy and calibration under
 matched training recipes. The evaluation compares against mixed-sample
-augmentation baselines and examines long-horizon training behavior. Optimizer
+augmentation baselines, long-tailed data, long-horizon training, and data-loader
+cost. CIFAR-100 and additional architectures are evaluated in
+Appendices~\ref{app:cifar100-results} and~\ref{app:architecture-results}; optimizer
 robustness is deferred to Appendix~\ref{app:optimizer-robustness}.
 
 %\subsection{Experimental Setup}
@@ -20,10 +22,11 @@ substantially exceeded the observed requirements; minimum host-memory
 requirements were not separately profiled. ImageNet-1K is used as the primary
 reference benchmark~\citep{dengImageNetLargescaleHierarchical2009}.
 
-We restrict the model set to four compact ViT/EVA02-family variants implemented
+Our primary comparison uses four compact ViT/EVA02-family variants implemented
 in \texttt{timm}~\citep{fangEVA02VisualRepresentation2024}. Unless specified
-otherwise, each experiment is repeated with seeds 42, 43, and 44. To construct
-TreemapMix samples without duplicate classes, we use a balanced round-robin dataloader that provides class-diverse source images for each composed sample.
+otherwise, each experiment is repeated with seeds 42, 43, and 44. For the balanced-data experiments, we use a balanced round-robin dataloader
+that provides class-diverse source images for each composed sample. The
+ImageNet-LT experiment instead preserves the natural class frequencies.
 Appendix~\ref{app:appendix-aug-configs} gives an overview of the training configurations and hyperparameter settings.
 
 \paragraph{Comparison to Image Augmentation Baselines:}
@@ -38,6 +41,10 @@ TreemapMix-SCE and TreemapMix-PL losses, and use the same $\alpha$ schedule
 as the other TreemapMix variants at $K=4$.
 
 For TreemapMix, we evaluate three supervision variants: area-proportional soft cross-entropy (TreemapMix-SCE), the Plackett-Luce ranking loss (TreemapMix-PL), and their convex combination (TreemapMix-mixed). We compare these variants against Mixup, CutMix, Mixup+CutMix, RICAP, FMix, GridMix, ResizeMix, SaliencyMix, SmoothMix, TokenMix, and TLA.
+The seven additional methods, FMix through TLA, are reimplementations of
+methods available in OpenMixup~\citep{liOpenMixupOpenMixup2024}. For each,
+we evaluated eight hyperparameter configurations on ViT-Wee, selected the
+best-performing configuration, and fixed it across the four backbones.
 Figure~\ref{fig:in1k-main-results-top1} summarizes the ImageNet-1K
 results for Top-1 accuracy and ECE using 15 bins; higher is better for Top-1 accuracy,
 and lower is better for ECE. Appendix
@@ -47,21 +54,82 @@ Tables~\ref{tab:in1k-full-results-acc},
 \ref{tab:in1k-full-results-nll} report the full Top-1 accuracy, ECE, Brier,
 and negative log-likelihood (NLL) results.
 \input{fig/fig_in1k_main_results_top1}
-Across all four backbones, TreemapMix-PL gives the strongest Top-1 accuracy, while TreemapMix-SCE is the most calibration-oriented variant. The mixed objective usually falls between them, suggesting that the two supervision signals are not simply additive. Among the non-TreemapMix baselines, the strongest method depends on model size: RICAP and CutMix are competitive on ViT-Wee, SaliencyMix is strongest on ViT-Little, and ResizeMix is strongest on ViT-Medium and ViT-Betwixt.
+Across all four backbones, TreemapMix-PL gives the strongest Top-1 accuracy, while TreemapMix-SCE is the most calibration-oriented variant. The mixed objective usually falls between them, suggesting that the two supervision signals are not simply additive. Among the non-TreemapMix baselines, the strongest method depends on model size: single-image augmentation is strongest on ViT-Wee, SaliencyMix is strongest on ViT-Little, and ResizeMix is strongest on ViT-Medium and ViT-Betwixt.
 
 Calibration metrics show the opposite preference from Top-1 accuracy. TreemapMix-SCE gives the strongest overall calibration profile, especially for ECE and NLL, while Brier differences are small and sometimes favor other TreemapMix variants. This supports an accuracy-calibration trade-off between rank-oriented and probability-matching supervision.
 One explanation is that PL mainly constrains relative logit order, whereas SCE also penalizes probability magnitudes. This can improve discrimination while leaving calibration errors less constrained.
 
+\paragraph{Long-Tailed Recognition:}
+\label{sec:long-tail}
+We evaluate ImageNet-LT using the same four model scales and compare
+Mixup+CutMix, RICAP, TreemapMix-SCE, and TreemapMix-PL.
+Table~\ref{tab:long-tail-results} reports mean and sample standard deviation
+from the two available seeds, 42 and 43. The natural-frequency scheduler
+retains the original class counts instead of oversampling rare classes.
+The natural-mixed grouping procedure shuffles samples within each class,
+spreads them across the epoch, and locally shuffles the merged sequence
+before forming source groups. Within each complete group, cyclic views
+preserve the source-to-slot balance of Lemma~\ref{lem:cyclic-balancing};
+this balances exposure within a group, not class frequencies across the dataset.
+
+TreemapMix-PL achieves the highest Top-1 accuracy on all four backbones,
+improving over Mixup+CutMix by 1.40, 1.02, 1.31, and 1.82 percentage points
+for ViT-Wee, Little, Medium, and Betwixt, respectively. Calibration behaves
+differently from balanced ImageNet-1K: Mixup+CutMix has the lowest ECE on
+every backbone, and neither TreemapMix objective retains that advantage.
+TreemapMix-SCE also falls below the baseline in accuracy. Thus, the accuracy
+benefit of PL extends to this imbalanced setting, while probability
+calibration remains sensitive to the class distribution.
+
+\input{fig/tab_long_tail_results}
+
+\paragraph{Computational Performance:}
+\label{sec:runtime}
+Table~\ref{tab:augmentation-loader-runtime} isolates data-loader throughput
+and host-memory usage for six augmentation configurations. We use five
+runs (seeds 42--46), batch size 128, eight workers, and 100 measured batches
+after 20 warm-up batches and an initial first-batch measurement. This
+benchmark measures CPU-side loading and augmentation, without model
+forward or backward passes. Peak RSS and USS sum memory over the loader
+process tree; RSS can count shared pages more than once, while USS measures
+private memory. Memory is reported in GiB.
+
+Relative to the single-image recipe (1282.8 images/s), TreemapMix-SCE at
+$K=4$ reaches 1039.4 images/s, a 19.0\% throughput reduction;
+TreemapMix-PL at $K=6$ reaches 954.3 images/s, a 25.6\% reduction.
+The corresponding peak USS increases from 17.76 GiB to 20.16 and 21.74 GiB.
+Mixup+CutMix reaches 1223.4 images/s, a 4.6\% reduction.
+The recorded Mosaic configuration reaches 364.8 images/s with 25.18 GiB
+peak USS. Its runtime record is labeled Mosaic, and we retain that label
+because these measurements do not establish a separate RICAP timing result.
+TreemapMix therefore adds measurable host-side cost; these loader
+measurements alone do not quantify changes in end-to-end GPU training time.
+
+\input{fig/tab_augmentation_loader_runtime}
+
+\paragraph{Additional Datasets and Architectures:}
+The appendix extends the evaluation to CIFAR-100
+(Appendix~\ref{app:cifar100-results}) and to ConvNeXtV2-Nano, DeiT-Tiny,
+and Swin-Tiny on ImageNet-1K (Appendix~\ref{app:architecture-results}).
+TreemapMix-SCE achieves the lowest ECE on all these backbones.
+TreemapMix-PL achieves the highest Top-1 accuracy on all three additional
+ImageNet-1K architectures and three of the four CIFAR-100 backbones;
+ResizeMix leads on CIFAR-100 with ViT-Little.
+
 \paragraph{Long-Horizon Training Behavior:}
-We next test whether the method remains useful under longer training
-schedules than the default 110-epoch setting. We evaluate ViT-Wee,
-ViT-Little, and ViT-Betwixt under this longer schedule, although the
-single-image and CutMix controls are incomplete across backbones. These runs
-are a persistence check across model scales, not a full long-horizon study. As in the main experiments, we
-repeat each run with random seeds 42, 43, and 44. For each model, we compare
-Mixup+CutMix, CutMix, the available single-augmentation-only baseline,
-TreemapMix-SCE, and TreemapMix-PL. The long-horizon runs use 320 total epochs: 20 warmup epochs followed by 300 regular epochs.
-Table~\ref{tab:in1k-long-horizon-results} reports the long-horizon
-Top-1 accuracy and ECE results for the three backbones. The 320-epoch runs preserve the main ordering: TreemapMix-PL remains strongest for Top-1 accuracy, while TreemapMix-SCE gives the lowest ECE on all three models. The margins are smaller than in the 110-epoch comparison. Because the baseline coverage is incomplete and these runs reuse the TreemapMix hyperparameters selected for the shorter setting, they should be treated as evidence of persistence rather than a fully tuned long-horizon comparison.
+We test whether TreemapMix remains useful under longer training with
+ViT-Wee and ViT-Little. Table~\ref{tab:in1k-long-horizon-results} compares
+single-image augmentation, Mixup+CutMix, TreemapMix-SCE, and TreemapMix-PL
+using seeds 42, 43, and 44. The schedule comprises 320 total epochs:
+20 warmup epochs followed by 300 regular epochs.
+
+TreemapMix-PL gives the highest mean Top-1 accuracy, while TreemapMix-SCE
+gives the lowest mean ECE on both backbones. Relative to Mixup+CutMix,
+PL improves accuracy by 0.91 percentage points on ViT-Wee and 0.21 points
+on ViT-Little, smaller gains than under the 110-epoch schedule. The PL
+advantage over single-image augmentation is 0.27 and 0.83 points,
+respectively. These runs reuse the TreemapMix settings selected for the
+shorter schedule and support persistence of the gains rather than a fully
+tuned long-horizon comparison.
 
 \input{fig/tab_in1k_long_horizon}

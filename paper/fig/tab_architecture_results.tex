@@ -1,0 +1,19 @@
+\begin{table*}[htbp]
+  \caption{ImageNet-1K results on three additional architectures under the 110-epoch protocol. Values are mean $\pm$ one sample standard deviation over seeds 42, 43, and 44. Accuracy is reported in percent, and ECE in percentage points using 15 bins. Bold marks the best mean for each model and metric.}
+  \label{tab:architecture-results}
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lcccccc@{}}
+    \toprule
+     & \multicolumn{2}{c}{ConvNeXtV2-Nano} & \multicolumn{2}{c}{DeiT-Tiny} & \multicolumn{2}{c}{Swin-Tiny} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+    Method & Acc. $\uparrow$ & ECE $\downarrow$ & Acc. $\uparrow$ & ECE $\downarrow$ & Acc. $\uparrow$ & ECE $\downarrow$ \\
+    \midrule
+    Mixup+CutMix & $79.79 \pm 0.11$ & $9.48 \pm 0.13$ & $68.86 \pm 0.28$ & $12.34 \pm 0.27$ & $79.62 \pm 0.06$ & $7.50 \pm 0.13$ \\
+    RICAP & $79.08 \pm 0.10$ & $5.95 \pm 0.17$ & $71.71 \pm 0.04$ & $2.04 \pm 0.28$ & $78.68 \pm 0.07$ & $7.78 \pm 0.05$ \\
+    TreemapMix-SCE & $80.01 \pm 0.09$ & $\mathbf{2.74 \pm 0.27}$ & $71.78 \pm 0.26$ & $\mathbf{1.32 \pm 0.26}$ & $80.55 \pm 0.09$ & $\mathbf{2.52 \pm 0.11}$ \\
+    TreemapMix-PL & $\mathbf{80.45 \pm 0.10}$ & $6.82 \pm 0.07$ & $\mathbf{71.81 \pm 0.07}$ & $2.71 \pm 0.15$ & $\mathbf{80.57 \pm 0.12}$ & $6.58 \pm 0.06$ \\
+    \bottomrule
+  \end{tabular}
+\end{table*}

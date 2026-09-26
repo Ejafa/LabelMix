@@ -30,7 +30,7 @@ Pipeline
    ``mixed``                               ``labelmix-mixed``
    ``pl-loss``                             ``labelmix-pl``
    ``soft-ce``                             ``labelmix-sce``
-   ``bare``                                ``bare``
+   ``__bare`` (including disabled-mixing suffixes) ``bare``
    ``unbalanced`` (+ secondary keyword k)  ``unbalanced-<k>``
    ``unbalanced`` (no secondary keyword)   ``unbalanced-noaug`` (default)
    =====================================  =========================
@@ -201,6 +201,11 @@ def sanitize_name(name: str) -> str:
     if not isinstance(name, str):
         return "unknown"
     n = name.lower()
+    # The explicit single-image recipe can include disabled augmentation
+    # settings, e.g. ``__bare_cutmix=0_cutmix_minmax=None_mixup=0__``.
+    # Those parameter names are not evidence that mixing was enabled.
+    if any(part == "bare" or part.startswith("bare_") for part in n.split("__")):
+        return "unbalanced-bare" if "unbalanced" in n else "bare"
     if "unbalanced" in n:
         for needle, label in _UNBALANCED_SECONDARIES:
             if needle in n:

@@ -39,6 +39,10 @@ training recipes. TreemapMix-SCE gives the strongest calibration, while
 TreemapMix-PL gives the strongest Top-1 accuracy and improves area-logit
 alignment. COCO transfer experiments further suggest that TreemapMix-pretrained
 representations remain useful for detection and instance segmentation.
+The accuracy--calibration pattern also extends to the additional ImageNet-1K
+architectures and largely to CIFAR-100. On ImageNet-LT, PL improves accuracy,
+but SCE loses its calibration advantage. Loader measurements quantify the
+additional host-side throughput and memory cost.
 
 Despite these improvements, TreemapMix relies on class-diverse source groups
 and is most effective when mixed images contain distinct target labels.

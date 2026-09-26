@@ -769,6 +769,48 @@ the same runs.
 
 \input{fig/tab_in1k_full_results_brier}
 
+\clearpage
+\section{CIFAR-100 Results}
+\label{app:cifar100-results}
+We evaluate all 16 augmentation settings on CIFAR-100 with the same four
+ViT backbones, 256-pixel inputs, and the 110-epoch protocol. Each result
+uses seeds 42, 43, and 44. TreemapMix uses the settings from the primary
+comparison: $K=4$ for SCE and the mixed objective, $K=6$ for PL, and a
+cosine $\alpha$ schedule from $0.1$ to $0.5$.
+Figure~\ref{fig:cifar100-results} reports Top-1 accuracy and ECE with 15 bins.
+These experiments assess transfer of the augmentation recipes to a smaller
+dataset under our training setup.
+
+TreemapMix-SCE has the lowest ECE on all four backbones, ranging from
+1.62 to 1.87 percentage points. TreemapMix-PL has the highest Top-1 accuracy
+on ViT-Wee, Medium, and Betwixt, reaching 75.72\%, 75.97\%, and 76.39\%,
+respectively. On ViT-Little, ResizeMix reaches 75.54\% compared with
+75.42\% for PL. The mixed objective does not consistently improve on either
+individual objective. These results retain the accuracy--calibration
+trade-off, without a uniform accuracy advantage across every model.
+
+\input{fig/fig_cifar100_results}
+
+\clearpage
+\section{Cross-Architecture Results}
+\label{app:architecture-results}
+To test whether the ImageNet-1K results extend beyond the four primary
+ViT/EVA02 variants, we evaluate ConvNeXtV2-Nano, DeiT-Tiny, and Swin-Tiny
+under the matched 110-epoch protocol with seeds 42, 43, and 44.
+We compare Mixup+CutMix, RICAP, TreemapMix-SCE, and TreemapMix-PL, retaining
+the TreemapMix settings selected for the primary experiments.
+Table~\ref{tab:architecture-results} reports accuracy and ECE.
+
+PL gives the highest mean accuracy for each architecture, improving over
+Mixup+CutMix by 0.66, 2.95, and 0.95 percentage points for ConvNeXtV2-Nano,
+DeiT-Tiny, and Swin-Tiny. SCE has the lowest ECE for all three, at 2.74,
+1.32, and 2.52 percentage points, respectively. The PL--SCE accuracy gap is
+small on DeiT-Tiny and Swin-Tiny relative to the observed seed variation;
+we report the mean ordering without claiming statistical significance.
+
+\input{fig/tab_architecture_results}
+
+\clearpage
 \section{COCO Transfer Details}
 \label{app:det-hparams}
 
@@ -799,11 +841,6 @@ corresponding to the main-paper COCO transfer results in
 Table~\ref{tab:coco-transfer-results}.
 
 \input{fig/tab_coco_transfer_box_ap50}
-% Uncomment for the camera-ready version only.
-% \begin{ack}
-% Add acknowledgments, funding disclosures, and competing-interest disclosures
-% here after acceptance.
-% \end{ack}
 
 \section{Implementation Details}
 \paragraph{Loss functions in code}
@@ -821,5 +858,9 @@ We include concise PyTorch reference implementations of TreemapMix-SCE
 
 
 \paragraph{Runtime overhead}
-In our ImageNet-1K experiments, we used a dataloader prefetch factor of 2. Under this configuration, layout generation and image compositing did not produce a material increase in end-to-end per-epoch training time in our implementation: augmented batches were prepared ahead of GPU consumption, so training remained GPU-bound rather than augmentation-bound. This means TreemapMix adds CPU-side data-loading work, but we did not observe it becoming the throughput bottleneck
-under the hardware and dataloader settings used in our experiments.
+Section~\ref{sec:runtime} and Table~\ref{tab:augmentation-loader-runtime}
+report measured loader throughput and host-memory usage. The training
+configuration uses a prefetch factor of 2, which allows CPU preparation to
+overlap GPU computation. The isolated loader benchmark does not measure
+how much of this overhead is hidden during training, so it does not
+establish an end-to-end per-epoch timing comparison.

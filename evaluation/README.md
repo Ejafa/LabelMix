@@ -151,3 +151,55 @@ evaluation/
   analysis code lives in importable modules.
 * **Shared style.** Every plot calls `_style.apply_paper_style()` so the
   paper has uniform typography and sizing.
+
+
+## Rebuttal results used by the paper
+
+The existing ImageNet summaries already include all seven OpenMixup methods.
+`in1k_merged_openmixup.csv` reproduces their metrics. Its two additional complete
+`unbalanced-noaug` groups are diagnostic controls excluded by the main plot.
+Explicit `bare` recipes remain single-image augmentation even when their names
+contain disabled settings such as `cutmix=0` and `mixup=0`. These rows must
+not be pooled with CutMix. The long-horizon paper table reports only ViT-Wee
+and ViT-Little with single-image augmentation, Mixup+CutMix, SCE, and PL.
+
+Regenerate ImageNet, CIFAR-100, and loader summaries with:
+
+```bash
+python -m evaluation.scripts.aggregate_per_experiment \
+  --input evaluation/data/raw/eval_csv/in1k_merged_openmixup.csv \
+  --output evaluation/data/processed/in1k_per_experiment.csv \
+  --table-out evaluation/data/processed/in1k_per_experiment.md
+python -m evaluation.scripts.aggregate_per_experiment \
+  --input evaluation/data/raw/eval_csv/cifar100.csv \
+  --output evaluation/data/processed/cifar100_per_experiment.csv \
+  --table-out evaluation/data/processed/cifar100_per_experiment.md
+python -m evaluation.scripts.process_augmentation_loader_benchmark
+```
+
+The paper uses the supplied `long_tail_per_experiment_short.csv` (seeds 42
+and 43) and `architectures_per_experiment_short.csv` (seeds 42, 43, and 44).
+Do not describe the long-tail results as three-seed estimates. Classification
+ECE is stored as a fraction and displayed in percentage points. Runtime memory
+columns named `_mb` store MiB and are displayed as GiB. Throughput reduction is
+computed from the ratio of configuration mean throughput to the single-image
+reference mean; it is not an end-to-end training slowdown.
+
+Export native LaTeX tables and render the comparison figures with:
+
+```bash
+python -m evaluation.scripts.export_paper_result_tables
+python -m evaluation.scripts.make_all_plots --only \
+  in1k_per_experiment cifar100_per_experiment
+```
+
+All paper tables use native LaTeX `tabular` and `booktabs` rules. The result
+table exporter reads the processed CSVs and writes the eight result tables in
+`paper/fig/`; no rendered table images are used by the paper.
+
+The runtime CSV contains a sixth configuration labeled `mosaic` that is absent
+from the current benchmark runner. Preserve its recorded label rather than
+claiming a separately verified RICAP runtime measurement. The data summarize
+five runs, batch size 128, eight workers, and 100 measured batches after 20
+warm-up batches (plus an initial first-batch measurement). They measure loading
+and augmentation without model forward or backward passes.
