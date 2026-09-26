@@ -4,8 +4,8 @@
 % \PassOptionsToPackage{numbers, compress}{natbib}
 \PassOptionsToPackage{numbers,sort&compress}{natbib}
 
-% Default: anonymous main-track submission.
-\usepackage{neurips_2026}
+% Camera-ready main-track version.
+\usepackage[main,final]{neurips_2026}
 
 % Common packages.
 \usepackage[utf8]{inputenc}
@@ -34,21 +34,45 @@
 % \newcommand{\mainresultsmetriccolwidth}{1.28cm}
 \newtheorem{lemma}{Lemma}
 
-% Submission notes:
-% - Main text is limited to 9 content pages, including figures and tables.
+% Camera-ready notes:
+% - Main text is limited to 10 content pages, including figures and tables.
 % - References, appendices, and the checklist do not count toward that limit.
-% - Keep the submission anonymous.
 % - For a public preprint, switch to \usepackage[preprint]{neurips_2026}.
-% - For a camera-ready version, switch to \usepackage[main,final]{neurips_2026}.
 
 \title{TreemapMix: Dirichlet-Controlled Multi-Image Augmentation for Probability and Ordinal Supervision}
 
-% \author{%
-%   Anonymous Authors \\
-%   Anonymous Institution \\
-%   Anonymous City, Country \\
-%   \texttt{anonymous@anonymous.anon}
-% }
+\author{%
+  Ejafa Bassam\thanks{Equal contribution.} \\
+  Peking University \\
+  Beijing, China \\
+  \texttt{ejafabassam@stu.pku.edu.cn}
+  \And
+  Konstantin Garbers\footnotemark[1] \\
+  Peking University \\
+  Beijing, China \\
+  \texttt{konstantin.garbers25@stu.pku.edu.cn}
+  \AND
+  Yinsheng Gu \\
+  Beijing University of Posts \\
+  and Telecommunications \\
+  Beijing, China \\
+  \texttt{gys@bupt.edu.cn}
+  \And
+  Dalton Jens \\
+  Peking University \\
+  Beijing, China \\
+  \texttt{daltonjens@gmail.com}
+  \AND
+  Jiaxu Qian \\
+  Microsoft, Peking University \\
+  Beijing, China \\
+  \texttt{gmac0q@gmail.com}
+  \And
+  Guyue Liu \\
+  Peking University \\
+  Beijing, China \\
+  \texttt{guyue@pku.edu.cn}
+}
 
 \begin{document}
 
@@ -68,14 +92,12 @@ We thank Tencent for providing the GPU resources used in this research.
 \end{ack}
 
 \clearpage
-\appendix
-
-\input{sections/appendix}
-
-\clearpage
-
 \bibliographystyle{plainnat}
 \bibliography{references}
+
+\clearpage
+\appendix
+\input{sections/appendix}
 
 \clearpage
 \input{checklist}
