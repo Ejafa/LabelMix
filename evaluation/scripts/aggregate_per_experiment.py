@@ -40,8 +40,9 @@ Pipeline
 
 2. **Aggregate** by the composite key ``(type, dataset, model, long_horizon)``:
    for each numeric metric column compute mean & std across all seeds available
-   for that group. Groups with fewer than 3 seeds are tagged
-   ``status=unfinished`` with the list of missing seeds (from {42, 43, 44});
+   for that group. Groups missing any expected seed are tagged
+   ``status=unfinished`` with the list of missing seeds (by default from
+   {42, 43, 44}; configurable via ``--expected-seeds``);
    full groups are ``complete``. **Unfinished groups are dropped from the
    output** (they are listed in the log only).
 
@@ -284,7 +285,11 @@ def round_aggregated(agg: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def aggregate_by_type(df: pd.DataFrame, metrics: Iterable[str]) -> pd.DataFrame:
+def aggregate_by_type(
+    df: pd.DataFrame,
+    metrics: Iterable[str],
+    expected_seeds: Sequence[int] = _EXPECTED_SEEDS,
+) -> pd.DataFrame:
     """Group sanitized rows by ``(type, dataset, model)`` and compute mean/std
     of each metric, plus seed completeness metadata.
     """
@@ -312,7 +317,7 @@ def aggregate_by_type(df: pd.DataFrame, metrics: Iterable[str]) -> pd.DataFrame:
             present_seeds = sorted({int(s) for s in group["seed"].dropna().tolist()})
         else:
             present_seeds = []
-        missing = [s for s in _EXPECTED_SEEDS if s not in present_seeds]
+        missing = [s for s in expected_seeds if s not in present_seeds]
         row: dict = {
             "type": t,
             "dataset": dset,
@@ -321,7 +326,7 @@ def aggregate_by_type(df: pd.DataFrame, metrics: Iterable[str]) -> pd.DataFrame:
             "n_seeds": len(present_seeds),
             "seeds_present": ",".join(str(s) for s in present_seeds),
             "missing_seeds": ",".join(str(s) for s in missing) if missing else "",
-            "status": "complete" if not missing and len(present_seeds) >= len(_EXPECTED_SEEDS) else "unfinished",
+            "status": "complete" if not missing else "unfinished",
         }
         for m in metrics:
             vals = group[m].dropna().to_numpy(dtype=float)
@@ -403,6 +408,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sanitized-out", type=Path, default=None,
                    help="Optional path to dump the sanitized (non-aggregated) CSV.")
     p.add_argument("--metrics", nargs="*", default=list(_DEFAULT_METRICS))
+    p.add_argument(
+        "--expected-seeds",
+        nargs="+",
+        type=int,
+        default=list(_EXPECTED_SEEDS),
+        help="Seeds required for a group to be emitted (default: 42 43 44).",
+    )
     p.add_argument("--table-out", type=Path, default=None)
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
@@ -437,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
         sanitized.to_csv(args.sanitized_out, index=False)
         _logger.info("Wrote sanitized rows -> %s", args.sanitized_out)
 
-    agg = aggregate_by_type(sanitized, args.metrics)
+    agg = aggregate_by_type(sanitized, args.metrics, args.expected_seeds)
 
     # Drop unfinished groups from the output (log which ones were removed so
     # the user still gets visibility into what is still running).
