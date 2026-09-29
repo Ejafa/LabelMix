@@ -1,8 +1,9 @@
-\begin{table*}[t]
+\begin{table*}[!htbp]
   \centering
-  \caption{ViT baseline optimizer and training hyperparameters from the YAML
-  configs in \texttt{assets/configs}. Backend-specific runtime defaults inside
-  \texttt{timm} are not expanded here.}
+  \caption{ViT baseline optimizer and training hyperparameters for the main comparison. Opt. denotes optimizer, LR learning rate, WD
+  weight decay, and EMA exponential moving average of model weights. NAdamW
+  is Nesterov-accelerated Adam with decoupled weight decay. DropPath is the
+  stochastic-depth probability.}
   \label{tab:baseline-hparams-train}
   \begin{tabular}{lcccccc}
     \toprule

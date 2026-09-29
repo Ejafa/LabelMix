@@ -1,101 +1,3 @@
-% \section{Introduction}
-
-% Mixed-sample data augmentation improves visual recognition by training models on composed examples with mixed labels. Widely used representative methods such as Mixup~\citep{mixup} and CutMix~\citep{cutmix} have become common baselines and recipe components in modern image-classification training~\citep{wightmanResNetStrikesBack2021, pmlr-v139-touvron21a, touvronDeiTIIIRevenge2022, liOpenMixupOpenMixup2024}. However, these pairwise methods provide limited control over the number of source images, the visible area assigned to each source, and the supervision signal induced by the composition.
-
-% Mixing more than two images can expose several classes in one training example and vary the relative visual evidence assigned to each class. Existing multi-image augmentations demonstrate this value: RICAP~\citep{takahashiDataAugmentationUsing2020} combines four cropped images with area-weighted labels for classification, while Mosaic-style augmentation composes multiple images similarly in object-detection pipelines~\citep{bochkovskiyYOLOv4OptimalSpeed2020}. These methods typically use a fixed small number of source images and a restricted layout family. More importantly, they do not treat the region-area distribution as a controllable object that can shape both the visual composition and the induced supervision. This control matters because region areas provide both probability targets and a weak ordinal signal over the classes present in the composed image.
-
-% We propose TreemapMix, a distribution-controlled multi-image augmentation that makes this composition structure explicit. TreemapMix samples region weights from a Dirichlet distribution and assigns them to area-proportional regions using a treemap partition~\citep{squarifiedtreemap}. The Dirichlet concentration parameter controls whether the composed image contains a dominant region or a more uniform set of regions, while the treemap layout converts the sampled weights into visible regions whose areas are known by construction. This design separates the mixture distribution from the spatial layout mechanism and allows the same composed image to provide two complementary supervision signals. TreemapMix with soft cross-entropy (TreemapMix-SCE) matches predicted probabilities to visible region areas. TreemapMix with a Plackett-Luce objective (TreemapMix-PL) uses the ordering of visible region areas as weak ordinal supervision, connecting mixed-image augmentation to listwise ranking objectives~\citep{luce1959, plackett1975, listmle}.
-
-% We evaluate TreemapMix under a matched ImageNet-1K~\citep{dengImageNetLargescaleHierarchical2009} training protocol across Vision Transformer~\citep{dosovitskiyImageWorth16x162021a, fangEVA02VisualRepresentation2024} backbones and compare against single-image augmentation, Mixup, CutMix, Mixup+CutMix, and RICAP. Under this matched protocol, TreemapMix-PL achieves the strongest Top-1 accuracy across the evaluated backbones, while TreemapMix-SCE gives the strongest confidence-quality results across ECE, NLL, and Brier score. Additional long-horizon and optimizer-sensitivity experiments test whether these trends persist beyond a single short training setting. We also analyze area-logit alignment to evaluate whether the ranking objective changes model behavior on composed images, and we conduct instance-segmentation transfer experiments on COCO~\citep{linMicrosoftCOCOCommon2015} to test whether TreemapMix-pretrained features remain useful beyond classification.
-
-% This paper makes the following contributions:
-% \begin{enumerate}
-%     \renewcommand{\labelenumi}{\roman{enumi}.}
-%     \item We introduce TreemapMix, a Dirichlet-controlled multi-image augmentation that supports variable-source composition with explicit area-proportional layouts.
-%     \item We formulate two supervision objectives from the same composed image: area-proportional soft cross-entropy for probability matching and Plackett-Luce ranking for ordinal supervision.
-%     \item We analyze how the Dirichlet concentration parameter controls target variability, probability-matching supervision, and ranking emphasis.
-%     \item We provide a matched empirical evaluation on ImageNet-1K, calibration metrics, area-logit alignment analysis, and instance-segmentation transfer experiments on COCO.
-% \end{enumerate}
-
-
-% \section{Introduction}
-
-% Data augmentation is central to modern image classification, but most common
-% transformations preserve the one-image, one-label training assumption. Mixed
-% sample augmentation relaxes this assumption by composing examples and mixing
-% their labels. Mixup~\citep{mixup} and CutMix~\citep{cutmix} are widely used
-% baselines and recipe components in modern image-classification
-% training~\citep{
-% wightmanResNetStrikesBack2021,
-% pmlr-v139-touvron21a,
-% touvronDeiTIIIRevenge2022,
-% liOpenMixupOpenMixup2024}. However, these pairwise methods provide limited
-% compositionality: Mixup globally interpolates two images, often producing
-% visually unnatural samples, while CutMix exposes the model to only two source
-% labels at a time.
-
-% Natural scenes often contain multiple objects, suggesting that image mixing
-% should support multi-object compositions with controlled label contributions.
-% Existing multi-image augmentations demonstrate this value: RICAP~\citep{
-% takahashiDataAugmentationUsing2020} combines four cropped images with
-% area-weighted labels for classification, while Mosaic-style augmentation
-% combines multiple images in object-detection pipelines~\citep{
-% bochkovskiyYOLOv4OptimalSpeed2020}. These methods typically use a fixed small
-% number of sources and restricted layouts. More importantly, they do not treat
-% the region-area distribution as a controllable object that shapes both the
-% visual composition and the induced supervision.
-
-% We propose TreemapMix, a distribution-controlled $K$-way image-mixing
-% augmentation. TreemapMix samples region weights from a Dirichlet distribution
-% and converts them into non-overlapping area-proportional regions using a
-% squarified treemap layout~\citep{squarifiedtreemap}. The Dirichlet
-% concentration controls whether the composed image contains a dominant region or
-% a more balanced set of regions, while the treemap layout preserves explicit
-% control over the visible area assigned to each source. To avoid label-to-area
-% and label-to-rank bias, TreemapMix generates $K$ cyclic views from each group of
-% $K$ source images, so every source appears once in every region slot. Random
-% area-preserving symmetries further increase spatial diversity without changing
-% the target weights. Thus, TreemapMix maps $K$ input images to $K$ mixed images
-% and preserves the training sample count.
-
-% TreemapMix also exposes a supervision question: should region area be treated
-% as a calibrated probability target, or only as a weak ordinal signal? Area can
-% be informative, but it may not exactly reflect semantic evidence because large
-% regions may contain background and small regions may contain discriminative
-% object parts. We therefore study two objectives. TreemapMix with soft
-% cross-entropy, TreemapMix-SCE, matches predicted probabilities to the
-% area-derived soft target. TreemapMix with a Plackett--Luce objective,
-% TreemapMix-PL, converts area weights into a ranking over target classes and
-% optimizes a listwise ranking likelihood~\citep{luce1959,plackett1975,listmle}.
-
-% We evaluate TreemapMix under a matched ImageNet-1K~\citep{
-% dengImageNetLargescaleHierarchical2009} protocol across Vision Transformer
-% backbones~\citep{
-% dosovitskiyImageWorth16x162021a,
-% fangEVA02VisualRepresentation2024}. Compared with single-image augmentation,
-% Mixup, CutMix, Mixup+CutMix, and RICAP, TreemapMix-PL achieves the strongest
-% Top-1 accuracy across the evaluated backbones, while TreemapMix-SCE gives the
-% strongest confidence-quality results across expected calibration error,
-% negative log-likelihood, and Brier score. Additional long-horizon,
-% optimizer-sensitivity, area-logit alignment, and COCO transfer experiments
-% show that the trends persist beyond the main classification setting~\citep{
-% linMicrosoftCOCOCommon2015}.
-
-% Our contributions are:
-% \begin{enumerate}
-%     \renewcommand{\labelenumi}{\roman{enumi}.}
-%     \item We introduce TreemapMix, a Dirichlet-controlled $K$-way image-mixing
-%     augmentation with explicit area-proportional treemap layouts.
-%     \item We propose cyclic source-to-region assignment to balance label
-%     exposure to region sizes and rank positions while preserving sample count.
-%     \item We formulate two supervision objectives: area-proportional soft
-%     cross-entropy for probability matching and Plackett--Luce ranking for
-%     ordinal supervision.
-%     \item We provide matched ImageNet-1K experiments, calibration analysis,
-%     area-logit diagnostics, and COCO transfer results.
-% \end{enumerate}
-
-
 \section{Introduction}
 
 Image classification is usually formulated as learning one target label from one
@@ -152,11 +54,9 @@ listwise objective~\citep{luce1959,plackett1975,listmle}.
 
 We evaluate TreemapMix on ImageNet-1K~\citep{
 dengImageNetLargescaleHierarchical2009} under matched training recipes across
-multiple modern image-classification backbones. Compared with single-image
-augmentation, Mixup, CutMix, Mixup+CutMix, and RICAP, TreemapMix-PL achieves
+multiple modern image-classification backbones. Compared with 13 baseline configurations, TreemapMix-PL achieves
 the strongest Top-1 accuracy across the evaluated backbones, while
-TreemapMix-SCE gives the best confidence-quality results across expected
-calibration error, negative log-likelihood, and Brier score. Further
+TreemapMix-SCE gives the lowest expected calibration error (ECE). Further
 diagnostics show that TreemapMix-PL improves alignment between logits and the
 area-induced ordering of composed regions, and COCO transfer experiments
 indicate that TreemapMix-pretrained representations remain useful for detection

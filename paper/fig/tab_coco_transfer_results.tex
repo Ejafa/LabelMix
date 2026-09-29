@@ -2,11 +2,10 @@
   \centering
   \small
 \caption{COCO transfer results after ViTDet-style Mask R-CNN fine-tuning from
-the main ImageNet-1K experiment checkpoints with 3 seeds per method. TreemapMix-PL achieves the best box and mask AP for both ViT-Wee and
-ViT-Betwixt, while TreemapMix-SCE also improves over Mixup+CutMix and RICAP.
+the main ImageNet-1K experiment checkpoints with three seeds per method.
 Values are mean $\pm$ standard deviation over these three transferred seeds;
-higher is better. Corresponding AP50 results are reported in Appendix
-Table~\ref{tab:coco-transfer-ap50}.}
+higher is better. Box AP evaluates bounding boxes and mask AP evaluates instance masks. AP is averaged over IoU thresholds from 0.50 to 0.95 in
+increments of 0.05.}
   \label{tab:coco-transfer-results}
   \begin{tabular}{lcccc}
     \toprule

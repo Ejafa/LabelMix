@@ -1,29 +1,3 @@
-
-
-
-
-% We introduced TreemapMix, a Dirichlet-controlled $K$-way image-mixing
-% augmentation that composes multiple labeled images into area-proportional
-% treemap layouts while preserving the training sample count. Cyclic views expose
-% each source image to different region sizes and rank positions, enabling two
-% objectives from the same composed image: area-weighted soft cross-entropy for
-% probability matching and Plackett-Luce ranking for area-induced ordinal
-% supervision.
-
-% TreemapMix improves ImageNet-1K classification under matched training recipes:
-% TreemapMix-SCE gives the strongest calibration, while TreemapMix-PL gives the
-% strongest Top-1 accuracy and improves area-logit alignment. COCO transfer
-% experiments further suggest that TreemapMix-pretrained representations remain
-% useful for detection and instance segmentation.
-
-% Despite these improvements, TreemapMix relies on class-diverse source groups
-% and is most effective when mixed images contain distinct target labels. Repeated
-% labels require area aggregation, which reduces the number of ranked classes and
-% can weaken the Plackett-Luce signal, especially on imbalanced or long-tailed
-% datasets. Future work could develop adaptive grouping and composition schedules,
-% and extend area-induced relative supervision to contrastive or self-supervised
-% learning.
-
 \section{Conclusion}
 
 We introduced TreemapMix, a Dirichlet-controlled $K$-way image-mixing

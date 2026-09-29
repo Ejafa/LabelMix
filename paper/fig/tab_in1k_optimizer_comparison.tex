@@ -1,10 +1,7 @@
 \begin{table*}[t]
   \centering
-\caption{ImageNet-1K optimizer comparison under matched settings. Across AdamW,
-Muon, and NAdamW, the same pattern largely holds: TreemapMix-PL tends to give
-the highest accuracy, while TreemapMix-SCE gives the lowest ECE for every
-model--optimizer pair. Accuracy is reported in percent and ECE in percentage
-points; bold marks the best mean within each row.}
+\caption{ImageNet-1K optimizer comparison under the settings in Appendix~\ref{app:optimizer-robustness}, using one run with seed 42 per configuration. Accuracy is reported in percent and ECE in percentage
+points; bold marks the best value for each metric within each row.}
   \label{tab:in1k-optimizer-results}
   \begin{tabular}{llcccccc}
     \toprule

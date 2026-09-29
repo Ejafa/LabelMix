@@ -561,7 +561,8 @@ When the $K$ source labels are distinct, $m_c=1$ for every participating class a
 %%%%%%%%%%%%
 
 
-\section{Experimental Protocol and Hyperparameters}
+\section{Implementation Details}
+\subsection{Experimental Protocol and Hyperparameters}
 \label{app:appendix-aug-configs}
 
 Tables~\ref{tab:timm-adaptations}, \ref{tab:baseline-hparams-aug}, and
@@ -602,8 +603,175 @@ Table~\ref{tab:baseline-hparams-aug}.
 
 \input{fig/tab_baseline_hparams_training}
 
+\subsection{COCO transfer setup}
+\label{app:det-hparams}
 
-\section{ImageNet-1K Hyperparameter Sensitivity}
+Table~\ref{tab:det-hparams} summarizes the ViTDet-style configurations used
+for the COCO transfer experiments. In all cases, \texttt{train.init\_checkpoint}
+is set to the corresponding checkpoint from the main classification
+experiments, and we fine-tune a Mask R-CNN model with a ViTDet-style adapter
+for 30 epochs on COCO.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Hyperparameters for the object-detection transfer experiments with
+  a ViTDet-style adapter and Mask R-CNN on COCO.}
+  \label{tab:det-hparams}
+  \begin{tabular}{lccccccc}
+    \toprule
+    Model & Embed Dim & Depth & Heads & MLP Ratio & Drop Path & LR & Layer Decay \\
+    \midrule
+    ViT-Wee & 256 & 14 & 4 & 5.0 & 0.1 & 6.0e-4 & 0.7 \\
+    ViT-Betwixt & 640 & 12 & 10 & 4.0 & 0.1 & 8.0e-4 & 0.7 \\
+    \bottomrule
+  \end{tabular}%
+\end{table*}
+
+\subsection{Loss functions in code}
+\label{app:loss-code}
+
+We include concise PyTorch reference implementations of TreemapMix-SCE
+(Figure~\ref{fig:treemapmix-sce-code}), TreemapMix-PL
+(Figure~\ref{fig:treemapmix-pl-code}), and the mixed-loss variant
+(Figure~\ref{fig:treemapmix-mixed-code}) used in our experiments.
+
+\input{fig/fig_treemapmix_sce_code}
+
+\input{fig/fig_treemapmix_pl_code}
+
+\input{fig/fig_treemapmix_mixed_code}
+
+\subsection{Runtime overhead}
+\label{app:runtime-overhead}
+Table~\ref{tab:augmentation-loader-runtime} isolates data-loader throughput
+and host-memory usage for six augmentation configurations. The benchmark
+measures CPU-side loading and augmentation without model forward or backward
+passes. Peak resident set size (RSS) and unique set size (USS) are summed over
+the loader process tree. RSS can count shared pages more than once, while USS
+measures private memory. Memory is reported in GiB.
+
+Relative to the single-image recipe (1282.8 images/s), TreemapMix-SCE at
+$K=4$ reaches 1039.4 images/s, a 19.0\% throughput reduction;
+TreemapMix-PL at $K=6$ reaches 954.3 images/s, a 25.6\% reduction.
+The corresponding peak USS increases from 17.76 GiB to 20.16 and 21.74 GiB.
+Mixup+CutMix reaches 1223.4 images/s, a 4.6\% reduction.
+The RICAP configuration reaches 364.8 images/s with 25.18 GiB peak USS.
+TreemapMix therefore adds measurable host-side cost; these loader
+measurements alone do not quantify changes in end-to-end GPU training time.
+
+\input{fig/tab_augmentation_loader_runtime}
+
+The training configuration uses a prefetch factor of 2, which allows CPU
+preparation to overlap GPU computation. The isolated loader benchmark does
+not measure how much of this overhead is hidden during training, so it does
+not establish an end-to-end per-epoch timing comparison.
+
+
+\clearpage
+\section{Additional Experiments}
+\subsection{Full ImageNet-1K Results}
+\label{app:in1k-confidence-results}
+
+Tables~\ref{tab:in1k-full-results-acc} and
+\ref{tab:in1k-full-results-ece} report the full ImageNet-1K
+main-comparison Top-1 accuracy and ECE results, respectively.
+
+\input{fig/tab_in1k_full_results_acc}
+
+\input{fig/tab_in1k_full_results_ece}
+
+\subsection{Long-Tailed Recognition}
+\label{app:long-tail-results}
+
+We evaluate ImageNet-LT~\citep{tang2020longtailed} using the same four model
+scales and compare Mixup+CutMix, RICAP, TreemapMix-SCE, and TreemapMix-PL.
+For TreemapMix, we use the natural-frequency schedule: it independently
+shuffles each class bucket and takes one sample per nonempty class per row
+until each bucket is exhausted, preserving the original class frequencies.
+
+TreemapMix-PL achieves the highest Top-1 accuracy on all four backbones,
+improving over Mixup+CutMix by 1.40, 1.02, 1.31, and 1.82 percentage points
+for ViT-Wee, Little, Medium, and Betwixt, respectively. Calibration behaves
+differently from balanced ImageNet-1K: Mixup+CutMix has the lowest ECE on
+every backbone, and neither TreemapMix objective retains that advantage.
+TreemapMix-SCE also falls below the baseline in accuracy. Thus, the accuracy
+benefit of PL extends to this imbalanced setting, while probability
+calibration remains sensitive to the class distribution.
+
+\input{fig/tab_long_tail_results}
+
+\clearpage
+\subsection{Cross-Architecture Results}
+\label{app:architecture-results}
+To test whether the ImageNet-1K results extend beyond the four primary
+ViT/EVA02 variants, we evaluate ConvNeXtV2-Nano, DeiT-Tiny, and Swin-Tiny
+under the matched 110-epoch protocol with seeds 42, 43, and 44.
+We compare Mixup+CutMix, RICAP, TreemapMix-SCE, and TreemapMix-PL, retaining
+the TreemapMix settings selected for the primary experiments.
+Table~\ref{tab:architecture-results} reports accuracy and ECE.
+
+PL gives the highest mean accuracy for each architecture, improving over
+Mixup+CutMix by 0.66, 2.95, and 0.95 percentage points for ConvNeXtV2-Nano,
+DeiT-Tiny, and Swin-Tiny. SCE has the lowest ECE for all three, at 2.74,
+1.32, and 2.52 percentage points, respectively. The PL--SCE accuracy gap is
+small on DeiT-Tiny and Swin-Tiny relative to the observed seed variation;
+we report the mean ordering without claiming statistical significance.
+
+\input{fig/tab_architecture_results}
+\clearpage
+\subsection{CIFAR-100 Results}
+\label{app:cifar100-results}
+We evaluate all 16 augmentation settings on CIFAR-100 with the same four
+ViT backbones, 256-pixel inputs, and the 110-epoch protocol. Each result
+uses seeds 42, 43, and 44. TreemapMix uses the settings from the primary
+comparison: $K=4$ for SCE and the mixed objective, $K=6$ for PL, and a
+cosine $\alpha$ schedule from $0.1$ to $0.5$.
+Figure~\ref{fig:cifar100-results} reports Top-1 accuracy and ECE with 15 bins.
+These experiments assess transfer of the augmentation recipes to a smaller
+dataset under our training setup.
+
+TreemapMix-SCE has the lowest ECE on all four backbones, ranging from
+1.62 to 1.87 percentage points. TreemapMix-PL has the highest Top-1 accuracy
+on ViT-Wee, Medium, and Betwixt, reaching 75.72\%, 75.97\%, and 76.39\%,
+respectively. On ViT-Little, ResizeMix reaches 75.54\% compared with
+75.42\% for PL. The mixed objective does not consistently improve on either
+individual objective. These results retain the accuracy--calibration
+trade-off, without a uniform accuracy advantage across every model.
+
+\input{fig/fig_cifar100_results}
+
+\subsection{Optimizer Robustness}
+\label{app:optimizer-robustness}
+We next test whether the gains of TreemapMix persist across different
+optimizers on ImageNet-1K. We compare Muon
+\citep{jordan2024muon}, AdamW (Adam with decoupled weight decay)
+\citep{loshchilovDecoupledWeightDecay2019}, and NAdamW (Nesterov-accelerated
+Adam with decoupled weight decay)
+\citep{Dahl2023AlgoPerf,Kasimbeg2025AlgoPerfResults}. We keep the core
+TreemapMix hyperparameters fixed across optimizers. Because the main
+experiments use NAdamW with a learning rate of $1.5\times10^{-3}$, we retain
+this value for NAdamW and also use it for AdamW to keep the Adam-style
+optimizer comparison matched. For Muon, we use a separately tuned learning
+rate of $5\times10^{-3}$.
+
+Table~\ref{tab:in1k-optimizer-results} compares Mixup+Cutmix,
+TreemapMix-SCE, and TreemapMix-PL under AdamW, Muon, and NAdamW for
+single-seed runs using seed 42. These results should be interpreted as an
+optimizer-sensitivity check rather than a definitive optimizer ranking. Across
+the tested optimizers, the main qualitative pattern from the primary
+ImageNet-1K comparison is preserved: TreemapMix-PL generally gives the highest
+Top-1 accuracy, whereas TreemapMix-SCE gives the lowest ECE in most settings.
+Muon gives the strongest Top-1 accuracy in several configurations, but this
+gain is often accompanied by higher ECE. AdamW and NAdamW are more competitive
+on calibration, although neither dominates across both metrics. Overall, these
+single-seed results suggest that TreemapMix's accuracy and calibration trends
+are not specific to one optimizer, while the absolute accuracy-calibration
+trade-off still depends on the optimizer.
+
+\input{fig/tab_in1k_optimizer_comparison}
+
+\subsection{ImageNet-1K Hyperparameter Sensitivity}
 \label{app:in1k-hparam-sensitivity}
 
 TreemapMix introduces two main hyperparameters: the Dirichlet concentration
@@ -668,7 +836,7 @@ from $0.1$ to a final value between $0.5$ and $1.0$. We treat these additional
 choices as part of the tuned recipe rather than conclusions from the fixed
 sweep.
 
-\section{Qualitative Visualizations and Attribution Analysis}
+\subsection{Qualitative Visualizations and Attribution Analysis}
 \label{app:qualitative-visualizations}
 
 Figures~\ref{fig:treemapmix-randomness}, \ref{fig:treemapmix-k-sweep}, and
@@ -715,152 +883,3 @@ distributes evidence across composed regions, and the PL objective makes this
 effect most explicit.
 
 \input{fig/fig_feature_space_analysis}
-
-\section{Optimizer Robustness}
-\label{app:optimizer-robustness}
-We next test whether the gains of TreemapMix persist across different
-optimizers on ImageNet-1K. We compare Muon
-\citep{jordan2024muon}, AdamW (Adam with decoupled weight decay)
-\citep{loshchilovDecoupledWeightDecay2019}, and NAdamW (Nesterov-accelerated
-Adam with decoupled weight decay)
-\citep{Dahl2023AlgoPerf,Kasimbeg2025AlgoPerfResults}. We keep the core
-TreemapMix hyperparameters fixed across optimizers. Because the main
-experiments use NAdamW with a learning rate of $1.5\times10^{-3}$, we retain
-this value for NAdamW and also use it for AdamW to keep the Adam-style
-optimizer comparison matched. For Muon, we use a separately tuned learning
-rate of $5\times10^{-3}$.
-
-Table~\ref{tab:in1k-optimizer-results} compares Mixup+Cutmix,
-TreemapMix-SCE, and TreemapMix-PL under AdamW, Muon, and NAdamW for
-single-seed runs using seed 42. These results should be interpreted as an
-optimizer-sensitivity check rather than a definitive optimizer ranking. Across
-the tested optimizers, the main qualitative pattern from the primary
-ImageNet-1K comparison is preserved: TreemapMix-PL generally gives the highest
-Top-1 accuracy, whereas TreemapMix-SCE gives the lowest ECE in most settings.
-Muon gives the strongest Top-1 accuracy in several configurations, but this
-gain is often accompanied by higher ECE. AdamW and NAdamW are more competitive
-on calibration, although neither dominates across both metrics. Overall, these
-single-seed results suggest that TreemapMix's accuracy and calibration trends
-are not specific to one optimizer, while the absolute accuracy-calibration
-trade-off still depends on the optimizer.
-
-\input{fig/tab_in1k_optimizer_comparison}
-
-\section{Full ImageNet-1K Results}
-\label{app:in1k-confidence-results}
-
-Tables~\ref{tab:in1k-full-results-acc},
-\ref{tab:in1k-full-results-ece},
-\ref{tab:in1k-full-results-nll}, and
-\ref{tab:in1k-full-results-brier} report the full ImageNet-1K
-main-comparison metrics. Specifically,
-Tables~\ref{tab:in1k-full-results-acc} and
-\ref{tab:in1k-full-results-ece} report the Top-1 accuracy and ECE values
-shown in Figure~\ref{fig:in1k-main-results-top1}, while
-Tables~\ref{tab:in1k-full-results-nll} and
-\ref{tab:in1k-full-results-brier} report the NLL and Brier score values for
-the same runs.
-
-\input{fig/tab_in1k_full_results_acc}
-
-\input{fig/tab_in1k_full_results_ece}
-
-\input{fig/tab_in1k_full_results_nll}
-
-\input{fig/tab_in1k_full_results_brier}
-
-\clearpage
-\section{CIFAR-100 Results}
-\label{app:cifar100-results}
-We evaluate all 16 augmentation settings on CIFAR-100 with the same four
-ViT backbones, 256-pixel inputs, and the 110-epoch protocol. Each result
-uses seeds 42, 43, and 44. TreemapMix uses the settings from the primary
-comparison: $K=4$ for SCE and the mixed objective, $K=6$ for PL, and a
-cosine $\alpha$ schedule from $0.1$ to $0.5$.
-Figure~\ref{fig:cifar100-results} reports Top-1 accuracy and ECE with 15 bins.
-These experiments assess transfer of the augmentation recipes to a smaller
-dataset under our training setup.
-
-TreemapMix-SCE has the lowest ECE on all four backbones, ranging from
-1.62 to 1.87 percentage points. TreemapMix-PL has the highest Top-1 accuracy
-on ViT-Wee, Medium, and Betwixt, reaching 75.72\%, 75.97\%, and 76.39\%,
-respectively. On ViT-Little, ResizeMix reaches 75.54\% compared with
-75.42\% for PL. The mixed objective does not consistently improve on either
-individual objective. These results retain the accuracy--calibration
-trade-off, without a uniform accuracy advantage across every model.
-
-\input{fig/fig_cifar100_results}
-
-\clearpage
-\section{Cross-Architecture Results}
-\label{app:architecture-results}
-To test whether the ImageNet-1K results extend beyond the four primary
-ViT/EVA02 variants, we evaluate ConvNeXtV2-Nano, DeiT-Tiny, and Swin-Tiny
-under the matched 110-epoch protocol with seeds 42, 43, and 44.
-We compare Mixup+CutMix, RICAP, TreemapMix-SCE, and TreemapMix-PL, retaining
-the TreemapMix settings selected for the primary experiments.
-Table~\ref{tab:architecture-results} reports accuracy and ECE.
-
-PL gives the highest mean accuracy for each architecture, improving over
-Mixup+CutMix by 0.66, 2.95, and 0.95 percentage points for ConvNeXtV2-Nano,
-DeiT-Tiny, and Swin-Tiny. SCE has the lowest ECE for all three, at 2.74,
-1.32, and 2.52 percentage points, respectively. The PL--SCE accuracy gap is
-small on DeiT-Tiny and Swin-Tiny relative to the observed seed variation;
-we report the mean ordering without claiming statistical significance.
-
-\input{fig/tab_architecture_results}
-
-\clearpage
-\section{COCO Transfer Details}
-\label{app:det-hparams}
-
-Table~\ref{tab:det-hparams} summarizes the ViTDet-style configurations used
-for the COCO transfer experiments. In all cases, \texttt{train.init\_checkpoint}
-is set to the corresponding checkpoint from the main classification
-experiments, and we fine-tune a Mask R-CNN model with a ViTDet-style adapter
-for 30 epochs on COCO.
-
-\begin{table*}[t]
-  \centering
-  \small
-  \caption{Hyperparameters for the object-detection transfer experiments with
-  a ViTDet-style adapter and Mask R-CNN on COCO.}
-  \label{tab:det-hparams}
-  \begin{tabular}{lccccccc}
-    \toprule
-    Model & Embed Dim & Depth & Heads & MLP Ratio & Drop Path & LR & Layer Decay \\
-    \midrule
-    ViT-Wee & 256 & 14 & 4 & 5.0 & 0.1 & 6.0e-4 & 0.7 \\
-    ViT-Betwixt & 640 & 12 & 10 & 4.0 & 0.1 & 8.0e-4 & 0.7 \\
-    \bottomrule
-  \end{tabular}%
-\end{table*}
-
-Table~\ref{tab:coco-transfer-ap50} reports the box AP50 and mask AP50 metrics
-corresponding to the main-paper COCO transfer results in
-Table~\ref{tab:coco-transfer-results}.
-
-\input{fig/tab_coco_transfer_box_ap50}
-
-\section{Implementation Details}
-\paragraph{Loss functions in code}
-
-We include concise PyTorch reference implementations of TreemapMix-SCE
-(Figure~\ref{fig:treemapmix-sce-code}), TreemapMix-PL
-(Figure~\ref{fig:treemapmix-pl-code}), and the mixed-loss variant
-(Figure~\ref{fig:treemapmix-mixed-code}) used in our experiments.
-
-\input{fig/fig_treemapmix_sce_code}
-
-\input{fig/fig_treemapmix_pl_code}
-
-\input{fig/fig_treemapmix_mixed_code}
-
-
-\paragraph{Runtime overhead}
-Section~\ref{sec:runtime} and Table~\ref{tab:augmentation-loader-runtime}
-report measured loader throughput and host-memory usage. The training
-configuration uses a prefetch factor of 2, which allows CPU preparation to
-overlap GPU computation. The isolated loader benchmark does not measure
-how much of this overhead is hidden during training, so it does not
-establish an end-to-end per-epoch timing comparison.
