@@ -11,17 +11,13 @@ and a per-GPU batch size of 512. Runs were executed on an H20 cluster whose
 nodes each contained eight GPUs and 2 TB of system RAM; a custom scheduler
 placed multiple independent two-GPU experiments on the same node to improve
 utilization. Across the reported main and appendix experiments, total training
-compute was approximately 5.5k GPU-hours. Peak observed host-memory usage
-remained below 400 GB per node, indicating that the provisioned host memory
-substantially exceeded the observed requirements; minimum host-memory
-requirements were not separately profiled. ImageNet-1K is used as the primary
+compute was approximately 5.5k GPU-hours while Peak observed host-memory usage
+remained below 400 GB per node. ImageNet-1K is used as the primary
 reference benchmark~\citep{dengImageNetLargescaleHierarchical2009}.
 
 Our primary comparison uses four compact Vision Transformer (ViT)/EVA02-family variants implemented
 in \texttt{timm}~\citep{fangEVA02VisualRepresentation2024}. Unless specified
-otherwise, each experiment is repeated with seeds 42, 43, and 44. For the balanced-data experiments, we use a balanced round-robin dataloader
-that provides class-diverse source images for each composed sample. The
-ImageNet-LT experiment instead preserves the natural class frequencies.
+otherwise, each experiment is repeated with seeds 42, 43, and 44.
 Appendix~\ref{app:appendix-aug-configs} gives an overview of the training configurations and hyperparameter settings, and Appendix~\ref{app:loss-code} provides reference implementations of the loss functions.
 
 \paragraph{Comparison to Image Augmentation Baselines:}

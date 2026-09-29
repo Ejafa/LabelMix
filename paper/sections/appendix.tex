@@ -32,7 +32,7 @@ Each row is shuffled and split into groups of size $K$. When $K\le C$, complete 
 \subsection{Incomplete groups and row-size preservation}
 
 Suppose a row contains $N_{\mathrm{row}}$ samples. Write \(N_{\mathrm{row}}=K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor+r\), where \(0\le r<K\). TreemapMix processes the first \(K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor\)
-samples as complete groups of size $K$. If $r>0$, the remaining $r$ samples are padded with $K-r$ additional samples from the same row to form a temporary group of size $K$. Whenever possible, padding samples are chosen so that their labels are distinct from the remaining $r$ labels. If this is not possible, repeated labels are allowed. Repeated labels are handled by target aggregation in TreemapMix-SCE and TreemapMix-PL, as described in Sections~\ref{sec:soft-ce} and~\ref{sec:pl}.
+samples as complete groups of size $K$. If $r>0$, the remaining $r$ samples are padded with $K-r$ samples drawn without replacement from earlier entries in the same row, and only the first $r$ cyclic outputs are retained. This padding can repeat labels. In natural-frequency mode, rows shorter than $K$ are passed through as unmixed samples. The padding can repeat labels: SCE sums their contributions, while the PL implementation processes them as separate entries without aggregation.
 
 TreemapMix generates $K$ cyclic views from the temporary group but retains only the first $r$ outputs. Therefore, the total number of final TreemapMix samples contributed by the row is \(K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor+r=N_{\mathrm{row}}\).
 Thus, the number of TreemapMix outputs matches the number of samples in the constructed row stream, even when a row size is not divisible by $K$.
@@ -76,7 +76,7 @@ These transformations preserve region areas, so they increase spatial diversity 
 
 Cyclic views are a tractable alternative to enumerating all $K!$ image-to-slot assignments. If an epoch contains $G$ complete TreemapMix groups, full permutation enumeration would produce $K!G$ mixed images, increasing the sample count by \(\frac{K!G}{KG}=(K-1)!\). In contrast, cyclic TreemapMix produces exactly $K$ views per group, giving $KG$ mixed images and preserving the number of training samples after class-balanced row construction.
 
-Cyclic permutation is designed to decouple source labels from fixed spatial slots. Although any individual mixed view may assign a class to a small or large region, the full cyclic orbit exposes every source image to every slot exactly once. Therefore, when the source labels in a group are distinct, every participating class is paired once with every area weight and, for PL training, every rank position induced by the sorted slot weights. When labels repeat, the same statement holds at the source-image level, and class-level targets are obtained by accumulating repeated labels. Appendix Lemma~\ref{lem:cyclic-balancing} formalizes the resulting slot-exposure balance.
+Cyclic permutation is designed to decouple source labels from fixed spatial slots. Although any individual mixed view may assign a class to a small or large region, the full cyclic orbit exposes every source image to every slot exactly once. Therefore, when the source labels in a group are distinct, every participating class is paired once with every area weight and, for PL training, every rank position induced by the sorted slot weights. Appendix Lemma~\ref{lem:cyclic-balancing} formalizes the resulting slot-exposure balance.
 
 \section{Soft TreemapMix Cross-Entropy Derivations}\label{app:soft-ce}
 
@@ -228,7 +228,7 @@ has the same variance as \(q_c^{(s)}\), since \(p_c\) is fixed under the conditi
 
 \section{TreemapMix Plackett--Luce Derivations}\label{app:pl}
 
-We use the notation introduced in Section~\ref{sec:pl}. Given a sparse TreemapMix target \(\mathcal{T}=\{(c_i,\eta_i)\}_{i=1}^{K}\), the aggregated class weight is \(\rho_c=\sum_{i=1}^{K}\eta_i\mathbf{1}[c_i=c]\). Let \(\mathcal{R}=\{c:\rho_c>0\}\) and \(L=|\mathcal{R}|\), and let \(\rho_{r_1}\ge\rho_{r_2}\ge\cdots\ge\rho_{r_L}\) with \(r_1\succ r_2\succ\cdots\succ r_L\) be the descending order over unique target classes. Ties are broken uniformly at random. Let \(\mathcal{U}=\{1,\dots,C\}\setminus\mathcal{R}\), with \(p_{\mathcal U}=1-\sum_{\ell=1}^{L}p_{r_\ell}\).
+The derivation assumes $K$ distinct target classes. Let $r_1\succ\cdots\succ r_K$ denote their descending order by area weight, set $L=K$, and write $\rho_{r_\ell}$ for the area weight assigned to class $r_\ell$. Let $\mathcal{U}=\{1,\dots,C\}\setminus\{r_1,\dots,r_K\}$ be the absent classes, with total predicted probability mass $p_{\mathcal U}=1-\sum_{j=1}^{K}p_{r_j}$.
 
 \subsection{From the Plackett--Luce probability to TreemapMix-PL}
 
@@ -260,7 +260,7 @@ p_{\mathcal U}
 \sum_{j=\ell}^{L}p_{r_j}
 }.
 \]
-TreemapMix-PL uses the same ranking but weights each term by the aggregated target mass $\rho_{r_\ell}$:
+TreemapMix-PL weights each ranking term by its area weight $\eta_{r_\ell}$:
 \[
 \mathcal{L}_{\mathrm{TM\text{-}PL}}
 =
@@ -315,7 +315,7 @@ we obtain
 \log D_i-\log p_{a_i}
 \right],
 \]
-which is the ascending implementation form in \eqref{eq:lm-pl-asc}. For a mini-batch of size $B$, where sample $b$ may have $L_b$ unique target classes, the implementation uses
+which is the ascending implementation form in \eqref{eq:lm-pl-asc}. For a mini-batch of size $B$, where sample $b$ has $L_b$ valid ranked entries, the implementation uses
 \[
 \mathcal{L}_{\mathrm{TM\text{-}PL}}
 =
@@ -599,7 +599,7 @@ $\alpha$ schedule.
 \label{app:det-hparams}
 
 Table~\ref{tab:det-hparams} summarizes the ViTDet-style configurations used
-for the COCO transfer experiments. In all cases, \texttt{train.init\_checkpoint}
+for the COCO transfer experiments. In all cases the starting point
 is set to the corresponding checkpoint from the main classification
 experiments, and we fine-tune a Mask R-CNN model with a ViTDet-style adapter
 for 30 epochs on COCO.
@@ -638,6 +638,7 @@ We include concise PyTorch reference implementations of TreemapMix-SCE
 
 \subsection{Runtime overhead}
 \label{app:runtime-overhead}
+For the configurations in this benchmark, augmentations are applied in the data loader.
 Table~\ref{tab:augmentation-loader-runtime} isolates data-loader throughput
 and host-memory usage for six augmentation configurations. The benchmark
 measures CPU-side loading and augmentation without model forward or backward
@@ -717,8 +718,6 @@ ViT backbones, 256-pixel inputs, and the 110-epoch protocol. TreemapMix uses the
 comparison: $K=4$ for SCE and the mixed objective, $K=6$ for PL, and a
 cosine $\alpha$ schedule from $0.1$ to $0.5$.
 Figure~\ref{fig:cifar100-results} reports Top-1 accuracy and ECE with 15 bins.
-These experiments assess transfer of the augmentation recipes to a smaller
-dataset under our training setup.
 
 TreemapMix-SCE has the lowest ECE on all four backbones, ranging from
 1.62 to 1.87 percentage points. TreemapMix-PL has the highest Top-1 accuracy
@@ -818,11 +817,8 @@ These results indicate that choosing $\alpha$ is more important than choosing
 $K$ for reliable TreemapMix performance. For calibration-focused use, the
 sweep supports TreemapMix-SCE with $\alpha \le 1$ and $K \le 5$. For
 accuracy-focused use, the sweep supports TreemapMix-PL with $\alpha \le 0.4$
-and $K \le 6$. In our tuned main experiments, we further improve performance
-by filtering layouts with extreme patch aspect ratios and scheduling $\alpha$
-from $0.1$ to $0.5$. We treat these additional
-choices as part of the tuned recipe rather than conclusions from the fixed
-sweep.
+and $K \le 6$. The main recipe filters layouts with extreme patch aspect ratios and schedules
+$\alpha$ from $0.1$ to $0.5$. These settings were not isolated in this sweep.
 
 \subsection{Qualitative Visualizations and Attribution Analysis}
 \label{app:qualitative-visualizations}
@@ -856,9 +852,8 @@ between the two TreemapMix losses. For the boathouse example, TreemapMix-SCE ass
 of 0.01, while the other methods round to 0.00; rounded zeros do not imply
 exactly zero probability. By contrast,
 TreemapMix-PL tends to assign substantially higher probability to the largest
-region. This is consistent with its ranking objective: once the relative logit
-ordering is satisfied, the loss does not strongly penalize concentration of
-probability mass on the dominant region.
+region. This is consistent with the ranking objective, which emphasizes relative
+ordering rather than matching the target probabilities.
 
 The attribution overlays are often more focused on the target regions for the
 TreemapMix-trained models, including the suit and boathouse examples with smaller target areas. In contrast, the non-TreemapMix baselines often concentrate

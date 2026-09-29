@@ -4,8 +4,8 @@ We introduced TreemapMix, a Dirichlet-controlled $K$-way image-mixing
 augmentation that composes multiple labeled images into area-proportional
 treemap layouts while preserving the training sample count. By generating
 cyclic views of each source group, TreemapMix exposes each source image to
-different region sizes and rank positions, enabling two complementary
-supervision objectives: area-weighted soft cross-entropy for probability
+different region sizes and rank positions. The same composition supports two
+complementary supervision objectives: area-weighted soft cross-entropy for probability
 matching and Plackett-Luce ranking for area-induced ordinal supervision.
 
 Empirically, TreemapMix improves ImageNet-1K classification under matched
@@ -13,15 +13,12 @@ training recipes. TreemapMix-SCE gives the strongest calibration, while
 TreemapMix-PL gives the strongest Top-1 accuracy and improves area-logit
 alignment. COCO transfer experiments further suggest that TreemapMix-pretrained
 representations remain useful for detection and instance segmentation.
-The accuracy--calibration pattern also extends to the additional ImageNet-1K
-architectures and largely to CIFAR-100. On ImageNet-LT, PL improves accuracy,
-but SCE loses its calibration advantage. Loader measurements quantify the
-additional host-side throughput and memory cost.
+The accuracy-calibration pattern also extends to the additional ImageNet-1K
+architectures and largely to CIFAR-100. On ImageNet-LT, TreemapMix-PL improves
+accuracy, while TreemapMix-SCE does not retain its calibration advantage.
 
-Despite these improvements, TreemapMix relies on class-diverse source groups
-and is most effective when mixed images contain distinct target labels.
-Repeated labels require area aggregation, which can weaken the Plackett-Luce
-signal, especially on imbalanced or long-tailed datasets. TreemapMix also
-introduces composition hyperparameters such as $K$ and $\alpha$, motivating
-future work on adaptive grouping, automatic schedules, and extensions to
-contrastive or self-supervised learning.
+Our experiments use groups with distinct source labels. Together, the results
+show how a shared spatial composition can support both probability matching
+and ranking supervision, opening directions for adaptive grouping, automatic
+schedules for $K$ and $\alpha$, and extensions to contrastive or
+self-supervised learning.
