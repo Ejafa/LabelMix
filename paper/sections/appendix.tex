@@ -1,5 +1,3 @@
-%%%%%%%%%%%% method
-
 \section{TreemapMix Augmentation Details}\label{app:labelmix-details}
 
 This appendix provides implementation details omitted from the main Method section. We use the notation introduced in Section~\ref{sec:method}.
@@ -34,7 +32,7 @@ Each row is shuffled and split into groups of size $K$. When $K\le C$, complete 
 \subsection{Incomplete groups and row-size preservation}
 
 Suppose a row contains $N_{\mathrm{row}}$ samples. Write \(N_{\mathrm{row}}=K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor+r\), where \(0\le r<K\). TreemapMix processes the first \(K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor\)
-samples as complete groups of size $K$. If $r>0$, the remaining $r$ samples are padded with $K-r$ additional samples from the same row to form a temporary group of size $K$. Whenever possible, padding samples are chosen so that their labels are distinct from the remaining $r$ labels. If this is not possible, repeated labels are allowed. Repeated labels are handled by target aggregation in TM-CE and TM-PL, as described in Sections~\ref{sec:soft-ce} and~\ref{sec:pl}.
+samples as complete groups of size $K$. If $r>0$, the remaining $r$ samples are padded with $K-r$ additional samples from the same row to form a temporary group of size $K$. Whenever possible, padding samples are chosen so that their labels are distinct from the remaining $r$ labels. If this is not possible, repeated labels are allowed. Repeated labels are handled by target aggregation in TreemapMix-SCE and TreemapMix-PL, as described in Sections~\ref{sec:soft-ce} and~\ref{sec:pl}.
 
 TreemapMix generates $K$ cyclic views from the temporary group but retains only the first $r$ outputs. Therefore, the total number of final TreemapMix samples contributed by the row is \(K\left\lfloor\frac{N_{\mathrm{row}}}{K}\right\rfloor+r=N_{\mathrm{row}}\).
 Thus, the number of TreemapMix outputs matches the number of samples in the constructed row stream, even when a row size is not divisible by $K$.
@@ -511,7 +509,7 @@ p_u
 \sum_{i=1}^{K}
 \frac{\mu_i(\alpha)}{D_i}.
 \]
-Thus, in the distinct-label case, $\alpha$ affects TreemapMix-PL through the order statistics of the sampled Dirichlet weights. Smaller $\alpha$ widens the expected gap between low- and high-rank weights, concentrating supervision on dominant labels. As $\alpha$ increases, the sorted weights concentrate near $1/K$, so the loss approaches a constant rescaling of an unweighted ListMLE-style objective. This proves that, in the distinct-label case, the expected TM-PL gradient depends on $\alpha$ through the sorted Dirichlet weights assigned to rank positions.
+Thus, in the distinct-label case, $\alpha$ affects TreemapMix-PL through the order statistics of the sampled Dirichlet weights. Smaller $\alpha$ widens the expected gap between low- and high-rank weights, concentrating supervision on dominant labels. As $\alpha$ increases, the sorted weights concentrate near $1/K$, so the loss approaches a constant rescaling of an unweighted ListMLE-style objective. This proves that, in the distinct-label case, the expected TreemapMix-PL gradient depends on $\alpha$ through the sorted Dirichlet weights assigned to rank positions.
 
 \section{Proof of Cyclic Permutation Balancing}\label{app:cyclic-balancing}
 
@@ -555,11 +553,7 @@ q_c^{(s)}
 \]
 because $\sum_{i=1}^{K}\lambda_i=1$. This proves \eqref{eq:cyclic-balance-soft}.
 
-When the $K$ source labels are distinct, $m_c=1$ for every participating class and $m_c=0$ for every absent class. Therefore, each participating class appears exactly once in every slot across the $K$ cyclic views. Since slots are associated with sorted weights and rank positions, cyclic permutation also prevents any participating class from being permanently tied to a fixed TreemapMix weight or rank. The PL denominator terms remain prediction-dependent, so this balancing does not remove ordinal competition; it only removes persistent source-label-to-slot bias. This proves that cyclic assignment removes persistent source-label-to-slot bias while leaving the prediction-dependent PL competition intact.
-
-
-%%%%%%%%%%%%
-
+When the $K$ source labels are distinct, $m_c=1$ for every participating class and $m_c=0$ for every absent class. Therefore, each participating class appears exactly once in every slot across the $K$ cyclic views. Since slots are associated with sorted weights and rank positions, cyclic permutation also prevents any participating class from being permanently tied to a fixed TreemapMix weight or rank. The PL denominator terms remain prediction-dependent, so this balancing does not remove ordinal competition; it only removes persistent source-label-to-slot bias.
 
 \section{Implementation Details}
 \subsection{Experimental Protocol and Hyperparameters}
@@ -577,25 +571,23 @@ optimizer and training settings for readability.
 The baseline recipes are adapted from established \texttt{timm} ImageNet-1K
 training configurations~\citep{rw2019timm,262588213843476SearchingBetterVit}.
 Because our main study uses a shorter 110-epoch budget than many reference
-recipes, we make only schedule-level adaptations: we disable
+recipes, we adapt the training recipe: we disable
 \texttt{aug\_repeats}, adjust the learning rate, disable gradient clipping, and keep the remaining regularization settings fixed across methods.
 All methods therefore share the same architecture, data budget, optimizer schedule, and evaluation protocol. The comparison isolates augmentation and loss effects, but does not claim per-baseline optimality.
 
-All runs use a global batch size of 1024. We omit epochs and warmup epochs
+The main ImageNet-1K comparison uses a global batch size of 1024. We omit epochs and warmup epochs
 from Tables~\ref{tab:baseline-hparams-aug} and
 \ref{tab:baseline-hparams-train} because those values are held fixed across
 runs. The augmentation table lists the ImageNet-1K augmentation recipes used
 in the main comparisons.
 
-All RICAP runs use the same auxiliary settings, which we selected after local tests: the augmentation is
+For the main comparison, RICAP uses the following auxiliary settings: the augmentation is
 applied with probability 0.5, disabled for the final 10 epochs, allowed to
 vary the crop center over a ratio range from 0.5 to 1.5, and allowed to vary
-the crop scale from 0.8 to 1.2. All TreemapMix-SCE and
-TreemapMix-Mixed runs use $K=4$ with a cosine $\alpha$ schedule from $0.1$
-to $0.5$, while all TreemapMix-PL runs use $K=6$ with the same cosine
-$\alpha$ schedule. We describe these fixed RICAP and TreemapMix values here
-rather than repeating them as separate columns in
-Table~\ref{tab:baseline-hparams-aug}.
+the crop scale from 0.8 to 1.2. In this comparison, TreemapMix-SCE and
+TreemapMix-mixed runs use $K=4$ with a cosine $\alpha$ schedule from $0.1$
+to $0.5$, while TreemapMix-PL runs use $K=6$ with the same cosine
+$\alpha$ schedule.
 
 \input{fig/tab_timm_adaptations}
 
@@ -612,11 +604,13 @@ is set to the corresponding checkpoint from the main classification
 experiments, and we fine-tune a Mask R-CNN model with a ViTDet-style adapter
 for 30 epochs on COCO.
 
-\begin{table*}[t]
+\begin{table*}[!htbp]
   \centering
   \small
   \caption{Hyperparameters for the object-detection transfer experiments with
-  a ViTDet-style adapter and Mask R-CNN on COCO.}
+  a ViTDet-style adapter and Mask R-CNN on COCO. Embed Dim is the embedding
+  dimension, Heads is the attention-head count, MLP Ratio is the multilayer
+  perceptron expansion ratio, and LR is the learning rate.}
   \label{tab:det-hparams}
   \begin{tabular}{lccccccc}
     \toprule
@@ -657,8 +651,7 @@ TreemapMix-PL at $K=6$ reaches 954.3 images/s, a 25.6\% reduction.
 The corresponding peak USS increases from 17.76 GiB to 20.16 and 21.74 GiB.
 Mixup+CutMix reaches 1223.4 images/s, a 4.6\% reduction.
 The RICAP configuration reaches 364.8 images/s with 25.18 GiB peak USS.
-TreemapMix therefore adds measurable host-side cost; these loader
-measurements alone do not quantify changes in end-to-end GPU training time.
+TreemapMix therefore adds measurable host-side cost.
 
 \input{fig/tab_augmentation_loader_runtime}
 
@@ -666,7 +659,6 @@ The training configuration uses a prefetch factor of 2, which allows CPU
 preparation to overlap GPU computation. The isolated loader benchmark does
 not measure how much of this overhead is hidden during training, so it does
 not establish an end-to-end per-epoch timing comparison.
-
 
 \clearpage
 \section{Additional Experiments}
@@ -701,12 +693,11 @@ calibration remains sensitive to the class distribution.
 
 \input{fig/tab_long_tail_results}
 
-\clearpage
 \subsection{Cross-Architecture Results}
 \label{app:architecture-results}
 To test whether the ImageNet-1K results extend beyond the four primary
 ViT/EVA02 variants, we evaluate ConvNeXtV2-Nano, DeiT-Tiny, and Swin-Tiny
-under the matched 110-epoch protocol with seeds 42, 43, and 44.
+under the matched 110-epoch protocol.
 We compare Mixup+CutMix, RICAP, TreemapMix-SCE, and TreemapMix-PL, retaining
 the TreemapMix settings selected for the primary experiments.
 Table~\ref{tab:architecture-results} reports accuracy and ECE.
@@ -719,12 +710,10 @@ small on DeiT-Tiny and Swin-Tiny relative to the observed seed variation;
 we report the mean ordering without claiming statistical significance.
 
 \input{fig/tab_architecture_results}
-\clearpage
 \subsection{CIFAR-100 Results}
 \label{app:cifar100-results}
 We evaluate all 16 augmentation settings on CIFAR-100 with the same four
-ViT backbones, 256-pixel inputs, and the 110-epoch protocol. Each result
-uses seeds 42, 43, and 44. TreemapMix uses the settings from the primary
+ViT backbones, 256-pixel inputs, and the 110-epoch protocol. TreemapMix uses the settings from the primary
 comparison: $K=4$ for SCE and the mixed objective, $K=6$ for PL, and a
 cosine $\alpha$ schedule from $0.1$ to $0.5$.
 Figure~\ref{fig:cifar100-results} reports Top-1 accuracy and ECE with 15 bins.
@@ -746,8 +735,7 @@ trade-off, without a uniform accuracy advantage across every model.
 We next test whether the gains of TreemapMix persist across different
 optimizers on ImageNet-1K. We compare Muon
 \citep{jordan2024muon}, AdamW (Adam with decoupled weight decay)
-\citep{loshchilovDecoupledWeightDecay2019}, and NAdamW (Nesterov-accelerated
-Adam with decoupled weight decay)
+\citep{loshchilovDecoupledWeightDecay2019}, and NAdamW
 \citep{Dahl2023AlgoPerf,Kasimbeg2025AlgoPerfResults}. We keep the core
 TreemapMix hyperparameters fixed across optimizers. Because the main
 experiments use NAdamW with a learning rate of $1.5\times10^{-3}$, we retain
@@ -755,9 +743,9 @@ this value for NAdamW and also use it for AdamW to keep the Adam-style
 optimizer comparison matched. For Muon, we use a separately tuned learning
 rate of $5\times10^{-3}$.
 
-Table~\ref{tab:in1k-optimizer-results} compares Mixup+Cutmix,
+Table~\ref{tab:in1k-optimizer-results} compares Mixup+CutMix,
 TreemapMix-SCE, and TreemapMix-PL under AdamW, Muon, and NAdamW for
-single-seed runs using seed 42. These results should be interpreted as an
+the settings in the caption. These results should be interpreted as an
 optimizer-sensitivity check rather than a definitive optimizer ranking. Across
 the tested optimizers, the main qualitative pattern from the primary
 ImageNet-1K comparison is preserved: TreemapMix-PL generally gives the highest
@@ -808,11 +796,11 @@ trends.
 \input{fig/fig_in1k_hparam_heatmaps_appendix}
 
 For Top-1 accuracy, both TreemapMix-SCE and TreemapMix-PL perform best at
-relatively small $\alpha$ values and around $k=4$. Increasing $\alpha$ up to
+relatively small $\alpha$ values and around $K=4$. Increasing $\alpha$ up to
 approximately $1$ causes only modest degradation, while larger values lead to a
 clearer accuracy drop. This trend suggests that TreemapMix benefits from some
 imbalance among region areas rather than from nearly uniform region sizes.
-Larger $k$ values also tend to reduce Top-1 accuracy, but this effect is
+Larger $K$ values also tend to reduce Top-1 accuracy, but this effect is
 weaker and less uniform than the effect of $\alpha$. As $K$ increases,
 performance varies more strongly across $\alpha$ values, indicating that
 high-composition settings are more sensitive to the choice of mixing strength.
@@ -827,12 +815,12 @@ is less sensitive to hyperparameter variation, while TreemapMix-SCE achieves
 the strongest calibration when $\alpha$ and $K$ are chosen carefully.
 
 These results indicate that choosing $\alpha$ is more important than choosing
-$k$ for reliable TreemapMix performance. For calibration-focused use, the
+$K$ for reliable TreemapMix performance. For calibration-focused use, the
 sweep supports TreemapMix-SCE with $\alpha \le 1$ and $K \le 5$. For
 accuracy-focused use, the sweep supports TreemapMix-PL with $\alpha \le 0.4$
 and $K \le 6$. In our tuned main experiments, we further improve performance
 by filtering layouts with extreme patch aspect ratios and scheduling $\alpha$
-from $0.1$ to a final value between $0.5$ and $1.0$. We treat these additional
+from $0.1$ to $0.5$. We treat these additional
 choices as part of the tuned recipe rather than conclusions from the fixed
 sweep.
 
@@ -864,17 +852,16 @@ the input. This provides a qualitative view of which source regions contribute
 most strongly to a given class logit.
 
 Figure~\ref{fig:feature-space-analysis} highlights a qualitative difference
-between the two TreemapMix losses. TreemapMix-SCE is the only variant that
-assigns non-zero probabilities to several smaller target regions, which is
-consistent with its area-weighted soft-label objective. By contrast,
+between the two TreemapMix losses. For the boathouse example, TreemapMix-SCE assigns a displayed probability
+of 0.01, while the other methods round to 0.00; rounded zeros do not imply
+exactly zero probability. By contrast,
 TreemapMix-PL tends to assign substantially higher probability to the largest
 region. This is consistent with its ranking objective: once the relative logit
 ordering is satisfied, the loss does not strongly penalize concentration of
 probability mass on the dominant region.
 
 The attribution overlays are often more focused on the target regions for the
-TreemapMix-trained models, especially in Rows~3--5, where the target areas are
-relatively small. In contrast, the non-TreemapMix baselines often concentrate
+TreemapMix-trained models, including the suit and boathouse examples with smaller target areas. In contrast, the non-TreemapMix baselines often concentrate
 on more localized discriminative features. For example, in the Cougar row, the
 baseline attributions focus more strongly on the face. These qualitative
 results are not intended as standalone evidence, but they are consistent with
