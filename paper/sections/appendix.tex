@@ -714,8 +714,9 @@ we report the mean ordering without claiming statistical significance.
 \subsection{CIFAR-100 Results}
 \label{app:cifar100-results}
 We evaluate all 16 augmentation settings on CIFAR-100 with the same four
-ViT backbones, 256-pixel inputs, and the 110-epoch protocol. TreemapMix uses the settings from the primary
-comparison: $K=4$ for SCE and the mixed objective, $K=6$ for PL, and a
+ViT backbones and 256-pixel inputs. The schedule uses 200 training epochs plus
+10 warmup epochs. TreemapMix uses the settings from the primary comparison:
+$K=4$ for SCE and the mixed objective, $K=6$ for PL, and a
 cosine $\alpha$ schedule from $0.1$ to $0.5$.
 Figure~\ref{fig:cifar100-results} reports Top-1 accuracy and ECE with 15 bins.
 
